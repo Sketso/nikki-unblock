@@ -7,3 +7,8 @@ config nikki-unblock 'config'
 	option autosync_interval '6h'
 	# UI default language: ru | en  (each browser can override via the RU/EN switch).
 	option lang 'ru'
+	# VPN nodes tab: the profile's existing exit proxy-group (added nodes are pooled together with it).
+	# Set this to your mihomo profile's proxy-group name if it isn't "PROXY".
+	option base_group 'PROXY'
+	# Name of the combined group (base_group + added nodes) that "→ VPN (+nodes)" rules target.
+	option exit_group 'UNBLOCK'

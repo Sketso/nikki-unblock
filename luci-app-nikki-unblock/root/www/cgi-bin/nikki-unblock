@@ -7,10 +7,21 @@
 # Served by uhttpd CGI at http://<router>/cgi-bin/nikki-unblock (see also http://<router>/nikki).
 
 TYPE_DEFAULT="DOMAIN-SUFFIX"
-NODE_DEFAULT="PROXY"
 SELF="/www/cgi-bin/nikki-unblock"
 CRONTAB="/etc/crontabs/root"
 CRON_TAG="# nikki-unblock-autosync"
+
+# Exit routing group. Added VPN nodes join a fallback group `exit_group` (UNBLOCK) = the profile's
+# base group + user nodes. "Via VPN" rules target it. Kept as a config option for portability.
+EXIT_GROUP="$(uci -q get nikki-unblock.config.exit_group 2>/dev/null)"; [ -z "$EXIT_GROUP" ] && EXIT_GROUP="UNBLOCK"
+BASE_GROUP="$(uci -q get nikki-unblock.config.base_group 2>/dev/null)"; [ -z "$BASE_GROUP" ] && BASE_GROUP="PROXY"
+# "Via VPN" default target stays the profile's base group (safe/unchanged). The EXIT_GROUP (UNBLOCK,
+# = base + added nodes) is offered as an extra rule target and only exists while ≥1 node is added.
+NODE_DEFAULT="$BASE_GROUP"
+NODES_DIR="/etc/nikki-unblock/nodes"
+PROV_DIR="/etc/nikki-unblock/providers"
+MIXIN_FILE="/etc/nikki/mixin.yaml"
+MIHOMO_API="http://127.0.0.1:9090"
 
 # applist URL: UCI-configurable, defaults to the project's neutral GitHub Pages host.
 APPLIST_URL="$(uci -q get nikki-unblock.config.applist_url 2>/dev/null)"
@@ -177,7 +188,7 @@ presets_json() {
 config_json() {
 	json_header
 	lang=$(uci -q get nikki-unblock.config.lang 2>/dev/null); [ -z "$lang" ] && lang=ru
-	printf '{"lang":"%s","applist":"%s"}' "$lang" "$APPLIST_URL"
+	printf '{"lang":"%s","applist":"%s","exit_group":"%s"}' "$lang" "$APPLIST_URL" "$EXIT_GROUP"
 }
 
 apply_nikki() { /etc/init.d/nikki reload >/dev/null 2>&1; }
@@ -307,6 +318,156 @@ autosync_json() {
 	[ "$en" = 1 ] && printf '{"enabled":true,"interval":"%s"}' "$iv" || printf '{"enabled":false,"interval":"%s"}' "$iv"
 }
 
+# ---- VPN nodes (exit configs -> mihomo proxies via nikki mixin) -------------
+# Added nodes are stored as mihomo proxy YAML snippets in $NODES_DIR; subscription URLs as
+# proxy-provider snippets in $PROV_DIR. regen_mixin() rebuilds /etc/nikki/mixin.yaml (CLEAN yaml —
+# stock comments break nikki's yq merge) with an $EXIT_GROUP fallback = base group + all nodes.
+
+san_name() { printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]/-/g; s/-\{2,\}/-/g; s/^-//; s/-$//' | cut -c1-40; }
+urldec()   { printf '%b' "$(printf '%s' "$1" | sed 's/+/ /g; s/%/\\x/g')"; }
+b64dec()   { _d="$1"; case $((${#_d} % 4)) in 2) _d="${_d}==";; 3) _d="${_d}=";; esac; printf '%s' "$_d" | tr '_-' '/+' | base64 -d 2>/dev/null; }
+
+mihomo_secret() { grep -E "^secret:" /etc/nikki/run/config.yaml 2>/dev/null | head -1 | sed "s/secret:[[:space:]]*//; s/[\"' ]//g"; }
+# echo latency ms, or "x" on failure
+mihomo_delay() {
+	sec=$(mihomo_secret)
+	r=$(curl -s -m 14 -H "Authorization: Bearer $sec" "$MIHOMO_API/proxies/$(printf '%s' "$1" | sed 's/ /%20/g')/delay?url=http%3A%2F%2Fcp.cloudflare.com%2Fgenerate_204&timeout=10000" 2>/dev/null)
+	d=$(printf '%s' "$r" | jsonfilter -e '@.delay' 2>/dev/null)
+	[ -n "$d" ] && echo "$d" || echo "x"
+}
+
+# WireGuard/AmneziaWG .conf ($WGCONF) -> mihomo proxy yaml (2-space list-item indent)
+wgv() { grep -iE "^$1[[:space:]]*=" "$WGCONF" | head -1 | sed 's/^[^=]*=//; s/^[[:space:]]*//; s/[[:space:]]*$//; s/\r//g'; }
+wg_to_yaml() {   # $1=name
+	_ip=$(printf '%s' "$(wgv Address)" | cut -d/ -f1 | cut -d, -f1 | tr -d ' ')
+	_ep=$(wgv Endpoint); _srv="${_ep%:*}"; _prt="${_ep##*:}"; _psk=$(wgv PresharedKey); _jc=$(wgv Jc)
+	echo "  - name: $1"
+	echo "    type: wireguard"
+	echo "    server: $_srv"
+	echo "    port: $_prt"
+	echo "    ip: $_ip"
+	echo "    private-key: $(wgv PrivateKey)"
+	echo "    public-key: $(wgv PublicKey)"
+	[ -n "$_psk" ] && echo "    pre-shared-key: $_psk"
+	echo "    udp: true"
+	echo "    mtu: 1280"
+	echo "    remote-dns-resolve: false"
+	if [ -n "$_jc" ]; then
+		echo "    amnezia-wg-option:"
+		echo "      jc: $_jc"; echo "      jmin: $(wgv Jmin)"; echo "      jmax: $(wgv Jmax)"
+		echo "      s1: $(wgv S1)"; echo "      s2: $(wgv S2)"
+		[ -n "$(wgv S3)" ] && echo "      s3: $(wgv S3)"; [ -n "$(wgv S4)" ] && echo "      s4: $(wgv S4)"
+		echo "      h1: $(wgv H1)"; echo "      h2: $(wgv H2)"; echo "      h3: $(wgv H3)"; echo "      h4: $(wgv H4)"
+		[ -n "$(wgv I1)" ] && echo "      i1: \"$(wgv I1)\""
+	fi
+}
+
+# share-link -> mihomo proxy yaml. $1=link $2=name. echoes yaml, or nothing on unsupported.
+qparam() { printf '%s' "$1" | tr '&' '\n' | grep -i "^$2=" | head -1 | cut -d= -f2- ; }
+sharelink_to_yaml() {
+	_l="$1"; _n="$2"; _scheme="${_l%%://*}"; _rest="${_l#*://}"
+	_frag="${_rest##*#}"; _rest="${_rest%%#*}"
+	_query=""; case "$_rest" in *\?*) _query="${_rest#*\?}"; _rest="${_rest%%\?*}" ;; esac
+	case "$_scheme" in
+	vless|trojan)
+		_uup="${_rest%@*}"; _hostport="${_rest#*@}"; _host="${_hostport%:*}"; _port="${_hostport##*:}"
+		_sni=$(urldec "$(qparam "$_query" sni)"); [ -z "$_sni" ] && _sni=$(urldec "$(qparam "$_query" peer)")
+		_net=$(qparam "$_query" type); [ -z "$_net" ] && _net=tcp
+		_sec=$(qparam "$_query" security); _fp=$(qparam "$_query" fp); _path=$(urldec "$(qparam "$_query" path)"); _hosth=$(urldec "$(qparam "$_query" host)")
+		echo "  - name: $_n"
+		echo "    type: $_scheme"
+		echo "    server: $_host"; echo "    port: $_port"
+		[ "$_scheme" = vless ] && echo "    uuid: $_uup" || echo "    password: $_uup"
+		echo "    udp: true"; echo "    network: $_net"
+		[ "$_sec" = tls ] || [ "$_sec" = reality ] || [ "$_scheme" = trojan ] && echo "    tls: true"
+		[ -n "$_sni" ] && echo "    servername: $_sni"
+		[ -n "$_fp" ] && echo "    client-fingerprint: $_fp"
+		_pbk=$(qparam "$_query" pbk); _sid=$(qparam "$_query" sid)
+		[ -n "$_pbk" ] && { echo "    reality-opts:"; echo "      public-key: $_pbk"; [ -n "$_sid" ] && echo "      short-id: $_sid"; }
+		_flow=$(qparam "$_query" flow); [ -n "$_flow" ] && echo "    flow: $_flow"
+		case "$_net" in ws) echo "    ws-opts:"; echo "      path: ${_path:-/}"; [ -n "$_hosth" ] && { echo "      headers:"; echo "        Host: $_hosth"; } ;; esac
+		;;
+	ss)
+		# ss://base64(method:pass)@host:port  OR  ss://base64(method:pass@host:port)
+		_b="${_rest%@*}"; _hp="${_rest#*@}"
+		case "$_rest" in *@*) _mp=$(b64dec "$_b"); _host="${_hp%:*}"; _port="${_hp##*:}" ;;
+		                 *) _dec=$(b64dec "$_rest"); _mp="${_dec%@*}"; _hp2="${_dec#*@}"; _host="${_hp2%:*}"; _port="${_hp2##*:}" ;; esac
+		_method="${_mp%%:*}"; _pass="${_mp#*:}"
+		echo "  - name: $_n"; echo "    type: ss"; echo "    server: $_host"; echo "    port: $_port"
+		echo "    cipher: $_method"; echo "    password: $_pass"; echo "    udp: true"
+		;;
+	hysteria2|hy2)
+		_uup="${_rest%@*}"; _hp="${_rest#*@}"; _host="${_hp%:*}"; _port="${_hp##*:}"
+		_sni=$(urldec "$(qparam "$_query" sni)")
+		echo "  - name: $_n"; echo "    type: hysteria2"; echo "    server: $_host"; echo "    port: $_port"
+		echo "    password: $_uup"; [ -n "$_sni" ] && echo "    sni: $_sni"
+		;;
+	vmess)
+		_j=$(b64dec "$_rest")
+		_jf() { printf '%s' "$_j" | jsonfilter -e "@.$1" 2>/dev/null; }
+		echo "  - name: $_n"; echo "    type: vmess"; echo "    server: $(_jf add)"; echo "    port: $(_jf port)"
+		echo "    uuid: $(_jf id)"; echo "    alterId: $(_jf aid)"; echo "    cipher: auto"; echo "    udp: true"
+		_tls=$(_jf tls); [ "$_tls" = tls ] && echo "    tls: true"
+		_net=$(_jf net); [ -n "$_net" ] && echo "    network: $_net"
+		;;
+	*) return 1 ;;
+	esac
+}
+
+regen_mixin() {
+	[ -f "$MIXIN_FILE.orig" ] || cp "$MIXIN_FILE" "$MIXIN_FILE.orig" 2>/dev/null
+	havenode=0; for f in "$NODES_DIR"/*.yaml; do [ -f "$f" ] && havenode=1; done
+	haveprov=0; for f in "$PROV_DIR"/*.yaml; do [ -f "$f" ] && haveprov=1; done
+	# no nodes/providers -> restore stock mixin + disable file-mixin (zero risk to nikki)
+	if [ "$havenode" = 0 ] && [ "$haveprov" = 0 ]; then
+		[ -f "$MIXIN_FILE.orig" ] && cp "$MIXIN_FILE.orig" "$MIXIN_FILE"
+		uci set nikki.mixin.mixin_file_content=0 2>/dev/null; uci commit nikki 2>/dev/null
+		return 0
+	fi
+	{
+		echo "# managed by nikki-unblock — do not edit (source: /etc/nikki-unblock/)"
+		echo "nikki-proxies:"
+		for f in "$NODES_DIR"/*.yaml; do [ -f "$f" ] && cat "$f"; done
+		if [ "$haveprov" = 1 ]; then
+			echo "proxy-providers:"
+			for f in "$PROV_DIR"/*.yaml; do [ -f "$f" ] && cat "$f"; done
+		fi
+		echo "nikki-proxy-groups:"
+		echo "  - name: $EXIT_GROUP"
+		echo "    type: fallback"
+		echo "    url: http://cp.cloudflare.com/generate_204"
+		echo "    interval: 300"
+		echo "    proxies:"
+		echo "      - $BASE_GROUP"
+		for f in "$NODES_DIR"/*.yaml; do [ -f "$f" ] && grep -m1 'name:' "$f" | sed 's/.*name:[[:space:]]*//; s/^/      - /'; done
+		if [ "$haveprov" = 1 ]; then
+			echo "    use:"
+			for f in "$PROV_DIR"/*.yaml; do [ -f "$f" ] && head -1 "$f" | sed 's/[[:space:]]*\([^:]*\):.*/      - \1/'; done
+		fi
+	} > "$MIXIN_FILE"
+	uci set nikki.mixin.mixin_file_content=1 2>/dev/null; uci commit nikki 2>/dev/null
+}
+
+# list nodes/providers as JSON — NEVER includes secrets (name/type/host/kind only)
+nodes_json() {
+	json_header; printf '['; first=1
+	for f in "$NODES_DIR"/*.yaml; do
+		[ -f "$f" ] || continue
+		nm=$(grep -m1 'name:' "$f" | sed 's/.*name:[[:space:]]*//')
+		ty=$(grep -m1 'type:' "$f" | sed 's/.*type:[[:space:]]*//')
+		hs=$(grep -m1 'server:' "$f" | sed 's/.*server:[[:space:]]*//')
+		[ "$first" = 1 ] || printf ','; first=0
+		printf '{"id":"%s","kind":"node","name":"%s","type":"%s","host":"%s"}' "$(basename "$f" .yaml)" "$nm" "$ty" "$hs"
+	done
+	for f in "$PROV_DIR"/*.yaml; do
+		[ -f "$f" ] || continue
+		nm=$(head -1 "$f" | sed 's/[[:space:]]*\([^:]*\):.*/\1/')
+		[ "$first" = 1 ] || printf ','; first=0
+		printf '{"id":"%s","kind":"provider","name":"%s","type":"subscription","host":""}' "$(basename "$f" .yaml)" "$nm"
+	done
+	printf ']'
+}
+
 # cron / CLI entry: `nikki-unblock sync`
 [ "$1" = "sync" ] && { sync_all; exit 0; }
 
@@ -322,7 +483,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		rtype=$(get_param type)
 		case "$rtype" in DOMAIN-SUFFIX|DOMAIN|DOMAIN-KEYWORD|GEOSITE) ;; *) rtype=DOMAIN-SUFFIX ;; esac
 		rnode=$(get_param node)
-		case "$rnode" in PROXY|DIRECT|REJECT) ;; *) rnode=PROXY ;; esac
+		case "$rnode" in PROXY|DIRECT|REJECT|"$EXIT_GROUP") ;; *) rnode=PROXY ;; esac
 		case "$rtype" in
 			GEOSITE)        val=$(printf '%s' "$(get_param domain)" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9._!-]//g') ;;
 			DOMAIN-KEYWORD) val=$(printf '%s' "$(get_param domain)" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9.*-]//g') ;;
@@ -469,6 +630,66 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		lang=$(get_param lang | sed 's/[^a-z]//g'); case "$lang" in ru|en) ;; *) lang=ru ;; esac
 		uci set nikki-unblock.config.lang="$lang" 2>/dev/null; uci commit nikki-unblock 2>/dev/null
 		json_header; printf '{"ok":true,"lang":"%s"}' "$lang"; exit 0
+
+	elif [ "$action" = "nodeadd" ]; then
+		mkdir -p "$NODES_DIR" "$PROV_DIR"
+		raw=$(get_param config | sed 's/\r//g')
+		nm=$(get_param name)
+		fl=$(printf '%s' "$raw" | grep -vE '^[[:space:]]*$' | head -1)
+		err=""; kind=node; yaml=""; id=""; pid=""
+		case "$fl" in
+		"[Interface]"*)
+			WGCONF="/tmp/nu-wg.$$"; printf '%s\n' "$raw" > "$WGCONF"
+			[ -z "$nm" ] && nm="wg-$(grep -iE '^Endpoint' "$WGCONF" | head -1 | sed 's/.*=//; s/[[:space:]]//g; s/:.*//; s/\./-/g')"
+			[ "$(grep -ic '^Jc' "$WGCONF")" -ge 1 ] && nm=$(printf '%s' "$nm" | sed 's/^wg-/awg-/')
+			yaml=$(wg_to_yaml "$nm"); rm -f "$WGCONF"
+			;;
+		vless://*|vmess://*|trojan://*|ss://*|hysteria2://*|hy2://*|tuic://*)
+			[ -z "$nm" ] && { nm=$(printf '%s' "$fl" | sed 's/.*#//'); nm=$(urldec "$nm"); }
+			[ -z "$nm" ] && nm="link-node"
+			yaml=$(sharelink_to_yaml "$fl" "$nm") || err="unsupported link type"
+			[ -z "$yaml" ] && [ -z "$err" ] && err="could not parse link"
+			;;
+		http://*|https://*)
+			kind=provider; [ -z "$nm" ] && nm="sub-$(date +%s)"; pid=$(san_name "$nm")
+			{ echo "  $pid:"; echo "    type: http"; echo "    url: $fl"; echo "    interval: 86400"
+			  echo "    health-check: {enable: true, url: http://cp.cloudflare.com/generate_204, interval: 300}"; } > "$PROV_DIR/$pid.yaml"
+			;;
+		*)
+			yaml=$(printf '%s' "$raw" | awk '/^[[:space:]]*-[[:space:]]*name:/{p=1} p{print}' | sed 's/^[[:space:]]*-/  -/')
+			[ -z "$yaml" ] && err="paste a proxy line starting with '- name:'"
+			[ -z "$nm" ] && nm=$(printf '%s' "$yaml" | grep -m1 'name:' | sed 's/.*name:[[:space:]]*//; s/[",]//g')
+			;;
+		esac
+		[ -n "$err" ] && { json_header; printf '{"ok":false,"error":"%s"}' "$err"; exit 0; }
+		if [ "$kind" = node ]; then
+			id=$(san_name "$nm"); [ -z "$id" ] && id="node-$(date +%s)"
+			printf '%s\n' "$yaml" > "$NODES_DIR/$id.yaml"
+		fi
+		regen_mixin; apply_nikki; sleep 6
+		if ! pgrep -f /usr/bin/mihomo >/dev/null; then
+			# config broke nikki -> roll back and report
+			rm -f "$NODES_DIR/$id.yaml" "$PROV_DIR/$pid.yaml"
+			regen_mixin; apply_nikki
+			json_header; printf '{"ok":false,"error":"config rejected by mihomo (reverted)"}'; exit 0
+		fi
+		if [ "$kind" = node ]; then
+			rn=$(grep -m1 'name:' "$NODES_DIR/$id.yaml" | sed 's/.*name:[[:space:]]*//')
+			json_header; printf '{"ok":true,"kind":"node","id":"%s","name":"%s","delay":"%s"}' "$id" "$rn" "$(mihomo_delay "$rn")"; exit 0
+		fi
+		json_header; printf '{"ok":true,"kind":"provider","id":"%s"}' "$pid"; exit 0
+
+	elif [ "$action" = "nodedel" ]; then
+		id=$(get_param id | sed 's/[^a-z0-9_-]//g')
+		[ -n "$id" ] && rm -f "$NODES_DIR/$id.yaml" "$PROV_DIR/$id.yaml"
+		regen_mixin; apply_nikki
+		json_header; printf '{"ok":true}'; exit 0
+
+	elif [ "$action" = "nodecheck" ]; then
+		id=$(get_param id | sed 's/[^a-z0-9_-]//g')
+		rn=$(grep -m1 'name:' "$NODES_DIR/$id.yaml" 2>/dev/null | sed 's/.*name:[[:space:]]*//')
+		[ -z "$rn" ] && { json_header; printf '{"ok":false,"error":"not found"}'; exit 0; }
+		json_header; printf '{"ok":true,"delay":"%s"}' "$(mihomo_delay "$rn")"; exit 0
 	fi
 
 	json_header; printf '{"ok":false,"error":"unknown action"}'; exit 0
@@ -479,6 +700,7 @@ fi
 [ "$API" = "presets" ] && { presets_json; exit 0; }
 [ "$API" = "autosync" ] && { autosync_json; exit 0; }
 [ "$API" = "config" ] && { config_json; exit 0; }
+[ "$API" = "nodes" ] && { nodes_json; exit 0; }
 
 # ---- HTML page -------------------------------------------------------------
 printf 'Status: 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n'
@@ -515,6 +737,9 @@ cat <<'HTML'
   .helpbody code { background: #8882; padding: 0 .25rem; border-radius: 4px; }
   .helpbody p { margin: .3rem 0; }
   textarea { width: 100%; min-height: 11rem; padding: .6rem .7rem; font-size: .95rem; border-radius: 8px; border: 1px solid #8884; background: #8881; color: inherit; resize: vertical; font-family: ui-monospace, monospace; }
+  .dropzone { border: 2px dashed #8885; border-radius: 10px; padding: 1.1rem; text-align: center; opacity: .7; margin-bottom: .5rem; cursor: pointer; font-size: .9rem; }
+  .dropzone.drag { border-color: #2563eb; opacity: 1; background: #2563eb22; }
+  #nodeCfg { min-height: 6rem; }
   button { padding: .6rem .9rem; font-size: 1rem; border: 0; border-radius: 8px; cursor: pointer; background: #2563eb; color: #fff; }
   button:disabled { opacity: .5; cursor: default; }
   button.ghost { background: #8883; color: inherit; padding: .35rem .6rem; font-size: .85rem; }
@@ -546,6 +771,7 @@ cat <<'HTML'
   <div class="tabs">
     <button class="tab active" data-view="domains" data-i18n="tabDomains"></button>
     <button class="tab" data-view="ips" data-i18n="tabIps"></button>
+    <button class="tab" data-view="nodes" data-i18n="tabNodes"></button>
   </div>
 
   <!-- ================= DOMAINS ================= -->
@@ -562,6 +788,7 @@ cat <<'HTML'
           <input id="domain" placeholder="example.com" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required>
           <select id="rnode" data-i18n-title="nAction">
             <option value="PROXY" data-i18n="nProxy"></option>
+            <option value="UNBLOCK" id="optUnblock" data-i18n="nUnblock" hidden></option>
             <option value="DIRECT" data-i18n="nDirect"></option>
             <option value="REJECT" data-i18n="nReject"></option>
           </select>
@@ -624,6 +851,20 @@ cat <<'HTML'
     <ul id="ipList"></ul>
   </section>
 
+  <!-- ================= VPN NODES ================= -->
+  <section class="view" id="view-nodes">
+    <div class="hint" data-i18n="nodesHint"></div>
+    <div id="dropzone" class="dropzone" data-i18n="nodeDrop"></div>
+    <textarea id="nodeCfg" spellcheck="false" placeholder="[Interface]…   ·   vless://…   ·   https://sub…   ·   - name: …"></textarea>
+    <form class="add" id="nodeForm">
+      <input id="nodeName" data-i18n-ph="nodeName" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <button type="submit" id="nodeBtn" data-i18n="nodeAdd"></button>
+    </form>
+    <div class="msg" id="nodeMsg"></div>
+    <h3><span data-i18n="tabNodes"></span> <span class="count" id="nodeCount"></span></h3>
+    <ul id="nodeList"></ul>
+  </section>
+
 <script>
 const $ = s => document.querySelector(s);
 let RULES = [], PRESETS = [], LANG = "ru";
@@ -656,6 +897,10 @@ const I18N = {
     exclusions: "Исключения", system: "системный",
     phDomain: "example.com", phGeosite: "telegram, youtube, netflix…",
     done: "Готово", errP: "Ошибка: ", dup: "Уже есть в списке", listsNA: "Списки недоступны",
+    tabNodes: "Ноды", nUnblock: "→ VPN (+ноды)",
+    nodesHint: "Свои VPN-выходы. Перетащи .conf или вставь конфиг/ссылку: AmneziaWG/WireGuard, vless://…, подписку https://…, или сырой clash-YAML. Добавленные ноды образуют группу UNBLOCK — выбирай «→ VPN (+ноды)» как действие правила.",
+    nodeDrop: "Перетащи сюда файл .conf", nodeName: "имя (необязательно)", nodeAdd: "Добавить и проверить",
+    validating: "Добавляю и проверяю ноду…", nodeMs: "мс", nodeNoResp: "не отвечает", nodeSub: "подписка",
     on_: "Включить ", off_: "Отключить ", upd_: "Обновить ",
     enabling: "Включаю ", disabling: "Отключаю ", updating: "Обновляю ",
     adding: "Добавляю ", removing: "Удаляю…", applying: "Применяю…", saving: "Сохраняю и применяю…",
@@ -690,6 +935,10 @@ const I18N = {
     exclusions: "Exclusions", system: "system",
     phDomain: "example.com", phGeosite: "telegram, youtube, netflix…",
     done: "Done", errP: "Error: ", dup: "Already in the list", listsNA: "Lists unavailable",
+    tabNodes: "Nodes", nUnblock: "→ VPN (+nodes)",
+    nodesHint: "Your own VPN exits. Drop a .conf or paste a config/link: AmneziaWG/WireGuard, vless://…, a subscription https://…, or raw clash YAML. Added nodes form the UNBLOCK group — pick «→ VPN (+nodes)» as a rule action.",
+    nodeDrop: "Drop a .conf file here", nodeName: "name (optional)", nodeAdd: "Add & check",
+    validating: "Adding & checking node…", nodeMs: "ms", nodeNoResp: "no response", nodeSub: "subscription",
     on_: "Enable ", off_: "Disable ", upd_: "Update ",
     enabling: "Enabling ", disabling: "Disabling ", updating: "Updating ",
     adding: "Adding ", removing: "Removing…", applying: "Applying…", saving: "Saving & applying…",
@@ -705,6 +954,7 @@ function applyI18n(){
   document.querySelectorAll("[data-i18n]").forEach(el => el.textContent = t(el.dataset.i18n));
   document.querySelectorAll("[data-i18n-html]").forEach(el => el.innerHTML = t(el.dataset.i18nHtml));
   document.querySelectorAll("[data-i18n-title]").forEach(el => el.title = t(el.dataset.i18nTitle));
+  document.querySelectorAll("[data-i18n-ph]").forEach(el => el.placeholder = t(el.dataset.i18nPh));
   document.querySelectorAll(".lang a").forEach(a => a.classList.toggle("on", a.dataset.lang === LANG));
   $("#modeToggle").textContent = listMode ? t("showItems") : t("showList");
   $("#domain").placeholder = $("#rtype").value === "GEOSITE" ? t("phGeosite") : t("phDomain");
@@ -919,13 +1169,69 @@ async function saveAutosync(){
 $("#autoOn").addEventListener("change", saveAutosync);
 $("#autoIv").addEventListener("change", saveAutosync);
 
+/* ---------- vpn nodes ---------- */
+let NODES = [], EXITG = "UNBLOCK";
+async function loadNodes(){
+  try { NODES = await (await fetch("?api=nodes")).json(); } catch(e){ NODES = []; }
+  const ul = $("#nodeList"); ul.innerHTML = "";
+  $("#nodeCount").textContent = "(" + NODES.length + ")";
+  const o = $("#optUnblock"); o.value = EXITG; o.hidden = NODES.length === 0;
+  NODES.forEach(n => {
+    const li = document.createElement("li");
+    const meta = n.kind === "provider" ? t("nodeSub") : (n.type + (n.host ? " · " + n.host : ""));
+    li.innerHTML = '<span class="dom">' + n.name + '</span><span class="meta">' + meta + '</span>' +
+      (n.kind === "node" ? '<button class="ghost" data-check="' + n.id + '">↻</button>' : '') +
+      '<button class="ghost" data-del="' + n.id + '">✕</button>';
+    ul.appendChild(li);
+  });
+}
+async function addNodeCfg(cfg, name){
+  if (!cfg.trim()) return;
+  $("#nodeBtn").disabled = true;
+  setMsg($("#nodeMsg"), t("validating"));
+  const res = await api("nodeadd", { config: cfg, name: name || "" });
+  $("#nodeBtn").disabled = false;
+  if (res.ok){
+    let m = t("done");
+    if (res.kind === "node") m += " · " + res.name + " — " + (res.delay === "x" ? t("nodeNoResp") : res.delay + " " + t("nodeMs"));
+    setMsg($("#nodeMsg"), m, res.kind !== "node" || res.delay !== "x");
+    $("#nodeCfg").value = ""; $("#nodeName").value = "";
+    loadNodes(); loadDomains();
+  } else setMsg($("#nodeMsg"), t("errP") + (res.error || "?"), false);
+}
+$("#nodeForm").addEventListener("submit", e => { e.preventDefault(); addNodeCfg($("#nodeCfg").value, $("#nodeName").value.trim()); });
+$("#nodeList").addEventListener("click", async e => {
+  const b = e.target.closest("button"); if (!b) return;
+  if (b.dataset.del){
+    b.disabled = true; setMsg($("#nodeMsg"), t("removing"));
+    const res = await api("nodedel", { id: b.dataset.del });
+    if (res.ok){ setMsg($("#nodeMsg"), t("done")); loadNodes(); loadDomains(); }
+    else { setMsg($("#nodeMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
+  } else if (b.dataset.check){
+    b.disabled = true; setMsg($("#nodeMsg"), t("validating"));
+    const res = await api("nodecheck", { id: b.dataset.check });
+    b.disabled = false;
+    if (res.ok) setMsg($("#nodeMsg"), (res.delay === "x" ? t("nodeNoResp") : res.delay + " " + t("nodeMs")), res.delay !== "x");
+    else setMsg($("#nodeMsg"), t("errP") + (res.error || "?"), false);
+  }
+});
+(function(){
+  const dz = $("#dropzone");
+  const readFile = f => { if (!f) return; const r = new FileReader(); r.onload = () => { $("#nodeCfg").value = r.result; if (!$("#nodeName").value) $("#nodeName").value = f.name.replace(/\.(conf|yaml|yml|txt)$/i, ""); }; r.readAsText(f); };
+  const toggle = on => e => { e.preventDefault(); dz.classList.toggle("drag", on); };
+  ["dragenter","dragover"].forEach(ev => dz.addEventListener(ev, toggle(true)));
+  ["dragleave"].forEach(ev => dz.addEventListener(ev, toggle(false)));
+  dz.addEventListener("drop", e => { toggle(false)(e); readFile(e.dataTransfer.files[0]); });
+  dz.addEventListener("click", () => { const i = document.createElement("input"); i.type = "file"; i.onchange = () => readFile(i.files[0]); i.click(); });
+})();
+
 /* ---------- boot ---------- */
 (async () => {
   let def = "ru";
-  try { const c = await (await fetch("?api=config")).json(); def = c.lang || "ru"; } catch(e){}
+  try { const c = await (await fetch("?api=config")).json(); def = c.lang || "ru"; EXITG = c.exit_group || "UNBLOCK"; } catch(e){}
   try { LANG = localStorage.nikkiLang || def; } catch(e){ LANG = def; }
   applyI18n();
-  loadDomains(); loadIps(); loadPresets(); loadAutosync();
+  loadDomains(); loadIps(); loadPresets(); loadAutosync(); loadNodes();
 })();
 </script>
 </body>

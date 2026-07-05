@@ -4,6 +4,10 @@
 # CGI must be executable (package files usually keep mode, but be safe).
 [ -f /www/cgi-bin/nikki-unblock ] && chmod 0755 /www/cgi-bin/nikki-unblock
 
+# node store for the VPN-nodes tab (root-only; holds keys)
+mkdir -p /etc/nikki-unblock/nodes /etc/nikki-unblock/providers
+chmod 700 /etc/nikki-unblock /etc/nikki-unblock/nodes /etc/nikki-unblock/providers 2>/dev/null
+
 # Seed the config section if it is somehow missing (the shipped /etc/config/nikki-unblock covers this).
 if ! uci -q get nikki-unblock.config >/dev/null 2>&1; then
 	touch /etc/config/nikki-unblock
@@ -12,6 +16,8 @@ if ! uci -q get nikki-unblock.config >/dev/null 2>&1; then
 	uci -q set nikki-unblock.config.autosync_enabled='0'
 	uci -q set nikki-unblock.config.autosync_interval='6h'
 	uci -q set nikki-unblock.config.lang='ru'
+	uci -q set nikki-unblock.config.base_group='PROXY'
+	uci -q set nikki-unblock.config.exit_group='UNBLOCK'
 	uci -q commit nikki-unblock
 fi
 

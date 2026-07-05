@@ -25,6 +25,13 @@ a LuCI menu entry to open it.
 - **IP exclusions** — manage `nikki.proxy.reserved_ip` (traffic to those dests skips Mihomo — handy
   for your own VPN nodes; the default private ranges are protected).
 - **Auto-update** — optional cron that keeps enabled list-presets in sync with the manifest.
+- **VPN nodes** — a tab to add your own exit configs (drag-drop a file or paste): **AmneziaWG /
+  WireGuard `.conf`**, a **subscription link** (remnawave/clash → mihomo proxy-provider), **share-links**
+  (`vless://`, `vmess://`, `trojan://`, `ss://`, `hysteria2://`), or **raw clash/mihomo YAML**. Each is
+  converted to a mihomo proxy, injected into nikki, and **auto-checked** (latency probe via the mihomo
+  API). Added nodes form a fallback group `UNBLOCK` (= your profile's base group + the added nodes);
+  pick **"→ VPN (+nodes)"** as a rule action to route through the extended pool. A bad config is
+  auto-reverted so it can't break nikki.
 - Everything applies via `/etc/init.d/nikki reload`.
 
 ## Requirements
@@ -53,6 +60,12 @@ Open it in **LuCI → Services → "nikki · Unblock"**, or directly at **http:/
 | `applist_url` | `https://sketso.github.io/nikki-unblock/applist` | Where the preset manifest (`index.json`) + `.lst` lists are fetched from (server-side). |
 | `autosync_enabled` / `autosync_interval` | `0` / `6h` | Auto-sync of enabled list-presets (also toggled from the UI). |
 | `lang` | `ru` | Default UI language (`ru`/`en`); each browser can override with the RU/EN switch. |
+| `base_group` | `PROXY` | Your mihomo profile's existing exit proxy-group (VPN-nodes tab pools added nodes with it). Set it if your profile's group isn't named `PROXY`. |
+| `exit_group` | `UNBLOCK` | Name of the combined group (`base_group` + added nodes) that "→ VPN (+nodes)" rules target. |
+
+Added VPN-node configs (keys, subscription tokens) are stored **only on the router** under
+`/etc/nikki-unblock/` (root-only) and the generated `/etc/nikki/mixin.yaml` — never sent back to the
+browser or committed anywhere.
 
 ## Host your own preset lists
 
