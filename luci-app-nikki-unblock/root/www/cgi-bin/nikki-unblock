@@ -656,8 +656,12 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			  echo "    health-check: {enable: true, url: http://cp.cloudflare.com/generate_204, interval: 300}"; } > "$PROV_DIR/$pid.yaml"
 			;;
 		*)
-			yaml=$(printf '%s' "$raw" | awk '/^[[:space:]]*-[[:space:]]*name:/{p=1} p{print}' | sed 's/^[[:space:]]*-/  -/')
-			[ -z "$yaml" ] && err="paste a proxy line starting with '- name:'"
+			# raw clash/mihomo proxy: a mapping or a "- name:" item. Normalize to a 1-item seq at
+			# 2-space list indent via yq (robust to the pasted indentation), then reindent under nikki-proxies.
+			_rf="/tmp/nu-raw.$$"; printf '%s\n' "$raw" > "$_rf"
+			yaml=$(yq -M -o=yaml '[ (.[0] // .) ]' "$_rf" 2>/dev/null | sed 's/^/  /')
+			rm -f "$_rf"
+			case "$yaml" in *name:*) ;; *) err="need a valid clash proxy (a mapping or '- name:' item)"; yaml="" ;; esac
 			[ -z "$nm" ] && nm=$(printf '%s' "$yaml" | grep -m1 'name:' | sed 's/.*name:[[:space:]]*//; s/[",]//g')
 			;;
 		esac
