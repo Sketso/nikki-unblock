@@ -1,0 +1,22 @@
+#!/bin/sh
+# Post-install wiring for nikki-unblock.
+
+# CGI must be executable (package files usually keep mode, but be safe).
+[ -f /www/cgi-bin/nikki-unblock ] && chmod 0755 /www/cgi-bin/nikki-unblock
+
+# Seed the config section if it is somehow missing (the shipped /etc/config/nikki-unblock covers this).
+if ! uci -q get nikki-unblock.config >/dev/null 2>&1; then
+	touch /etc/config/nikki-unblock
+	uci -q set nikki-unblock.config=nikki-unblock
+	uci -q set nikki-unblock.config.applist_url='https://sketso.github.io/nikki-unblock/applist'
+	uci -q set nikki-unblock.config.autosync_enabled='0'
+	uci -q set nikki-unblock.config.autosync_interval='6h'
+	uci -q set nikki-unblock.config.lang='ru'
+	uci -q commit nikki-unblock
+fi
+
+# Refresh the LuCI menu/index cache so the new entry shows up.
+rm -f /tmp/luci-indexcache* 2>/dev/null
+rm -rf /tmp/luci-modulecache 2>/dev/null
+
+exit 0

@@ -1,0 +1,933 @@
+#!/bin/sh
+# nikki-unblock — LAN web UI to manage nikki (mihomo) routing rules + proxy bypass IPs.
+#   Tab "Domains":  UCI nikki.@rule[] (DOMAIN-SUFFIX/DOMAIN/DOMAIN-KEYWORD/GEOSITE/IP-CIDR ->
+#                   PROXY/DIRECT/REJECT). Single add, bulk, list editor, one-click "Unblock" presets.
+#   Tab "IP exclusions": UCI nikki.proxy.reserved_ip (dests that skip mihomo).
+# Presets (manifest + lists) are fetched server-side from $APPLIST_URL. Companion to OpenWrt-nikki.
+# Served by uhttpd CGI at http://<router>/cgi-bin/nikki-unblock (see also http://<router>/nikki).
+
+TYPE_DEFAULT="DOMAIN-SUFFIX"
+NODE_DEFAULT="PROXY"
+SELF="/www/cgi-bin/nikki-unblock"
+CRONTAB="/etc/crontabs/root"
+CRON_TAG="# nikki-unblock-autosync"
+
+# applist URL: UCI-configurable, defaults to the project's neutral GitHub Pages host.
+APPLIST_URL="$(uci -q get nikki-unblock.config.applist_url 2>/dev/null)"
+[ -z "$APPLIST_URL" ] && APPLIST_URL="https://sketso.github.io/nikki-unblock/applist"
+
+# private/reserved ranges nikki ships by default — protected from deletion in the UI
+IP_DEFAULTS="0.0.0.0/8 10.0.0.0/8 127.0.0.0/8 100.64.0.0/10 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4"
+
+# ---- helpers ---------------------------------------------------------------
+
+# read a param from $DATA (form-urlencoded), URL-decoded (handles + and %XX, incl. %0A newlines)
+get_param() {
+	v=$(printf '%s' "$DATA" | tr '&' '\n' | grep "^$1=" | head -1 | cut -d= -f2-)
+	v=$(printf '%s' "$v" | sed 's/+/ /g; s/%/\\x/g')
+	printf '%b' "$v"
+}
+
+# stdin: raw domain text; stdout: cleaned, unique domains (one per line).
+# Tolerant of v2ray-list syntax: strips '#' comments, 'full:'/'domain:' prefixes and '@attrs';
+# skips include:/regexp:/keyword: tokens; accepts newline/comma/semicolon/space separators.
+parse_domains() {
+	tr ',;\r' '\n\n\n' | ( set -f
+		while IFS= read -r line || [ -n "$line" ]; do
+			line=$(printf '%s' "$line" | sed 's/#.*//')
+			[ -z "$line" ] && continue
+			for tok in $line; do
+				case "$tok" in @*|include:*|regexp:*|keyword:*) continue ;; esac
+				tok=$(printf '%s' "$tok" | sed 's/^full://; s/^domain://')
+				dom=$(printf '%s' "$tok" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9.*-]//g; s/^\.*//')
+				case "$dom" in *.*) printf '%s\n' "$dom" ;; esac
+			done
+		done
+	) | awk '!seen[$0]++'
+}
+
+clean_ip() { printf '%s' "$1" | sed 's#[^0-9a-fA-F.:/]##g'; }
+
+json_header() { printf 'Status: 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n\r\n'; }
+
+# echo 1 if $1 already exists as a DOMAIN-SUFFIX matcher
+domain_exists() {
+	i=0
+	while uci -q get "nikki.@rule[$i]" >/dev/null 2>&1; do
+		if [ "$(uci -q get "nikki.@rule[$i].matcher")" = "$1" ] \
+			&& [ "$(uci -q get "nikki.@rule[$i].type")" = "$TYPE_DEFAULT" ]; then
+			echo 1; return
+		fi
+		i=$((i + 1))
+	done
+}
+
+add_rule() {   # $1=type $2=matcher $3=node  ($4=src, optional)
+	uci add nikki rule >/dev/null
+	uci set "nikki.@rule[-1].enabled=1"
+	uci set "nikki.@rule[-1].type=$1"
+	uci set "nikki.@rule[-1].matcher=$2"
+	uci set "nikki.@rule[-1].node=$3"
+	[ -n "$4" ] && uci set "nikki.@rule[-1].src=$4"
+	return 0
+}
+add_domain() { add_rule "$TYPE_DEFAULT" "$1" "$NODE_DEFAULT"; }
+
+# echo 1 if a rule with type $1 and matcher $2 exists
+rule_exists() {
+	i=0
+	while uci -q get "nikki.@rule[$i]" >/dev/null 2>&1; do
+		if [ "$(uci -q get "nikki.@rule[$i].matcher")" = "$2" ] \
+			&& [ "$(uci -q get "nikki.@rule[$i].type")" = "$1" ]; then
+			echo 1; return
+		fi
+		i=$((i + 1))
+	done
+}
+
+# delete first rule with type $1 and matcher $2
+delete_rule() {
+	i=0
+	while uci -q get "nikki.@rule[$i]" >/dev/null 2>&1; do
+		if [ "$(uci -q get "nikki.@rule[$i].matcher")" = "$2" ] \
+			&& [ "$(uci -q get "nikki.@rule[$i].type")" = "$1" ]; then
+			uci delete "nikki.@rule[$i]"; return
+		fi
+		i=$((i + 1))
+	done
+}
+
+# delete first DOMAIN-SUFFIX rule whose matcher == $1
+delete_domain() {
+	i=0
+	while uci -q get "nikki.@rule[$i]" >/dev/null 2>&1; do
+		if [ "$(uci -q get "nikki.@rule[$i].matcher")" = "$1" ] \
+			&& [ "$(uci -q get "nikki.@rule[$i].type")" = "$TYPE_DEFAULT" ]; then
+			uci delete "nikki.@rule[$i]"; return
+		fi
+		i=$((i + 1))
+	done
+}
+
+ip_is_default() {
+	for d in $IP_DEFAULTS; do [ "$1" = "$d" ] && { echo 1; return; }; done
+}
+
+list_json() {
+	json_header
+	printf '['
+	first=1; i=0
+	while uci -q get "nikki.@rule[$i]" >/dev/null 2>&1; do
+		t=$(uci -q get "nikki.@rule[$i].type")
+		m=$(uci -q get "nikki.@rule[$i].matcher")
+		n=$(uci -q get "nikki.@rule[$i].node")
+		e=$(uci -q get "nikki.@rule[$i].enabled")
+		[ -z "$e" ] && e=1
+		s=$(uci -q get "nikki.@rule[$i].src")
+		[ "$first" = 1 ] || printf ','
+		first=0
+		printf '{"idx":%d,"type":"%s","matcher":"%s","node":"%s","enabled":"%s","src":"%s"}' "$i" "$t" "$m" "$n" "$e" "$s"
+		i=$((i + 1))
+	done
+	printf ']'
+}
+
+iplist_json() {
+	json_header
+	printf '['
+	first=1
+	for ip in $(uci -q get nikki.proxy.reserved_ip); do
+		prot=0; [ "$(ip_is_default "$ip")" = 1 ] && prot=1
+		[ "$first" = 1 ] || printf ','
+		first=0
+		printf '{"ip":"%s","protected":%d}' "$ip" "$prot"
+	done
+	printf ']'
+}
+
+# fetch service presets from applist server-side and emit [{id,name,geosite?,node?,ipcidr?,domains?}]
+presets_json() {
+	json_header
+	idx=$(curl -s --max-time 10 "$APPLIST_URL/index.json" 2>/dev/null)
+	printf '['
+	first=1; i=0
+	while :; do
+		id=$(printf '%s' "$idx" | jsonfilter -e "@[$i].id" 2>/dev/null)
+		[ -z "$id" ] && break
+		name=$(printf '%s' "$idx" | jsonfilter -e "@[$i].name" 2>/dev/null)
+		[ -z "$name" ] && name="$id"
+		geo=$(printf '%s' "$idx" | jsonfilter -e "@[$i].geosite" 2>/dev/null)
+		gnode=$(printf '%s' "$idx" | jsonfilter -e "@[$i].node" 2>/dev/null); [ -z "$gnode" ] && gnode=PROXY
+		[ "$first" = 1 ] || printf ','
+		first=0
+		if [ -n "$geo" ]; then
+			ips=$(printf '%s' "$idx" | jsonfilter -e "@[$i].ipcidr[*]" 2>/dev/null | awk '{printf "%s\"%s\"", sep, $0; sep=","}')
+			printf '{"id":"%s","name":"%s","geosite":"%s","node":"%s","ipcidr":[%s]}' "$id" "$name" "$geo" "$gnode" "$ips"
+		else
+			list=$(curl -s --max-time 10 "$APPLIST_URL/$id" 2>/dev/null)
+			dom=$(printf '%s' "$list" | awk '{ sub(/\r$/,""); gsub(/[ \t]/,""); if ($0=="" || substr($0,1,1)=="#") next; printf "%s\"%s\"", sep, tolower($0); sep="," }')
+			printf '{"id":"%s","name":"%s","domains":[%s]}' "$id" "$name" "$dom"
+		fi
+		i=$((i + 1))
+	done
+	printf ']'
+}
+
+# UI config for the browser: default language + applist url
+config_json() {
+	json_header
+	lang=$(uci -q get nikki-unblock.config.lang 2>/dev/null); [ -z "$lang" ] && lang=ru
+	printf '{"lang":"%s","applist":"%s"}' "$lang" "$APPLIST_URL"
+}
+
+apply_nikki() { /etc/init.d/nikki reload >/dev/null 2>&1; }
+
+# ---- preset sync (source-tagged rules) -------------------------------------
+# Rules added by a domain-list preset carry `option src '<id> ...'`. nikki's mixin.uc reads only
+# type/matcher/node/enabled, so the extra option is ignored — safe. Lets sync remove domains that
+# LEFT an applist list without touching manually-added rules.
+
+rule_idx_of() {
+	i=0
+	while uci -q get "nikki.@rule[$i]" >/dev/null 2>&1; do
+		if [ "$(uci -q get "nikki.@rule[$i].matcher")" = "$1" ] \
+			&& [ "$(uci -q get "nikki.@rule[$i].type")" = "$TYPE_DEFAULT" ]; then
+			echo "$i"; return
+		fi
+		i=$((i + 1))
+	done
+}
+
+fetch_list() {   # $1=preset id  $2=out file ; return non-zero if empty/unreachable (never wipe on failure)
+	curl -s --max-time 10 "$APPLIST_URL/$1" 2>/dev/null \
+		| awk '{ sub(/\r$/,""); gsub(/[ \t]/,""); if ($0=="" || substr($0,1,1)=="#") next; print tolower($0) }' \
+		| awk '!seen[$0]++' > "$2"
+	[ -s "$2" ]
+}
+
+do_preset_sync() {
+	_id="$1"; _L="/tmp/applist_$_id.$$"
+	fetch_list "$_id" "$_L" || { rm -f "$_L"; return 1; }
+	while IFS= read -r d; do
+		[ -z "$d" ] && continue
+		idx=$(rule_idx_of "$d")
+		if [ -z "$idx" ]; then
+			uci add nikki rule >/dev/null
+			uci set "nikki.@rule[-1].enabled=1"
+			uci set "nikki.@rule[-1].type=$TYPE_DEFAULT"
+			uci set "nikki.@rule[-1].matcher=$d"
+			uci set "nikki.@rule[-1].node=$NODE_DEFAULT"
+			uci set "nikki.@rule[-1].src=$_id"
+			SYNC_ADDED=$((SYNC_ADDED + 1))
+		else
+			cur=$(uci -q get "nikki.@rule[$idx].src")
+			case " $cur " in *" $_id "*) : ;; *) uci set "nikki.@rule[$idx].src=$(echo "$cur $_id" | sed 's/^ *//; s/  */ /g')" ;; esac
+		fi
+	done < "$_L"
+	_todel=""; i=0
+	while uci -q get "nikki.@rule[$i]" >/dev/null 2>&1; do
+		src=$(uci -q get "nikki.@rule[$i].src")
+		case " $src " in *" $_id "*)
+			m=$(uci -q get "nikki.@rule[$i].matcher")
+			if ! grep -qxF "$m" "$_L"; then
+				new=$(echo " $src " | sed "s/ $_id / /g; s/^ *//; s/ *$//; s/  */ /g")
+				if [ -z "$new" ]; then _todel="$_todel $m"; else uci set "nikki.@rule[$i].src=$new"; fi
+			fi
+			;;
+		esac
+		i=$((i + 1))
+	done
+	for m in $_todel; do delete_domain "$m"; SYNC_REMOVED=$((SYNC_REMOVED + 1)); done
+	rm -f "$_L"
+}
+
+do_preset_off() {
+	_id="$1"; _todel=""; i=0
+	while uci -q get "nikki.@rule[$i]" >/dev/null 2>&1; do
+		src=$(uci -q get "nikki.@rule[$i].src")
+		case " $src " in *" $_id "*)
+			m=$(uci -q get "nikki.@rule[$i].matcher")
+			new=$(echo " $src " | sed "s/ $_id / /g; s/^ *//; s/ *$//; s/  */ /g")
+			if [ -z "$new" ]; then _todel="$_todel $m"; else uci set "nikki.@rule[$i].src=$new"; fi
+			;;
+		esac
+		i=$((i + 1))
+	done
+	for m in $_todel; do delete_domain "$m"; OFF_REMOVED=$((OFF_REMOVED + 1)); done
+}
+
+rules_tagged() {
+	i=0
+	while uci -q get "nikki.@rule[$i]" >/dev/null 2>&1; do
+		case " $(uci -q get "nikki.@rule[$i].src") " in *" $1 "*) return 0 ;; esac
+		i=$((i + 1))
+	done
+	return 1
+}
+
+# cron/CLI: sync every currently-enabled domain-list preset
+sync_all() {
+	idx=$(curl -s --max-time 10 "$APPLIST_URL/index.json" 2>/dev/null)
+	SYNC_ADDED=0; SYNC_REMOVED=0; i=0
+	while :; do
+		id=$(printf '%s' "$idx" | jsonfilter -e "@[$i].id" 2>/dev/null)
+		[ -z "$id" ] && break
+		rules_tagged "$id" && do_preset_sync "$id"
+		i=$((i + 1))
+	done
+	[ $((SYNC_ADDED + SYNC_REMOVED)) -gt 0 ] && { uci commit nikki; apply_nikki; }
+	logger -t nikki-unblock "autosync: +$SYNC_ADDED -$SYNC_REMOVED"
+}
+
+# ---- autosync (state in UCI, executed by cron) -----------------------------
+autosync_sched() {
+	case "$1" in
+		1h)  echo "0 * * * *" ;;
+		12h) echo "0 */12 * * *" ;;
+		24h) echo "0 4 * * *" ;;
+		*)   echo "0 */6 * * *" ;;
+	esac
+}
+autosync_set() {   # $1=on(0/1) $2=interval
+	uci set nikki-unblock.config.autosync_enabled="$1" 2>/dev/null
+	uci set nikki-unblock.config.autosync_interval="$2" 2>/dev/null
+	uci commit nikki-unblock 2>/dev/null
+	touch "$CRONTAB"
+	sed -i "/$CRON_TAG/d" "$CRONTAB"
+	if [ "$1" = 1 ]; then
+		echo "$(autosync_sched "$2") $SELF sync $CRON_TAG interval=$2" >> "$CRONTAB"
+		/etc/init.d/cron enable >/dev/null 2>&1
+	fi
+	/etc/init.d/cron restart >/dev/null 2>&1
+}
+autosync_json() {
+	json_header
+	en=$(uci -q get nikki-unblock.config.autosync_enabled 2>/dev/null)
+	iv=$(uci -q get nikki-unblock.config.autosync_interval 2>/dev/null); [ -z "$iv" ] && iv=6h
+	[ "$en" = 1 ] && printf '{"enabled":true,"interval":"%s"}' "$iv" || printf '{"enabled":false,"interval":"%s"}' "$iv"
+}
+
+# cron / CLI entry: `nikki-unblock sync`
+[ "$1" = "sync" ] && { sync_all; exit 0; }
+
+# ---- API -------------------------------------------------------------------
+
+API=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^api=' | head -1 | cut -d= -f2-)
+
+if [ "$REQUEST_METHOD" = "POST" ]; then
+	DATA=$(head -c "${CONTENT_LENGTH:-0}")
+	action=$(get_param action)
+
+	if [ "$action" = "add" ]; then
+		rtype=$(get_param type)
+		case "$rtype" in DOMAIN-SUFFIX|DOMAIN|DOMAIN-KEYWORD|GEOSITE) ;; *) rtype=DOMAIN-SUFFIX ;; esac
+		rnode=$(get_param node)
+		case "$rnode" in PROXY|DIRECT|REJECT) ;; *) rnode=PROXY ;; esac
+		case "$rtype" in
+			GEOSITE)        val=$(printf '%s' "$(get_param domain)" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9._!-]//g') ;;
+			DOMAIN-KEYWORD) val=$(printf '%s' "$(get_param domain)" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9.*-]//g') ;;
+			*)              val=$(printf '%s' "$(get_param domain)" | parse_domains | head -1) ;;
+		esac
+		[ -z "$val" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
+		if [ "$(rule_exists "$rtype" "$val")" = 1 ]; then
+			json_header; printf '{"ok":true,"dup":true}'; exit 0
+		fi
+		add_rule "$rtype" "$val" "$rnode"; uci commit nikki; apply_nikki
+		json_header; printf '{"ok":true}'; exit 0
+
+	elif [ "$action" = "addbulk" ]; then
+		tmp="/tmp/nikki_add.$$"
+		printf '%s' "$(get_param domains)" | parse_domains > "$tmp"
+		added=0; dup=0
+		while IFS= read -r d; do
+			[ -z "$d" ] && continue
+			if [ "$(domain_exists "$d")" = 1 ]; then dup=$((dup + 1)); continue; fi
+			add_domain "$d"; added=$((added + 1))
+		done < "$tmp"
+		rm -f "$tmp"
+		[ "$added" -gt 0 ] && { uci commit nikki; apply_nikki; }
+		json_header; printf '{"ok":true,"added":%d,"dup":%d}' "$added" "$dup"; exit 0
+
+	elif [ "$action" = "delbulk" ]; then
+		tmp="/tmp/nikki_del.$$"
+		printf '%s' "$(get_param domains)" | parse_domains > "$tmp"
+		removed=0
+		while IFS= read -r d; do
+			[ -z "$d" ] && continue
+			if [ "$(domain_exists "$d")" = 1 ]; then delete_domain "$d"; removed=$((removed + 1)); fi
+		done < "$tmp"
+		rm -f "$tmp"
+		[ "$removed" -gt 0 ] && { uci commit nikki; apply_nikki; }
+		json_header; printf '{"ok":true,"removed":%d}' "$removed"; exit 0
+
+	elif [ "$action" = "setall" ]; then
+		want="/tmp/nikki_want.$$"; cur="/tmp/nikki_cur.$$"
+		printf '%s' "$(get_param domains)" | parse_domains > "$want"
+		i=0
+		while uci -q get "nikki.@rule[$i]" >/dev/null 2>&1; do
+			[ "$(uci -q get "nikki.@rule[$i].type")" = "$TYPE_DEFAULT" ] \
+				&& [ "$(uci -q get "nikki.@rule[$i].node")" = "$NODE_DEFAULT" ] \
+				&& uci -q get "nikki.@rule[$i].matcher"
+			i=$((i + 1))
+		done > "$cur"
+		removed=0; added=0
+		while IFS= read -r m; do
+			[ -z "$m" ] && continue
+			grep -qxF "$m" "$want" || { delete_domain "$m"; removed=$((removed + 1)); }
+		done < "$cur"
+		while IFS= read -r d; do
+			[ -z "$d" ] && continue
+			[ "$(domain_exists "$d")" = 1 ] || { add_domain "$d"; added=$((added + 1)); }
+		done < "$want"
+		rm -f "$want" "$cur"
+		[ $((removed + added)) -gt 0 ] && { uci commit nikki; apply_nikki; }
+		json_header; printf '{"ok":true,"added":%d,"removed":%d}' "$added" "$removed"; exit 0
+
+	elif [ "$action" = "del" ]; then
+		idx=$(get_param idx | sed 's/[^0-9]//g')
+		[ -z "$idx" ] && { json_header; printf '{"ok":false,"error":"bad idx"}'; exit 0; }
+		uci delete "nikki.@rule[$idx]" 2>/dev/null
+		uci commit nikki; apply_nikki
+		json_header; printf '{"ok":true}'; exit 0
+
+	elif [ "$action" = "toggle" ]; then
+		idx=$(get_param idx | sed 's/[^0-9]//g')
+		cur=$(uci -q get "nikki.@rule[$idx].enabled"); [ -z "$cur" ] && cur=1
+		[ "$cur" = 1 ] && new=0 || new=1
+		uci set "nikki.@rule[$idx].enabled=$new"
+		uci commit nikki; apply_nikki
+		json_header; printf '{"ok":true}'; exit 0
+
+	elif [ "$action" = "ipadd" ]; then
+		ip=$(clean_ip "$(get_param ip)")
+		[ -z "$ip" ] && { json_header; printf '{"ok":false,"error":"empty ip"}'; exit 0; }
+		case "$ip" in */*) ;; *:*) ;; *) ip="$ip/32" ;; esac
+		case "$ip" in *.*|*:*) ;; *) json_header; printf '{"ok":false,"error":"bad ip"}'; exit 0 ;; esac
+		for e in $(uci -q get nikki.proxy.reserved_ip); do
+			[ "$e" = "$ip" ] && { json_header; printf '{"ok":true,"dup":true}'; exit 0; }
+		done
+		uci add_list "nikki.proxy.reserved_ip=$ip"; uci commit nikki; apply_nikki
+		json_header; printf '{"ok":true,"ip":"%s"}' "$ip"; exit 0
+
+	elif [ "$action" = "ipdel" ]; then
+		ip=$(clean_ip "$(get_param ip)")
+		if [ "$(ip_is_default "$ip")" = 1 ]; then
+			json_header; printf '{"ok":false,"error":"protected"}'; exit 0
+		fi
+		uci del_list "nikki.proxy.reserved_ip=$ip"; uci commit nikki; apply_nikki
+		json_header; printf '{"ok":true}'; exit 0
+
+	elif [ "$action" = "preset_sync" ]; then
+		id=$(get_param id | sed 's/[^a-z0-9_-]//g')
+		SYNC_ADDED=0; SYNC_REMOVED=0
+		if do_preset_sync "$id"; then
+			[ $((SYNC_ADDED + SYNC_REMOVED)) -gt 0 ] && { uci commit nikki; apply_nikki; }
+			json_header; printf '{"ok":true,"added":%d,"removed":%d}' "$SYNC_ADDED" "$SYNC_REMOVED"; exit 0
+		fi
+		json_header; printf '{"ok":false,"error":"list unavailable"}'; exit 0
+
+	elif [ "$action" = "preset_off" ]; then
+		id=$(get_param id | sed 's/[^a-z0-9_-]//g')
+		OFF_REMOVED=0; do_preset_off "$id"
+		[ "$OFF_REMOVED" -gt 0 ] && { uci commit nikki; apply_nikki; }
+		json_header; printf '{"ok":true,"removed":%d}' "$OFF_REMOVED"; exit 0
+
+	elif [ "$action" = "geosite_on" ]; then
+		cat=$(get_param cat | sed 's/[^a-z0-9._!-]//g')
+		gnode=$(get_param node); case "$gnode" in PROXY|DIRECT|REJECT) ;; *) gnode=PROXY ;; esac
+		[ -z "$cat" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
+		changed=0
+		if [ "$(rule_exists GEOSITE "$cat")" != 1 ]; then add_rule GEOSITE "$cat" "$gnode"; changed=1; fi
+		for ip in $(get_param ips | tr ',' ' '); do
+			ip=$(clean_ip "$ip"); [ -z "$ip" ] && continue
+			if [ "$(rule_exists IP-CIDR "$ip")" != 1 ]; then
+				add_rule IP-CIDR "$ip" "$gnode"
+				uci set "nikki.@rule[-1].no_resolve=1"
+				changed=1
+			fi
+		done
+		[ "$changed" = 1 ] && { uci commit nikki; apply_nikki; }
+		json_header; printf '{"ok":true}'; exit 0
+
+	elif [ "$action" = "geosite_off" ]; then
+		cat=$(get_param cat | sed 's/[^a-z0-9._!-]//g')
+		[ -z "$cat" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
+		delete_rule GEOSITE "$cat"
+		for ip in $(get_param ips | tr ',' ' '); do
+			ip=$(clean_ip "$ip"); [ -n "$ip" ] && delete_rule IP-CIDR "$ip"
+		done
+		uci commit nikki; apply_nikki
+		json_header; printf '{"ok":true}'; exit 0
+
+	elif [ "$action" = "autosync" ]; then
+		on=$(get_param on | sed 's/[^01]//g'); [ -z "$on" ] && on=0
+		iv=$(get_param interval | sed 's/[^0-9a-z]//g'); [ -z "$iv" ] && iv=6h
+		autosync_set "$on" "$iv"
+		json_header; printf '{"ok":true,"enabled":%s,"interval":"%s"}' "$([ "$on" = 1 ] && echo true || echo false)" "$iv"; exit 0
+
+	elif [ "$action" = "setlang" ]; then
+		lang=$(get_param lang | sed 's/[^a-z]//g'); case "$lang" in ru|en) ;; *) lang=ru ;; esac
+		uci set nikki-unblock.config.lang="$lang" 2>/dev/null; uci commit nikki-unblock 2>/dev/null
+		json_header; printf '{"ok":true,"lang":"%s"}' "$lang"; exit 0
+	fi
+
+	json_header; printf '{"ok":false,"error":"unknown action"}'; exit 0
+fi
+
+[ "$API" = "list" ] && { list_json; exit 0; }
+[ "$API" = "iplist" ] && { iplist_json; exit 0; }
+[ "$API" = "presets" ] && { presets_json; exit 0; }
+[ "$API" = "autosync" ] && { autosync_json; exit 0; }
+[ "$API" = "config" ] && { config_json; exit 0; }
+
+# ---- HTML page -------------------------------------------------------------
+printf 'Status: 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n'
+cat <<'HTML'
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nikki-unblock</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 0; padding: 1.2rem; max-width: 900px; margin-inline: auto; }
+  h1 { font-size: 1.3rem; margin: 0 0 .8rem; display: flex; align-items: baseline; gap: .6rem; }
+  .lang { margin-left: auto; font-size: .8rem; font-weight: normal; }
+  .lang a { cursor: pointer; opacity: .5; text-decoration: none; color: inherit; }
+  .lang a.on { opacity: 1; font-weight: 600; text-decoration: underline; }
+  h3 { font-size: .9rem; margin: .1rem 0 .5rem; opacity: .8; }
+  .tabs { display: flex; gap: .4rem; margin-bottom: 1rem; border-bottom: 1px solid #8883; }
+  .tab { background: none; color: inherit; padding: .5rem .9rem; border: 0; border-bottom: 2px solid transparent; cursor: pointer; font-size: 1rem; opacity: .6; }
+  .tab.active { opacity: 1; border-bottom-color: #2563eb; font-weight: 600; }
+  .view { display: none; } .view.active { display: block; }
+  .dom-layout { display: grid; grid-template-columns: 1fr; gap: 1.2rem; }
+  @media (min-width: 720px) { .dom-layout { grid-template-columns: 1fr 200px; } }
+  .add { display: flex; gap: .4rem; margin-bottom: .5rem; flex-wrap: wrap; }
+  .add input { flex: 1; min-width: 8rem; padding: .6rem .7rem; font-size: 1rem; border-radius: 8px; border: 1px solid #8884; background: #8881; color: inherit; }
+  .add select { padding: .5rem .4rem; font-size: .9rem; border-radius: 8px; border: 1px solid #8884; background: #8881; color: inherit; }
+  details.help { margin: 0 0 .8rem; font-size: .85rem; }
+  details.help summary { cursor: pointer; opacity: .7; padding: .2rem 0; }
+  .helpbody { opacity: .85; border-left: 2px solid #8883; padding-left: .8rem; margin-top: .3rem; }
+  .helpbody ul { padding-left: 1.1rem; margin: .2rem 0 .6rem; }
+  .helpbody li { display: list-item; border: 0; padding: .1rem 0; }
+  .helpbody code { background: #8882; padding: 0 .25rem; border-radius: 4px; }
+  .helpbody p { margin: .3rem 0; }
+  textarea { width: 100%; min-height: 11rem; padding: .6rem .7rem; font-size: .95rem; border-radius: 8px; border: 1px solid #8884; background: #8881; color: inherit; resize: vertical; font-family: ui-monospace, monospace; }
+  button { padding: .6rem .9rem; font-size: 1rem; border: 0; border-radius: 8px; cursor: pointer; background: #2563eb; color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.ghost { background: #8883; color: inherit; padding: .35rem .6rem; font-size: .85rem; }
+  .row { display: flex; gap: .5rem; align-items: center; margin: .5rem 0; flex-wrap: wrap; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { display: flex; align-items: center; gap: .6rem; padding: .55rem .2rem; border-bottom: 1px solid #8882; }
+  li .dom { flex: 1; font-family: ui-monospace, monospace; }
+  li.off .dom { opacity: .4; text-decoration: line-through; }
+  .meta { font-size: .75rem; opacity: .6; }
+  .badge { font-size: .7rem; opacity: .6; border: 1px solid #8884; border-radius: 6px; padding: .05rem .4rem; }
+  .msg { min-height: 1.4rem; font-size: .9rem; opacity: .85; margin: .3rem 0; }
+  .count { font-size: .85rem; opacity: .6; }
+  .hint { font-size: .8rem; opacity: .6; margin: .2rem 0 .5rem; }
+  .dom-side { border-left: 0; }
+  @media (min-width: 720px) { .dom-side { border-left: 1px solid #8882; padding-left: 1rem; } }
+  .presets { display: flex; flex-direction: column; gap: .45rem; }
+  .preset { text-align: left; background: #8882; color: inherit; border: 1px solid #8884; font-size: .92rem; padding: .5rem .7rem; }
+  .preset.on { background: #16a34a; color: #fff; border-color: transparent; }
+  .preset.partial { background: #d97706; color: #fff; border-color: transparent; }
+  .autosync { margin-top: 1.1rem; padding-top: .8rem; border-top: 1px solid #8882; }
+  .asrow { display: flex; gap: .45rem; align-items: center; font-size: .95rem; cursor: pointer; }
+  #autoIv { width: 100%; margin-top: .45rem; padding: .4rem .5rem; border-radius: 8px; border: 1px solid #8884; background: #8881; color: inherit; }
+  #autoIv:disabled { opacity: .5; }
+</style>
+</head>
+<body>
+  <h1><span data-i18n="h1"></span>
+    <span class="lang"><a data-lang="ru">RU</a> · <a data-lang="en">EN</a></span></h1>
+  <div class="tabs">
+    <button class="tab active" data-view="domains" data-i18n="tabDomains"></button>
+    <button class="tab" data-view="ips" data-i18n="tabIps"></button>
+  </div>
+
+  <!-- ================= DOMAINS ================= -->
+  <section class="view active" id="view-domains">
+    <div class="dom-layout">
+      <div class="dom-main">
+        <form class="add" id="addForm">
+          <select id="rtype" data-i18n-title="tType">
+            <option value="DOMAIN-SUFFIX" data-i18n="tSuffix"></option>
+            <option value="DOMAIN" data-i18n="tDomain"></option>
+            <option value="DOMAIN-KEYWORD" data-i18n="tKeyword"></option>
+            <option value="GEOSITE">GEOSITE</option>
+          </select>
+          <input id="domain" placeholder="example.com" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+          <select id="rnode" data-i18n-title="nAction">
+            <option value="PROXY" data-i18n="nProxy"></option>
+            <option value="DIRECT" data-i18n="nDirect"></option>
+            <option value="REJECT" data-i18n="nReject"></option>
+          </select>
+          <button type="submit" id="addBtn" data-i18n="add"></button>
+        </form>
+
+        <details class="help">
+          <summary data-i18n="helpSummary"></summary>
+          <div class="helpbody" data-i18n-html="helpBody"></div>
+        </details>
+
+        <div class="row">
+          <button type="button" class="ghost" id="modeToggle"></button>
+          <span class="count" id="count"></span>
+        </div>
+
+        <ul id="list"></ul>
+
+        <div id="bulkWrap" hidden>
+          <div class="hint" data-i18n="bulkHint"></div>
+          <textarea id="bulk" spellcheck="false"></textarea>
+          <div class="row">
+            <button type="button" id="saveList" data-i18n="save"></button>
+            <button type="button" class="ghost" id="cancelList" data-i18n="cancel"></button>
+          </div>
+        </div>
+
+        <div class="msg" id="msg"></div>
+      </div>
+
+      <aside class="dom-side">
+        <h3 data-i18n="unblock"></h3>
+        <div class="presets" id="presets"><span class="hint" data-i18n="loading"></span></div>
+        <div class="msg" id="presetMsg"></div>
+
+        <div class="autosync">
+          <label class="asrow"><input type="checkbox" id="autoOn"> <span data-i18n="autoUpdate"></span></label>
+          <select id="autoIv">
+            <option value="1h" data-i18n="iv1h"></option>
+            <option value="6h" data-i18n="iv6h"></option>
+            <option value="12h" data-i18n="iv12h"></option>
+            <option value="24h" data-i18n="iv24h"></option>
+          </select>
+          <div class="hint" data-i18n="autoHint"></div>
+          <div class="msg" id="autoMsg"></div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ================= IP EXCLUSIONS ================= -->
+  <section class="view" id="view-ips">
+    <div class="hint" data-i18n="ipHint"></div>
+    <form class="add" id="ipForm">
+      <input id="ip" placeholder="1.2.3.4  ·  1.2.3.0/24" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+      <button type="submit" id="ipBtn" data-i18n="add"></button>
+    </form>
+    <div class="msg" id="ipMsg"></div>
+    <h3><span data-i18n="exclusions"></span> <span class="count" id="ipCount"></span></h3>
+    <ul id="ipList"></ul>
+  </section>
+
+<script>
+const $ = s => document.querySelector(s);
+let RULES = [], PRESETS = [], LANG = "ru";
+
+const I18N = {
+  ru: {
+    h1: "nikki · маршрутизация",
+    tabDomains: "Домены в туннель", tabIps: "IP-исключения",
+    add: "Добавить", tType: "тип условия", nAction: "действие",
+    tSuffix: "домен+поддомены", tDomain: "точный домен", tKeyword: "подстрока",
+    nProxy: "→ VPN", nDirect: "→ напрямую", nReject: "→ блок",
+    helpSummary: "❓ Что за пункты и как пользоваться",
+    helpBody: "<p><b>Тип условия</b> (левый список):</p><ul>" +
+      "<li><b>домен+поддомены</b> (DOMAIN-SUFFIX) — обычный выбор: <code>telegram.org</code> ловит и <code>web.telegram.org</code>, и все поддомены.</li>" +
+      "<li><b>точный домен</b> (DOMAIN) — только указанное имя.</li>" +
+      "<li><b>подстрока</b> (DOMAIN-KEYWORD) — если имя <i>содержит</i> слово: <code>google</code> → всё, где есть «google» (широко).</li>" +
+      "<li><b>GEOSITE</b> — готовая категория из базы (обновляется сама). В поле пишешь <i>имя категории</i>: <code>telegram</code>, <code>youtube</code>, <code>netflix</code>… Одно правило заменяет список.</li></ul>" +
+      "<p><b>Действие</b> (правый список):</p><ul>" +
+      "<li><b>→ VPN</b> (PROXY) — пустить через VPN (разблокировать).</li>" +
+      "<li><b>→ напрямую</b> (DIRECT) — в обход VPN.</li>" +
+      "<li><b>→ блок</b> (REJECT) — заблокировать домен.</li></ul>" +
+      "<p>Массовое поле и кнопки «Разблокировать» работают как «домен+поддомены → VPN».</p>",
+    showList: "Показать списком", showItems: "Показать по одному",
+    bulkHint: "Полный список доменов, по одному в строке. «Сохранить» синхронизирует: добавит новые и удалит убранные. Понимает вставку v2ray-списков.",
+    save: "Сохранить", cancel: "Отмена",
+    unblock: "Разблокировать", loading: "Загрузка…",
+    autoUpdate: "Авто-апдейт", iv1h: "каждый час", iv6h: "каждые 6 часов", iv12h: "каждые 12 часов", iv24h: "раз в сутки",
+    autoHint: "Сам синхронизирует включённые наборы-списки: добавляет новые домены и убирает исчезнувшие.",
+    ipHint: "IP/подсети, трафик к которым идёт мимо mihomo напрямую (например, VPN-ноды). Голый IPv4 получит /32.",
+    exclusions: "Исключения", system: "системный",
+    phDomain: "example.com", phGeosite: "telegram, youtube, netflix…",
+    done: "Готово", errP: "Ошибка: ", dup: "Уже есть в списке", listsNA: "Списки недоступны",
+    on_: "Включить ", off_: "Отключить ", upd_: "Обновить ",
+    enabling: "Включаю ", disabling: "Отключаю ", updating: "Обновляю ",
+    adding: "Добавляю ", removing: "Удаляю…", applying: "Применяю…", saving: "Сохраняю и применяю…",
+    added: "Добавлено", removedC: "удалено", already: "уже было", willAdd: "добавит", willRem: "уберёт",
+    onCount: " своих + ", onCount2: " системных", en_: "Вкл", dis_: "Выкл",
+    confirmDel: n => "Будет удалено доменов: " + n + ". Продолжить?"
+  },
+  en: {
+    h1: "nikki · routing",
+    tabDomains: "Domains via VPN", tabIps: "IP exclusions",
+    add: "Add", tType: "match type", nAction: "action",
+    tSuffix: "domain + subdomains", tDomain: "exact domain", tKeyword: "keyword",
+    nProxy: "→ VPN", nDirect: "→ direct", nReject: "→ block",
+    helpSummary: "❓ What these mean & how to use",
+    helpBody: "<p><b>Match type</b> (left select):</p><ul>" +
+      "<li><b>domain + subdomains</b> (DOMAIN-SUFFIX) — the usual choice: <code>telegram.org</code> also matches <code>web.telegram.org</code> and all subdomains.</li>" +
+      "<li><b>exact domain</b> (DOMAIN) — only the exact name.</li>" +
+      "<li><b>keyword</b> (DOMAIN-KEYWORD) — if the name <i>contains</i> the word: <code>google</code> → everything with «google» (broad).</li>" +
+      "<li><b>GEOSITE</b> — a ready category from the DB (auto-updates). Type the <i>category name</i>: <code>telegram</code>, <code>youtube</code>, <code>netflix</code>… One rule replaces a whole list.</li></ul>" +
+      "<p><b>Action</b> (right select):</p><ul>" +
+      "<li><b>→ VPN</b> (PROXY) — route via VPN (unblock).</li>" +
+      "<li><b>→ direct</b> (DIRECT) — bypass the VPN.</li>" +
+      "<li><b>→ block</b> (REJECT) — block the domain.</li></ul>" +
+      "<p>Bulk field and the «Unblock» buttons always act as «domain+subdomains → VPN».</p>",
+    showList: "Show as list", showItems: "Show one-by-one",
+    bulkHint: "Full domain list, one per line. «Save» syncs: adds new lines and removes the ones you deleted. Understands pasted v2ray lists.",
+    save: "Save", cancel: "Cancel",
+    unblock: "Unblock", loading: "Loading…",
+    autoUpdate: "Auto-update", iv1h: "hourly", iv6h: "every 6 hours", iv12h: "every 12 hours", iv24h: "daily",
+    autoHint: "Keeps enabled list-presets in sync: adds new domains and removes vanished ones.",
+    ipHint: "IPs/subnets whose traffic goes straight past mihomo (e.g. VPN nodes). A bare IPv4 gets /32.",
+    exclusions: "Exclusions", system: "system",
+    phDomain: "example.com", phGeosite: "telegram, youtube, netflix…",
+    done: "Done", errP: "Error: ", dup: "Already in the list", listsNA: "Lists unavailable",
+    on_: "Enable ", off_: "Disable ", upd_: "Update ",
+    enabling: "Enabling ", disabling: "Disabling ", updating: "Updating ",
+    adding: "Adding ", removing: "Removing…", applying: "Applying…", saving: "Saving & applying…",
+    added: "Added", removedC: "removed", already: "existing", willAdd: "adds", willRem: "removes",
+    onCount: " custom + ", onCount2: " system", en_: "On", dis_: "Off",
+    confirmDel: n => "This will remove " + n + " domain(s). Continue?"
+  }
+};
+const t = k => (I18N[LANG] && I18N[LANG][k] !== undefined) ? I18N[LANG][k] : (I18N.ru[k] || k);
+
+function applyI18n(){
+  document.documentElement.lang = LANG;
+  document.querySelectorAll("[data-i18n]").forEach(el => el.textContent = t(el.dataset.i18n));
+  document.querySelectorAll("[data-i18n-html]").forEach(el => el.innerHTML = t(el.dataset.i18nHtml));
+  document.querySelectorAll("[data-i18n-title]").forEach(el => el.title = t(el.dataset.i18nTitle));
+  document.querySelectorAll(".lang a").forEach(a => a.classList.toggle("on", a.dataset.lang === LANG));
+  $("#modeToggle").textContent = listMode ? t("showItems") : t("showList");
+  $("#domain").placeholder = $("#rtype").value === "GEOSITE" ? t("phGeosite") : t("phDomain");
+  renderList(); renderPresets(); loadIps();
+}
+function setLang(l){
+  LANG = (l === "en") ? "en" : "ru";
+  try { localStorage.nikkiLang = LANG; } catch(e){}
+  applyI18n();
+  fetch("", { method:"POST", body:new URLSearchParams({ action:"setlang", lang:LANG }) });
+}
+document.querySelectorAll(".lang a").forEach(a => a.addEventListener("click", () => setLang(a.dataset.lang)));
+
+const setMsg = (el, txt, ok=true) => { el.textContent = txt; el.style.color = ok ? "" : "#dc2626"; };
+async function api(action, params){
+  const r = await fetch("", { method:"POST", body: new URLSearchParams({ action, ...params }) });
+  return r.json();
+}
+
+/* ---------- tabs ---------- */
+document.querySelectorAll(".tab").forEach(tb => tb.addEventListener("click", () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+  document.querySelectorAll(".view").forEach(x => x.classList.remove("active"));
+  tb.classList.add("active");
+  $("#view-" + tb.dataset.view).classList.add("active");
+}));
+
+/* ---------- domains ---------- */
+function suffixMatchers(){
+  return new Set(RULES.filter(x => x.type === "DOMAIN-SUFFIX" && x.node === "PROXY").map(x => x.matcher));
+}
+function renderList(){
+  const ul = $("#list"); ul.innerHTML = "";
+  RULES.forEach(x => {
+    const li = document.createElement("li");
+    if (x.enabled === "0") li.className = "off";
+    li.innerHTML =
+      '<span class="dom">' + x.matcher + '</span>' +
+      '<span class="meta">' + x.type + ' → ' + x.node + '</span>' +
+      '<button class="ghost" data-act="toggle" data-idx="' + x.idx + '">' + (x.enabled === "0" ? "on" : "off") + '</button>' +
+      '<button class="ghost" data-act="del" data-idx="' + x.idx + '">✕</button>';
+    ul.appendChild(li);
+  });
+  $("#count").textContent = "(" + suffixMatchers().size + ")";
+}
+function taggedSet(id){
+  return new Set(RULES.filter(r => (" " + (r.src || "") + " ").indexOf(" " + id + " ") >= 0).map(r => r.matcher));
+}
+function renderPresets(){
+  if (PRESETS.length === 0) return;
+  const box = $("#presets"); box.innerHTML = "";
+  PRESETS.forEach(p => p.geosite ? renderGeositePreset(box, p) : renderListPreset(box, p));
+}
+function renderGeositePreset(box, p){
+  const on = RULES.some(r => r.type === "GEOSITE" && r.matcher === p.geosite);
+  const ips = (p.ipcidr || []).join(",");
+  const b = document.createElement("button");
+  b.className = "preset" + (on ? " on" : "");
+  b.textContent = (on ? t("off_") : t("on_")) + p.name;
+  b.title = "GEOSITE," + p.geosite + " → " + (p.node || "PROXY") + (ips ? "  (+ IP: " + (p.ipcidr || []).join(" ") + ")" : "");
+  b.addEventListener("click", async () => {
+    b.disabled = true;
+    setMsg($("#presetMsg"), (on ? t("disabling") : t("enabling")) + p.name + "…");
+    const res = on ? await api("geosite_off", { cat: p.geosite, ips })
+                   : await api("geosite_on", { cat: p.geosite, node: p.node || "PROXY", ips });
+    if (res.ok){ setMsg($("#presetMsg"), t("done")); await loadDomains(); }
+    else { setMsg($("#presetMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
+  });
+  box.appendChild(b);
+}
+function renderListPreset(box, p){
+  const L = new Set(p.domains || []);
+  const tagged = taggedSet(p.id);
+  const have = suffixMatchers();
+  const inSync = tagged.size === L.size && [...L].every(d => tagged.has(d));
+  const presentAny = [...L].some(d => have.has(d));
+  let state, label, cls;
+  if (inSync && L.size > 0)                   { state = "on";   label = t("off_") + p.name; cls = " on"; }
+  else if (tagged.size === 0 && !presentAny)  { state = "off";  label = t("on_")  + p.name; cls = ""; }
+  else                                        { state = "part"; label = t("upd_") + p.name; cls = " partial"; }
+  const b = document.createElement("button");
+  b.className = "preset" + cls;
+  b.textContent = label;
+  if (state === "part") {
+    const add = [...L].filter(d => !have.has(d)).length;
+    const rem = [...tagged].filter(d => !L.has(d)).length;
+    b.title = t("willAdd") + ": " + add + " · " + t("willRem") + ": " + rem;
+  }
+  b.addEventListener("click", async () => {
+    b.disabled = true;
+    const off = state === "on";
+    setMsg($("#presetMsg"), (off ? t("disabling") : state === "part" ? t("updating") : t("enabling")) + p.name + "…");
+    const res = off ? await api("preset_off", { id: p.id }) : await api("preset_sync", { id: p.id });
+    if (res.ok){
+      setMsg($("#presetMsg"), off ? (t("done")) : (t("done") + ": +" + res.added + " −" + res.removed));
+      await loadDomains();
+    } else { setMsg($("#presetMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
+  });
+  box.appendChild(b);
+}
+async function loadDomains(){
+  RULES = await (await fetch("?api=list")).json();
+  renderList(); renderPresets();
+  if (!$("#bulkWrap").hidden) $("#bulk").value = [...suffixMatchers()].join("\n");
+}
+
+/* view-mode toggle */
+let listMode = false;
+$("#modeToggle").addEventListener("click", () => {
+  listMode = !listMode;
+  $("#bulkWrap").hidden = !listMode;
+  $("#list").hidden = listMode;
+  $("#modeToggle").textContent = listMode ? t("showItems") : t("showList");
+  if (listMode) $("#bulk").value = [...suffixMatchers()].join("\n");
+});
+function exitListMode(){
+  listMode = false; $("#bulkWrap").hidden = true; $("#list").hidden = false;
+  $("#modeToggle").textContent = t("showList");
+}
+$("#cancelList").addEventListener("click", exitListMode);
+$("#saveList").addEventListener("click", async () => {
+  const wanted = new Set($("#bulk").value.split(/[\s,;]+/).map(s => s.trim().toLowerCase()).filter(Boolean));
+  const have = suffixMatchers();
+  const toRemove = [...have].filter(d => !wanted.has(d)).length;
+  if (toRemove > 0 && !confirm(t("confirmDel")(toRemove))) return;
+  $("#saveList").disabled = true;
+  setMsg($("#msg"), t("saving"));
+  const res = await api("setall", { domains: $("#bulk").value });
+  $("#saveList").disabled = false;
+  if (res.ok){ setMsg($("#msg"), t("added") + ": " + res.added + " · " + t("removedC") + ": " + res.removed); await loadDomains(); exitListMode(); }
+  else setMsg($("#msg"), t("errP") + (res.error || "?"), false);
+});
+$("#rtype").addEventListener("change", () => {
+  $("#domain").placeholder = $("#rtype").value === "GEOSITE" ? t("phGeosite") : t("phDomain");
+});
+$("#addForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const d = $("#domain").value.trim(); if (!d) return;
+  const type = $("#rtype").value, node = $("#rnode").value;
+  $("#addBtn").disabled = true;
+  setMsg($("#msg"), t("adding") + "«" + d + "»…");
+  const res = await api("add", { domain: d, type, node });
+  $("#addBtn").disabled = false;
+  if (res.ok){ setMsg($("#msg"), res.dup ? t("dup") : (t("done") + ": " + type + " «" + d + "» → " + node)); $("#domain").value = ""; loadDomains(); }
+  else setMsg($("#msg"), t("errP") + (res.error || "?"), false);
+});
+$("#list").addEventListener("click", async e => {
+  const b = e.target.closest("button"); if (!b) return;
+  const { act, idx } = b.dataset;
+  b.disabled = true;
+  setMsg($("#msg"), act === "del" ? t("removing") : t("applying"));
+  const res = await api(act, { idx });
+  if (res.ok){ setMsg($("#msg"), t("done")); loadDomains(); }
+  else { setMsg($("#msg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
+});
+
+/* ---------- ip exclusions ---------- */
+async function loadIps(){
+  const ips = await (await fetch("?api=iplist")).json();
+  const ul = $("#ipList"); ul.innerHTML = "";
+  const custom = ips.filter(x => !x.protected);
+  $("#ipCount").textContent = "(" + custom.length + t("onCount") + (ips.length - custom.length) + t("onCount2") + ")";
+  ips.forEach(x => {
+    const li = document.createElement("li");
+    li.innerHTML = '<span class="dom">' + x.ip + '</span>' +
+      (x.protected ? '<span class="badge">' + t("system") + '</span>' : '<button class="ghost" data-ip="' + x.ip + '">✕</button>');
+    ul.appendChild(li);
+  });
+}
+$("#ipForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const ip = $("#ip").value.trim(); if (!ip) return;
+  $("#ipBtn").disabled = true;
+  setMsg($("#ipMsg"), t("adding") + ip + "…");
+  const res = await api("ipadd", { ip });
+  $("#ipBtn").disabled = false;
+  if (res.ok){ setMsg($("#ipMsg"), res.dup ? t("dup") : (t("done") + ": " + (res.ip || ip))); $("#ip").value = ""; loadIps(); }
+  else setMsg($("#ipMsg"), t("errP") + (res.error || "?"), false);
+});
+$("#ipList").addEventListener("click", async e => {
+  const b = e.target.closest("button"); if (!b) return;
+  b.disabled = true;
+  setMsg($("#ipMsg"), t("removing"));
+  const res = await api("ipdel", { ip: b.dataset.ip });
+  if (res.ok){ setMsg($("#ipMsg"), t("done")); loadIps(); }
+  else { setMsg($("#ipMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
+});
+
+/* ---------- presets + autosync loaders ---------- */
+async function loadPresets(){
+  const box = $("#presets");
+  try {
+    PRESETS = await (await fetch("?api=presets")).json();
+    if (!Array.isArray(PRESETS) || !PRESETS.length) throw 0;
+    renderPresets();
+  } catch(e){ PRESETS = []; box.innerHTML = ""; setMsg($("#presetMsg"), t("listsNA"), false); }
+}
+async function loadAutosync(){
+  try {
+    const s = await (await fetch("?api=autosync")).json();
+    $("#autoOn").checked = !!s.enabled; $("#autoIv").value = s.interval || "6h"; $("#autoIv").disabled = !s.enabled;
+  } catch(e){}
+}
+async function saveAutosync(){
+  const on = $("#autoOn").checked ? 1 : 0;
+  $("#autoIv").disabled = !on;
+  setMsg($("#autoMsg"), t("saving"));
+  const res = await api("autosync", { on, interval: $("#autoIv").value });
+  if (res.ok) setMsg($("#autoMsg"), res.enabled ? (t("en_") + " · " + res.interval) : t("dis_"));
+  else setMsg($("#autoMsg"), t("errP"), false);
+}
+$("#autoOn").addEventListener("change", saveAutosync);
+$("#autoIv").addEventListener("change", saveAutosync);
+
+/* ---------- boot ---------- */
+(async () => {
+  let def = "ru";
+  try { const c = await (await fetch("?api=config")).json(); def = c.lang || "ru"; } catch(e){}
+  try { LANG = localStorage.nikkiLang || def; } catch(e){ LANG = def; }
+  applyI18n();
+  loadDomains(); loadIps(); loadPresets(); loadAutosync();
+})();
+</script>
+</body>
+</html>
+HTML

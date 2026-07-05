@@ -1,0 +1,13 @@
+{
+	"admin/services/nikki-unblock": {
+		"title": "nikki · Unblock",
+		"order": 41,
+		"action": {
+			"type": "view",
+			"path": "nikki-unblock/app"
+		},
+		"depends": {
+			"acl": [ "luci-app-nikki-unblock" ]
+		}
+	}
+}

@@ -1,0 +1,11 @@
+{
+	"luci-app-nikki-unblock": {
+		"description": "Grant access to the nikki-unblock UI",
+		"read": {
+			"uci": [ "nikki", "nikki-unblock" ]
+		},
+		"write": {
+			"uci": [ "nikki", "nikki-unblock" ]
+		}
+	}
+}

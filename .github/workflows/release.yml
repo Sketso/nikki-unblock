@@ -1,0 +1,70 @@
+name: build & release
+
+# Builds the architecture-independent package with the OpenWrt SDK and publishes it to the
+# "latest" release under stable asset names (luci-app-nikki-unblock.apk / .ipk) that feed.sh pulls.
+#
+# NOTE: OpenWrt package builds can't be validated locally — the first run may need a small tweak
+# (SDK ARCH tag / output path). Trigger via a tag push (git tag v1.0.0 && git push --tags) or the
+# "Run workflow" button.
+
+on:
+  push:
+    tags: [ "v*" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - release: "24.10.0"   # opkg -> .ipk
+            ext: ipk
+          - release: "SNAPSHOT"  # apk  -> .apk
+            ext: apk
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build package (OpenWrt SDK)
+        uses: openwrt/gh-action-sdk@main
+        env:
+          ARCH: x86_64-${{ matrix.release }}
+          FEEDNAME: nikki_unblock
+          PACKAGES: luci-app-nikki-unblock
+          NO_REFRESH_CHECK: "1"
+
+      - name: Collect artifact under a stable name
+        run: |
+          set -e
+          mkdir -p out
+          f=$(find bin -name "luci-app-nikki-unblock*.${{ matrix.ext }}" | head -1)
+          echo "built: $f"
+          cp "$f" "out/luci-app-nikki-unblock.${{ matrix.ext }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-${{ matrix.ext }}
+          path: out/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Flatten
+        run: |
+          mkdir -p out
+          find dist -type f -exec cp {} out/ \;
+          ls -l out
+      - name: Publish to "latest" release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'latest' }}
+          name: ${{ github.ref_type == 'tag' && github.ref_name || 'latest' }}
+          files: out/*

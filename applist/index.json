@@ -1,0 +1,19 @@
+[
+  { "id": "telegram", "name": "Telegram",             "geosite": "telegram",
+    "ipcidr": ["91.108.0.0/16","149.154.160.0/20","185.76.151.0/24","95.161.64.0/20","91.105.192.0/23"] },
+  { "id": "youtube",  "name": "YouTube",              "geosite": "youtube" },
+  { "id": "google",   "name": "Google",               "geosite": "google" },
+  { "id": "discord",  "name": "Discord",              "geosite": "discord" },
+  { "id": "twitch",   "name": "Twitch",               "geosite": "twitch" },
+  { "id": "netflix",  "name": "Netflix",              "geosite": "netflix" },
+  { "id": "spotify",  "name": "Spotify",              "geosite": "spotify" },
+  { "id": "openai",   "name": "ChatGPT / OpenAI",     "geosite": "openai" },
+  { "id": "twitter",  "name": "Twitter / X",          "geosite": "twitter" },
+  { "id": "meta",     "name": "Instagram / Facebook", "geosite": "facebook" },
+  { "id": "tiktok",   "name": "TikTok",               "geosite": "tiktok" },
+  { "id": "github",   "name": "GitHub",               "geosite": "github" },
+  { "id": "reddit",   "name": "Reddit",               "geosite": "reddit" },
+  { "id": "torrents", "name": "Torrents (list)" },
+  { "id": "social",   "name": "Social (list)" },
+  { "id": "ads",      "name": "Ads → block",          "geosite": "category-ads-all", "node": "REJECT" }
+]

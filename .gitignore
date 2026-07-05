@@ -1,0 +1,10 @@
+# build artifacts
+/bin/
+/out/
+/dist/
+*.ipk
+*.apk
+# editor/OS cruft
+.DS_Store
+Thumbs.db
+*.swp

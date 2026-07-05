@@ -1,0 +1,9 @@
+config nikki-unblock 'config'
+	# Where the preset manifest (index.json) + domain lists are fetched from (server-side).
+	# Default = the project's neutral GitHub Pages host. Point it at your own if you self-host.
+	option applist_url 'https://sketso.github.io/nikki-unblock/applist'
+	# Auto-sync of enabled domain-list presets (executed by cron).
+	option autosync_enabled '0'
+	option autosync_interval '6h'
+	# UI default language: ru | en  (each browser can override via the RU/EN switch).
+	option lang 'ru'
