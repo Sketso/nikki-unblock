@@ -156,32 +156,31 @@ iplist_json() {
 	printf ']'
 }
 
-# fetch service presets from applist server-side and emit [{id,name,geosite?,node?,ipcidr?,domains?}]
+# fetch service presets from applist server-side and emit
+# [{id,name,geosite,node,ipcidr[],domains[]}] — an entry may carry a geosite AND a domain list
+# (hybrid): the list is fetched when there is no geosite, or when the entry sets "list": true.
 presets_json() {
 	json_header
-	idx=$(curl -s --max-time 10 "$APPLIST_URL/index.json" 2>/dev/null)
+	idx=$(curl -sf --max-time 10 "$APPLIST_URL/index.json" 2>/dev/null)
 	printf '['
 	first=1; i=0
 	while :; do
 		id=$(printf '%s' "$idx" | jsonfilter -e "@[$i].id" 2>/dev/null)
 		[ -z "$id" ] && break
-		name=$(printf '%s' "$idx" | jsonfilter -e "@[$i].name" 2>/dev/null)
-		[ -z "$name" ] && name="$id"
+		name=$(printf '%s' "$idx" | jsonfilter -e "@[$i].name" 2>/dev/null); [ -z "$name" ] && name="$id"
 		geo=$(printf '%s' "$idx" | jsonfilter -e "@[$i].geosite" 2>/dev/null)
 		gnode=$(printf '%s' "$idx" | jsonfilter -e "@[$i].node" 2>/dev/null); [ -z "$gnode" ] && gnode=PROXY
-		[ "$first" = 1 ] || printf ','
-		first=0
-		if [ -n "$geo" ]; then
-			ips=$(printf '%s' "$idx" | jsonfilter -e "@[$i].ipcidr[*]" 2>/dev/null | awk '{printf "%s\"%s\"", sep, $0; sep=","}')
-			printf '{"id":"%s","name":"%s","geosite":"%s","node":"%s","ipcidr":[%s]}' "$id" "$name" "$geo" "$gnode" "$ips"
-		else
-			# -f => empty on HTTP error (else curl prints the 404 page and junk breaks the JSON);
-			# list files are served as "<id>.lst", so fall back to that if the bare id 404s
+		wantlist=$(printf '%s' "$idx" | jsonfilter -e "@[$i].list" 2>/dev/null)
+		ips=$(printf '%s' "$idx" | jsonfilter -e "@[$i].ipcidr[*]" 2>/dev/null | awk '{printf "%s\"%s\"", sep, $0; sep=","}')
+		dom=""
+		if [ -z "$geo" ] || [ -n "$wantlist" ]; then
+			# -f => empty on HTTP error (else the 404 page's junk breaks the JSON); files are "<id>.lst"
 			list=$(curl -sf --max-time 10 "$APPLIST_URL/$id" 2>/dev/null)
 			[ -z "$list" ] && list=$(curl -sf --max-time 10 "$APPLIST_URL/$id.lst" 2>/dev/null)
 			dom=$(printf '%s' "$list" | awk '{ sub(/\r$/,""); gsub(/[ \t]/,""); if ($0=="" || substr($0,1,1)=="#") next; printf "%s\"%s\"", sep, tolower($0); sep="," }')
-			printf '{"id":"%s","name":"%s","domains":[%s]}' "$id" "$name" "$dom"
 		fi
+		[ "$first" = 1 ] || printf ','; first=0
+		printf '{"id":"%s","name":"%s","geosite":"%s","node":"%s","ipcidr":[%s],"domains":[%s]}' "$id" "$name" "$geo" "$gnode" "$ips" "$dom"
 		i=$((i + 1))
 	done
 	printf ']'
@@ -1209,25 +1208,41 @@ function renderList(){
 function taggedSet(id){
   return new Set(RULES.filter(r => (" " + (r.src || "") + " ").indexOf(" " + id + " ") >= 0).map(r => r.matcher));
 }
-// current on/off/partial state of a preset
-function presetState(p){
-  if (p.geosite) return { on: RULES.some(r => r.type === "GEOSITE" && r.matcher === p.geosite), part: false };
+// on/off/partial for one facet
+function listFacet(p){
   const L = new Set(p.domains || []);
   const tagged = taggedSet(p.id);
   const have = suffixMatchers();
   const inSync = tagged.size === L.size && [...L].every(d => tagged.has(d));
   const presentAny = [...L].some(d => have.has(d));
-  if (inSync && L.size > 0) return { on: true, part: false };
-  if (tagged.size === 0 && !presentAny) return { on: false, part: false };
+  if (inSync && L.size > 0) return "on";
+  if (tagged.size === 0 && !presentAny) return "off";
+  return "part";
+}
+// combined state of a preset (geosite facet + list facet). A preset may have either or both.
+function presetState(p){
+  const facets = [];
+  if (p.geosite) facets.push(RULES.some(r => r.type === "GEOSITE" && r.matcher === p.geosite) ? "on" : "off");
+  if ((p.domains || []).length) facets.push(listFacet(p));
+  if (!facets.length) return { on: false, part: false };
+  if (facets.every(f => f === "on")) return { on: true, part: false };
+  if (facets.every(f => f === "off")) return { on: false, part: false };
   return { on: true, part: true };
 }
+// enable/disable both facets (sequential — each triggers a nikki reload)
 async function presetToggle(p, wantOn){
+  let ok = true, error;
   if (p.geosite){
     const ips = (p.ipcidr || []).join(",");
-    return wantOn ? api("geosite_on", { cat: p.geosite, node: p.node || "PROXY", ips })
-                  : api("geosite_off", { cat: p.geosite, ips });
+    const r = wantOn ? await api("geosite_on", { cat: p.geosite, node: p.node || "PROXY", ips })
+                     : await api("geosite_off", { cat: p.geosite, ips });
+    if (!r || !r.ok){ ok = false; error = r && r.error; }
   }
-  return wantOn ? api("preset_sync", { id: p.id }) : api("preset_off", { id: p.id });
+  if ((p.domains || []).length){
+    const r = wantOn ? await api("preset_sync", { id: p.id }) : await api("preset_off", { id: p.id });
+    if (!r || !r.ok){ ok = false; error = r && r.error; }
+  }
+  return { ok, error };
 }
 function showPresetInfo(p){
   $("#pmTitle").textContent = p.name;
@@ -1235,17 +1250,18 @@ function showPresetInfo(p){
   if (p.geosite){
     h += '<div class="pmrow"><b>GEOSITE</b> · <code>' + escH(p.geosite) + '</code> → ' + escH(p.node || "PROXY") + '</div>';
     h += '<div class="pmnote">' + t("pmGeo") + '</div>';
-    const ips = p.ipcidr || [];
-    if (ips.length){
-      h += '<div class="pmsub">IP-CIDR (' + ips.length + ')</div>';
-      h += '<ul class="pmlist">' + ips.map(x => '<li>' + escH(x) + '</li>').join("") + '</ul>';
-    }
-  } else {
-    const d = p.domains || [];
-    h += '<div class="pmsub">' + t("tSuffix") + ' (' + d.length + ')</div>';
-    h += d.length ? '<ul class="pmlist">' + d.map(x => '<li>' + escH(x) + '</li>').join("") + '</ul>'
-                  : '<div class="pmnote">' + t("listsNA") + '</div>';
   }
+  const ips = p.ipcidr || [];
+  if (ips.length){
+    h += '<div class="pmsub">IP-CIDR (' + ips.length + ')</div>';
+    h += '<ul class="pmlist">' + ips.map(x => '<li>' + escH(x) + '</li>').join("") + '</ul>';
+  }
+  const d = p.domains || [];
+  if (d.length){
+    h += '<div class="pmsub">' + t("tSuffix") + ' (' + d.length + ')</div>';
+    h += '<ul class="pmlist">' + d.map(x => '<li>' + escH(x) + '</li>').join("") + '</ul>';
+  }
+  if (!p.geosite && !ips.length && !d.length) h += '<div class="pmnote">' + t("listsNA") + '</div>';
   $("#pmBody").innerHTML = h;
   $("#pmodal").hidden = false;
 }
@@ -1253,10 +1269,11 @@ function presetCard(p){
   const st = presetState(p);
   const card = document.createElement("div");
   card.className = "pcard" + (st.part ? " partial" : st.on ? " on" : "");
+  // checked only when FULLY on; a partial preset shows unchecked (orange) so a click completes the sync
   card.innerHTML =
     '<span class="pname">' + escH(p.name) + '</span>' +
     '<button class="pinfo" title="' + escH(t("pmShow")) + '">?</button>' +
-    '<label class="sw"><input type="checkbox"' + (st.on || st.part ? " checked" : "") + '><span class="sl"></span></label>';
+    '<label class="sw"><input type="checkbox"' + (st.on && !st.part ? " checked" : "") + '><span class="sl"></span></label>';
   card.querySelector(".pinfo").addEventListener("click", () => showPresetInfo(p));
   card.querySelector("input").addEventListener("change", async e => {
     const chk = e.target; chk.disabled = true;

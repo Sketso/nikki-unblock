@@ -19,8 +19,10 @@ a LuCI menu entry to open it.
     Twitter/X, Instagram/Facebook, TikTok, GitHub, Reddit) → a single `GEOSITE,<cat>,PROXY` rule that
     auto-updates with Mihomo's geosite DB. Telegram also adds its DC **IP-CIDR** ranges, IPv4 + IPv6
     (so Telegram Desktop + media work, not just web).
-  - **Domain-list** cards (AI — ChatGPT/Claude/Gemini & co, Torrents, Social) synced from editable
-    `.lst` files.
+  - **Domain-list** cards (Torrents, Social) synced from editable `.lst` files.
+  - **Hybrid** cards can pair a geosite category *and* a supplementary list — e.g. **AI** =
+    `category-ai-!cn` (comprehensive, auto-updating) + a curated `ai.lst` (ChatGPT/Claude/Gemini,
+    Grok, Perplexity, Mistral, DeepSeek, Copilot, … — the transparent, editable part).
   - **Ads → block** (`GEOSITE,category-ads-all,REJECT`).
   - Rules a preset owns are hidden from the manual list below (to keep it about *your* domains); they
     stay visible in the preset card's popup and in the "show as list" view.
