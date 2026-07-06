@@ -1,0 +1,60 @@
+# AI services — chat assistants & related infra (DOMAIN-SUFFIX, i.e. base domain + subdomains)
+# One domain per line; '#' comments and blank lines are ignored.
+
+# OpenAI / ChatGPT
+openai.com
+chatgpt.com
+oaistatic.com
+oaiusercontent.com
+sora.com
+
+# Anthropic / Claude
+anthropic.com
+claude.ai
+claude.com
+
+# Google Gemini / AI Studio / DeepMind
+gemini.google.com
+aistudio.google.com
+generativelanguage.googleapis.com
+ai.google.dev
+makersuite.google.com
+notebooklm.google
+labs.google
+deepmind.google
+
+# Microsoft Copilot
+copilot.microsoft.com
+
+# xAI / Grok
+x.ai
+grok.com
+
+# Perplexity
+perplexity.ai
+pplx.ai
+
+# Mistral
+mistral.ai
+
+# DeepSeek
+deepseek.com
+
+# Meta AI
+meta.ai
+
+# Poe (Quora)
+poe.com
+
+# Character.AI
+character.ai
+
+# Hugging Face
+huggingface.co
+hf.co
+
+# Creative AI
+midjourney.com
+suno.com
+elevenlabs.io
+runwayml.com

@@ -15,11 +15,12 @@ a LuCI menu entry to open it.
 
 - **Presets ("Unblock")** — one **toggle switch** per service, in a card you can click (**?**) to see
   exactly what it contains (domain list / geosite category / IP ranges):
-  - **GEOSITE** cards (Telegram, YouTube, Google, Discord, Twitch, Netflix, Spotify, ChatGPT,
+  - **GEOSITE** cards (Telegram, YouTube, Google, Discord, Twitch, Netflix, Spotify,
     Twitter/X, Instagram/Facebook, TikTok, GitHub, Reddit) → a single `GEOSITE,<cat>,PROXY` rule that
     auto-updates with Mihomo's geosite DB. Telegram also adds its DC **IP-CIDR** ranges, IPv4 + IPv6
     (so Telegram Desktop + media work, not just web).
-  - **Domain-list** cards (Torrents, Social) synced from editable `.lst` files.
+  - **Domain-list** cards (AI — ChatGPT/Claude/Gemini & co, Torrents, Social) synced from editable
+    `.lst` files.
   - **Ads → block** (`GEOSITE,category-ads-all,REJECT`).
   - Rules a preset owns are hidden from the manual list below (to keep it about *your* domains); they
     stay visible in the preset card's popup and in the "show as list" view.
