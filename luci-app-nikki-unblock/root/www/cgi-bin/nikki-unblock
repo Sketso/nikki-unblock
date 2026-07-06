@@ -511,12 +511,15 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 
 	if [ "$action" = "add" ]; then
 		rtype=$(get_param type)
-		case "$rtype" in DOMAIN-SUFFIX|DOMAIN|DOMAIN-KEYWORD|GEOSITE) ;; *) rtype=DOMAIN-SUFFIX ;; esac
+		case "$rtype" in DOMAIN-SUFFIX|DOMAIN|DOMAIN-KEYWORD|GEOSITE|IP-CIDR) ;; *) rtype=DOMAIN-SUFFIX ;; esac
 		rnode=$(get_param node)
 		case "$rnode" in PROXY|DIRECT|REJECT|"$EXIT_GROUP") ;; *) rnode=PROXY ;; esac
 		case "$rtype" in
 			GEOSITE)        val=$(printf '%s' "$(get_param domain)" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9._!-]//g') ;;
 			DOMAIN-KEYWORD) val=$(printf '%s' "$(get_param domain)" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9.*-]//g') ;;
+			IP-CIDR)        val=$(clean_ip "$(get_param domain)")
+			                case "$val" in */*) ;; *) val="$val/32" ;; esac
+			                case "$val" in *.*/*|*:*/*) ;; *) val="" ;; esac ;;
 			*)              val=$(printf '%s' "$(get_param domain)" | parse_domains | head -1) ;;
 		esac
 		[ -z "$val" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
@@ -593,9 +596,15 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		idx=$(get_param idx | sed 's/[^0-9]//g')
 		[ -z "$idx" ] && { json_header; printf '{"ok":false,"error":"bad idx"}'; exit 0; }
 		uci -q get "nikki.@rule[$idx]" >/dev/null 2>&1 || { json_header; printf '{"ok":false,"error":"no rule"}'; exit 0; }
-		ntype=$(get_param type); case "$ntype" in DOMAIN-SUFFIX|DOMAIN|DOMAIN-KEYWORD|GEOSITE) uci set "nikki.@rule[$idx].type=$ntype" ;; esac
+		oldt=$(uci -q get "nikki.@rule[$idx].type"); oldn=$(uci -q get "nikki.@rule[$idx].node")
+		ntype=$(get_param type); case "$ntype" in DOMAIN-SUFFIX|DOMAIN|DOMAIN-KEYWORD|GEOSITE|IP-CIDR) uci set "nikki.@rule[$idx].type=$ntype" ;; esac
 		nnode=$(get_param node); case "$nnode" in PROXY|DIRECT|REJECT|"$EXIT_GROUP") uci set "nikki.@rule[$idx].node=$nnode" ;; esac
-		uci commit nikki; apply_nikki
+		uci commit nikki; apply_nikki; sleep 3
+		if ! pgrep -f /usr/bin/mihomo >/dev/null; then
+			# a bad combo (e.g. IP-CIDR with a domain value) can break the config — revert
+			uci set "nikki.@rule[$idx].type=$oldt"; uci set "nikki.@rule[$idx].node=$oldn"; uci commit nikki; apply_nikki
+			json_header; printf '{"ok":false,"error":"rejected (reverted)"}'; exit 0
+		fi
 		json_header; printf '{"ok":true}'; exit 0
 
 	elif [ "$action" = "svc" ]; then
@@ -853,6 +862,16 @@ cat <<'HTML'
   .svc .dot { display: inline-block; width: .62rem; height: .62rem; border-radius: 50%; margin-right: .45rem; vertical-align: middle; background: #8886; }
   .svc .dot.up { background: #16a34a; } .svc .dot.down { background: #dc2626; }
   .svc .btns { display: flex; gap: .5rem; flex-wrap: wrap; }
+  /* iOS-style toggle switch */
+  .sw { position: relative; display: inline-block; width: 40px; height: 24px; flex: 0 0 auto; }
+  .sw input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .sw .sl { position: absolute; inset: 0; background: #8886; border-radius: 24px; transition: background .22s; cursor: pointer; }
+  .sw .sl::before { content: ""; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: transform .22s; box-shadow: 0 1px 2px #0006; }
+  .sw input:checked + .sl { background: #16a34a; }
+  .sw input:checked + .sl::before { transform: translateX(16px); }
+  .sw input:disabled + .sl { opacity: .5; cursor: default; }
+  .swrow { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .6rem 0; border-bottom: 1px solid #8882; }
+  .swrow .swlabel { font-size: .95rem; }
 </style>
 </head>
 <body>
@@ -875,6 +894,7 @@ cat <<'HTML'
             <option value="DOMAIN" data-i18n="tDomain"></option>
             <option value="DOMAIN-KEYWORD" data-i18n="tKeyword"></option>
             <option value="GEOSITE">GEOSITE</option>
+            <option value="IP-CIDR">IP-CIDR</option>
           </select>
           <input id="domain" placeholder="example.com" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required>
           <select id="rnode" data-i18n-title="nAction">
@@ -959,13 +979,17 @@ cat <<'HTML'
   <!-- ================= MANAGEMENT ================= -->
   <section class="view" id="view-mgmt">
     <div class="svc">
-      <div class="st"><span class="dot" id="svcDot"></span><span id="svcState">…</span></div>
-      <div class="hint"><span data-i18n="svcBoot"></span>: <b id="svcBoot">…</b></div>
+      <div class="swrow">
+        <span class="swlabel"><span class="dot" id="svcDot"></span><span id="svcState">…</span></span>
+        <label class="sw"><input type="checkbox" id="svcRun"><span class="sl"></span></label>
+      </div>
+      <div class="swrow">
+        <span class="swlabel" data-i18n="svcBoot"></span>
+        <label class="sw"><input type="checkbox" id="svcBootChk"><span class="sl"></span></label>
+      </div>
       <div class="btns">
-        <button type="button" id="svcToggle" data-op="start" data-i18n="svcStart"></button>
         <button type="button" class="ghost" id="svcRestart" data-i18n="svcRestart"></button>
         <button type="button" class="ghost" id="svcReload" data-i18n="svcReload"></button>
-        <button type="button" class="ghost" id="svcBootBtn" data-op="enable" data-i18n="svcAutostart"></button>
       </div>
       <div class="msg" id="svcMsg"></div>
     </div>
@@ -1002,7 +1026,7 @@ const I18N = {
     autoHint: "Сам синхронизирует включённые наборы-списки: добавляет новые домены и убирает исчезнувшие.",
     ipHint: "IP/подсети, трафик к которым идёт мимо mihomo напрямую (например, VPN-ноды). Голый IPv4 получит /32.",
     exclusions: "Исключения", system: "системный",
-    phDomain: "example.com", phGeosite: "telegram, youtube, netflix…",
+    phDomain: "example.com", phGeosite: "telegram, youtube, netflix…", phIp: "1.2.3.0/24  ·  1.2.3.4",
     done: "Готово", errP: "Ошибка: ", dup: "Уже есть в списке", listsNA: "Списки недоступны",
     tabNodes: "Ноды", nUnblock: "→ VPN (+ноды)",
     nodesHint: "Свои VPN-выходы. Перетащи .conf или вставь конфиг/ссылку: AmneziaWG/WireGuard, vless://…, подписку https://…, или сырой clash-YAML. Добавленные ноды образуют группу UNBLOCK — выбирай «→ VPN (+ноды)» как действие правила.",
@@ -1046,7 +1070,7 @@ const I18N = {
     autoHint: "Keeps enabled list-presets in sync: adds new domains and removes vanished ones.",
     ipHint: "IPs/subnets whose traffic goes straight past mihomo (e.g. VPN nodes). A bare IPv4 gets /32.",
     exclusions: "Exclusions", system: "system",
-    phDomain: "example.com", phGeosite: "telegram, youtube, netflix…",
+    phDomain: "example.com", phGeosite: "telegram, youtube, netflix…", phIp: "1.2.3.0/24  ·  1.2.3.4",
     done: "Done", errP: "Error: ", dup: "Already in the list", listsNA: "Lists unavailable",
     tabNodes: "Nodes", nUnblock: "→ VPN (+nodes)",
     nodesHint: "Your own VPN exits. Drop a .conf or paste a config/link: AmneziaWG/WireGuard, vless://…, a subscription https://…, or raw clash YAML. Added nodes form the UNBLOCK group — pick «→ VPN (+nodes)» as a rule action.",
@@ -1076,7 +1100,7 @@ function applyI18n(){
   document.querySelectorAll("[data-i18n-ph]").forEach(el => el.placeholder = t(el.dataset.i18nPh));
   document.querySelectorAll(".lang a").forEach(a => a.classList.toggle("on", a.dataset.lang === LANG));
   $("#modeToggle").textContent = listMode ? t("showItems") : t("showList");
-  $("#domain").placeholder = $("#rtype").value === "GEOSITE" ? t("phGeosite") : t("phDomain");
+  $("#domain").placeholder = $("#rtype").value === "GEOSITE" ? t("phGeosite") : $("#rtype").value === "IP-CIDR" ? t("phIp") : t("phDomain");
   renderList(); renderPresets(); loadIps();
 }
 function setLang(l){
@@ -1111,7 +1135,8 @@ function typeOpts(){
   return '<option value="DOMAIN-SUFFIX">' + t("tSuffix") + '</option>' +
          '<option value="DOMAIN">' + t("tDomain") + '</option>' +
          '<option value="DOMAIN-KEYWORD">' + t("tKeyword") + '</option>' +
-         '<option value="GEOSITE">GEOSITE</option>';
+         '<option value="GEOSITE">GEOSITE</option>' +
+         '<option value="IP-CIDR">IP-CIDR</option>';
 }
 function nodeOpts(cur){
   let o = '<option value="PROXY">' + t("nProxy") + '</option>';
@@ -1129,7 +1154,7 @@ function renderList(){
       '<span class="dom">' + escH(x.matcher) + '</span>' +
       '<select class="edit" data-field="type">' + typeOpts() + '</select>' +
       '<select class="edit" data-field="node">' + nodeOpts(x.node) + '</select>' +
-      '<button class="ghost" data-act="toggle" data-idx="' + x.idx + '">' + (x.enabled === "0" ? "on" : "off") + '</button>' +
+      '<label class="sw"><input type="checkbox" data-act="toggle" data-idx="' + x.idx + '"' + (x.enabled === "0" ? "" : " checked") + '><span class="sl"></span></label>' +
       '<button class="ghost" data-act="del" data-idx="' + x.idx + '">✕</button>';
     li.dataset.idx = x.idx;
     li.querySelector('[data-field="type"]').value = x.type;
@@ -1226,7 +1251,7 @@ $("#saveList").addEventListener("click", async () => {
   else setMsg($("#msg"), t("errP") + (res.error || "?"), false);
 });
 $("#rtype").addEventListener("change", () => {
-  $("#domain").placeholder = $("#rtype").value === "GEOSITE" ? t("phGeosite") : t("phDomain");
+  $("#domain").placeholder = $("#rtype").value === "GEOSITE" ? t("phGeosite") : $("#rtype").value === "IP-CIDR" ? t("phIp") : t("phDomain");
 });
 $("#addForm").addEventListener("submit", async e => {
   e.preventDefault();
@@ -1248,8 +1273,16 @@ $("#list").addEventListener("click", async e => {
   if (res.ok){ setMsg($("#msg"), t("done")); loadDomains(); }
   else { setMsg($("#msg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
 });
-// inline edit of an existing rule's type/action via the per-row dropdowns
+// row change: enable/disable slider, or inline type/action edit
 $("#list").addEventListener("change", async e => {
+  const tg = e.target.closest('input[data-act="toggle"]');
+  if (tg){
+    tg.disabled = true; setMsg($("#msg"), t("applying"));
+    const res = await api("toggle", { idx: tg.dataset.idx });
+    if (res.ok){ setMsg($("#msg"), t("done")); }
+    else { setMsg($("#msg"), t("errP") + (res.error || "?"), false); }
+    loadDomains(); return;
+  }
   const sel = e.target.closest("select.edit"); if (!sel) return;
   const li = sel.closest("li"); const idx = li.dataset.idx;
   const type = li.querySelector('[data-field="type"]').value;
@@ -1257,7 +1290,7 @@ $("#list").addEventListener("change", async e => {
   setMsg($("#msg"), t("applying"));
   const res = await api("ruledit", { idx, type, node });
   if (res.ok){ setMsg($("#msg"), t("done")); loadDomains(); }
-  else { setMsg($("#msg"), t("errP") + (res.error || "?"), false); }
+  else { setMsg($("#msg"), t("errP") + (res.error || "?"), false); loadDomains(); }
 });
 
 /* ---------- ip exclusions ---------- */
@@ -1338,7 +1371,7 @@ async function loadNodes(){
       btns = '<button class="ghost" data-checkname="' + encodeURIComponent(n.name) + '">↻</button>';
     } else {
       if (n.kind === "node"){
-        btns += '<button class="ghost" data-toggle="' + n.id + '">' + (off ? t("nodeOff") : t("nodeOn")) + '</button>';
+        btns += '<label class="sw"><input type="checkbox" data-toggle="' + n.id + '"' + (off ? "" : " checked") + '><span class="sl"></span></label>';
         btns += '<button class="ghost" data-check="' + n.id + '">↻</button>';
       }
       btns += '<button class="ghost" data-del="' + n.id + '">✕</button>';
@@ -1383,11 +1416,6 @@ $("#nodeList").addEventListener("click", async e => {
     const res = await api("nodedel", { id: b.dataset.del });
     if (res.ok){ setMsg($("#nodeMsg"), t("done")); loadNodes(); loadDomains(); }
     else { setMsg($("#nodeMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
-  } else if (b.dataset.toggle){
-    b.disabled = true; setMsg($("#nodeMsg"), t("saving"));
-    const res = await api("nodetoggle", { id: b.dataset.toggle });
-    if (res.ok){ setMsg($("#nodeMsg"), t("done")); loadNodes(); loadDomains(); }
-    else { setMsg($("#nodeMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
   } else if (b.dataset.check || b.dataset.checkname){
     b.disabled = true; setMsg($("#nodeMsg"), t("validating"));
     const p = b.dataset.check ? { id: b.dataset.check } : { name: decodeURIComponent(b.dataset.checkname) };
@@ -1396,6 +1424,14 @@ $("#nodeList").addEventListener("click", async e => {
     if (res.ok) setMsg($("#nodeMsg"), (res.delay === "x" ? t("nodeNoResp") : res.delay + " " + t("nodeMs")), res.delay !== "x");
     else setMsg($("#nodeMsg"), t("errP") + (res.error || "?"), false);
   }
+});
+$("#nodeList").addEventListener("change", async e => {
+  const c = e.target.closest('input[data-toggle]'); if (!c) return;
+  c.disabled = true; setMsg($("#nodeMsg"), t("saving"));
+  const res = await api("nodetoggle", { id: c.dataset.toggle });
+  if (res.ok){ setMsg($("#nodeMsg"), t("done")); }
+  else { setMsg($("#nodeMsg"), t("errP") + (res.error || "?"), false); }
+  loadNodes(); loadDomains();
 });
 (function(){
   const dz = $("#dropzone");
@@ -1412,25 +1448,24 @@ function renderSvc(s){
   const run = s.running === 1;
   $("#svcDot").className = "dot " + (run ? "up" : "down");
   $("#svcState").textContent = run ? t("svcRunning") : t("svcStopped");
-  $("#svcBoot").textContent = s.boot === 1 ? t("svcOn") : t("svcOff");
-  const tg = $("#svcToggle"); tg.textContent = run ? t("svcStop") : t("svcStart"); tg.dataset.op = run ? "stop" : "start";
-  $("#svcBootBtn").dataset.op = s.boot === 1 ? "disable" : "enable";
+  $("#svcRun").checked = run;
+  $("#svcBootChk").checked = s.boot === 1;
 }
 async function loadSvc(){
   try { renderSvc(await (await fetch("?api=svcstatus")).json()); } catch(e){}
 }
-async function svcDo(op, btn){
+async function svcDo(op, el){
   if (!op) return;
-  btn.disabled = true; setMsg($("#svcMsg"), t("applying"));
+  el.disabled = true; setMsg($("#svcMsg"), t("applying"));
   let s; try { s = await api("svc", { op }); } catch(e){ s = {}; }
-  btn.disabled = false;
+  el.disabled = false;
   if (s && s.ok){ setMsg($("#svcMsg"), t("done")); renderSvc(s); }
-  else setMsg($("#svcMsg"), t("errP") + ((s && s.error) || "?"), false);
+  else { setMsg($("#svcMsg"), t("errP") + ((s && s.error) || "?"), false); loadSvc(); }
 }
-$("#svcToggle").addEventListener("click", e => svcDo(e.currentTarget.dataset.op, e.currentTarget));
+$("#svcRun").addEventListener("change", e => svcDo(e.currentTarget.checked ? "start" : "stop", e.currentTarget));
+$("#svcBootChk").addEventListener("change", e => svcDo(e.currentTarget.checked ? "enable" : "disable", e.currentTarget));
 $("#svcRestart").addEventListener("click", e => svcDo("restart", e.currentTarget));
 $("#svcReload").addEventListener("click", e => svcDo("reload", e.currentTarget));
-$("#svcBootBtn").addEventListener("click", e => svcDo(e.currentTarget.dataset.op, e.currentTarget));
 
 /* ---------- boot ---------- */
 (async () => {
