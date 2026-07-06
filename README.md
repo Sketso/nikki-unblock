@@ -13,13 +13,16 @@ a LuCI menu entry to open it.
 
 ## Features
 
-- **Presets ("Unblock")** — one click per service:
-  - **GEOSITE** buttons (Telegram, YouTube, Google, Discord, Twitch, Netflix, Spotify, ChatGPT,
+- **Presets ("Unblock")** — one **toggle switch** per service, in a card you can click (**?**) to see
+  exactly what it contains (domain list / geosite category / IP ranges):
+  - **GEOSITE** cards (Telegram, YouTube, Google, Discord, Twitch, Netflix, Spotify, ChatGPT,
     Twitter/X, Instagram/Facebook, TikTok, GitHub, Reddit) → a single `GEOSITE,<cat>,PROXY` rule that
-    auto-updates with Mihomo's geosite DB. Telegram also adds its DC **IP-CIDR** ranges (so Telegram
-    Desktop + media work, not just web).
-  - **Domain-list** buttons (Torrents, Social) synced from editable `.lst` files.
+    auto-updates with Mihomo's geosite DB. Telegram also adds its DC **IP-CIDR** ranges, IPv4 + IPv6
+    (so Telegram Desktop + media work, not just web).
+  - **Domain-list** cards (Torrents, Social) synced from editable `.lst` files.
   - **Ads → block** (`GEOSITE,category-ads-all,REJECT`).
+  - Rules a preset owns are hidden from the manual list below (to keep it about *your* domains); they
+    stay visible in the preset card's popup and in the "show as list" view.
 - **Manual rules** — add a `DOMAIN-SUFFIX` / `DOMAIN` / `DOMAIN-KEYWORD` / `GEOSITE` / `IP-CIDR` matcher
   with a `PROXY` / `DIRECT` / `REJECT` action. List / bulk / full-text editor views. The list is
   newest-first and each row has inline dropdowns to **re-type or re-route an existing rule** on the spot,
