@@ -31,7 +31,9 @@ a LuCI menu entry to open it.
   converted to a mihomo proxy, injected into nikki, and **auto-checked** (latency probe via the mihomo
   API). Added nodes form a fallback group `UNBLOCK` (= your profile's base group + the added nodes);
   pick **"→ VPN (+nodes)"** as a rule action to route through the extended pool. A bad config is
-  auto-reverted so it can't break nikki.
+  auto-reverted so it can't break nikki. The tab also lists your **profile's exit nodes** (read-only,
+  with an on-demand latency check) so you see the full picture, and each added node has an
+  **enable/disable** toggle (disabled nodes stay defined but drop out of the `UNBLOCK` pool).
 - Everything applies via `/etc/init.d/nikki reload`.
 
 ## Requirements

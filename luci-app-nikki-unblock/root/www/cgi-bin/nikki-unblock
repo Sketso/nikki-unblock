@@ -328,12 +328,24 @@ urldec()   { printf '%b' "$(printf '%s' "$1" | sed 's/+/ /g; s/%/\\x/g')"; }
 b64dec()   { _d="$1"; case $((${#_d} % 4)) in 2) _d="${_d}==";; 3) _d="${_d}=";; esac; printf '%s' "$_d" | tr '_-' '/+' | base64 -d 2>/dev/null; }
 
 mihomo_secret() { grep -E "^secret:" /etc/nikki/run/config.yaml 2>/dev/null | head -1 | sed "s/secret:[[:space:]]*//; s/[\"' ]//g"; }
-# echo latency ms, or "x" on failure
+# percent-encode URL-breaking chars in a proxy name for the mihomo API path (busybox-safe, no `od`);
+# UTF-8 bytes (emoji) pass through raw — curl + mihomo's Go router accept them in the path.
+urlenc_all() { printf '%s' "$1" | sed -e 's/%/%25/g' -e 's/ /%20/g' -e 's/#/%23/g' -e 's/?/%3F/g' -e 's/&/%26/g' -e 's/+/%2B/g'; }
+# minimal JSON string escaping
+json_esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+# echo latency ms for proxy $1, or "x" on failure/timeout
 mihomo_delay() {
 	sec=$(mihomo_secret)
-	r=$(curl -s -m 14 -H "Authorization: Bearer $sec" "$MIHOMO_API/proxies/$(printf '%s' "$1" | sed 's/ /%20/g')/delay?url=http%3A%2F%2Fcp.cloudflare.com%2Fgenerate_204&timeout=10000" 2>/dev/null)
+	r=$(curl -s -m 14 -H "Authorization: Bearer $sec" "$MIHOMO_API/proxies/$(urlenc_all "$1")/delay?url=http%3A%2F%2Fcp.cloudflare.com%2Fgenerate_204&timeout=10000" 2>/dev/null)
 	d=$(printf '%s' "$r" | jsonfilter -e '@.delay' 2>/dev/null)
 	[ -n "$d" ] && echo "$d" || echo "x"
+}
+# return 0 if proxy name $1 already exists (our nodes or the live mihomo config); empty name = not taken
+name_taken() {
+	[ -z "$1" ] && return 1
+	grep -rhE "^[[:space:]]*-[[:space:]]*name:[[:space:]]*$1\$" "$NODES_DIR"/*.yaml 2>/dev/null | grep -q . && return 0
+	curl -s -m 5 -H "Authorization: Bearer $(mihomo_secret)" "$MIHOMO_API/proxies/$(urlenc_all "$1")" 2>/dev/null | grep -q '"name"' && return 0
+	return 1
 }
 
 # WireGuard/AmneziaWG .conf ($WGCONF) -> mihomo proxy yaml (2-space list-item indent)
@@ -439,7 +451,11 @@ regen_mixin() {
 		echo "    interval: 300"
 		echo "    proxies:"
 		echo "      - $BASE_GROUP"
-		for f in "$NODES_DIR"/*.yaml; do [ -f "$f" ] && grep -m1 'name:' "$f" | sed 's/.*name:[[:space:]]*//; s/^/      - /'; done
+		for f in "$NODES_DIR"/*.yaml; do
+			[ -f "$f" ] || continue
+			[ -f "$NODES_DIR/$(basename "$f" .yaml).off" ] && continue   # disabled -> defined but not in the exit group
+			grep -m1 'name:' "$f" | sed 's/.*name:[[:space:]]*//; s/^/      - /'
+		done
 		if [ "$haveprov" = 1 ]; then
 			echo "    use:"
 			for f in "$PROV_DIR"/*.yaml; do [ -f "$f" ] && head -1 "$f" | sed 's/[[:space:]]*\([^:]*\):.*/      - \1/'; done
@@ -453,18 +469,29 @@ nodes_json() {
 	json_header; printf '['; first=1
 	for f in "$NODES_DIR"/*.yaml; do
 		[ -f "$f" ] || continue
+		id=$(basename "$f" .yaml)
 		nm=$(grep -m1 'name:' "$f" | sed 's/.*name:[[:space:]]*//')
 		ty=$(grep -m1 'type:' "$f" | sed 's/.*type:[[:space:]]*//')
 		hs=$(grep -m1 'server:' "$f" | sed 's/.*server:[[:space:]]*//')
+		en=1; [ -f "$NODES_DIR/$id.off" ] && en=0
 		[ "$first" = 1 ] || printf ','; first=0
-		printf '{"id":"%s","kind":"node","name":"%s","type":"%s","host":"%s"}' "$(basename "$f" .yaml)" "$nm" "$ty" "$hs"
+		printf '{"id":"%s","kind":"node","name":"%s","type":"%s","host":"%s","enabled":%s}' "$id" "$(json_esc "$nm")" "$(json_esc "$ty")" "$(json_esc "$hs")" "$en"
 	done
 	for f in "$PROV_DIR"/*.yaml; do
 		[ -f "$f" ] || continue
 		nm=$(head -1 "$f" | sed 's/[[:space:]]*\([^:]*\):.*/\1/')
 		[ "$first" = 1 ] || printf ','; first=0
-		printf '{"id":"%s","kind":"provider","name":"%s","type":"subscription","host":""}' "$(basename "$f" .yaml)" "$nm"
+		printf '{"id":"%s","kind":"provider","name":"%s","type":"subscription","host":"","enabled":1}' "$(basename "$f" .yaml)" "$(json_esc "$nm")"
 	done
+	# profile exit nodes = members of the base group (read-only; live from mihomo, managed in the nikki profile)
+	PL="/tmp/nu-pnodes.$$"
+	curl -s -m 6 -H "Authorization: Bearer $(mihomo_secret)" "$MIHOMO_API/proxies/$(urlenc_all "$BASE_GROUP")" 2>/dev/null | jsonfilter -e '@.all[*]' 2>/dev/null > "$PL"
+	while IFS= read -r pn; do
+		[ -z "$pn" ] && continue
+		[ "$first" = 1 ] || printf ','; first=0
+		printf '{"kind":"profile","name":"%s","type":"","host":"","enabled":1}' "$(json_esc "$pn")"
+	done < "$PL"
+	rm -f "$PL"
 	printf ']'
 }
 
@@ -667,6 +694,10 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		esac
 		[ -n "$err" ] && { json_header; printf '{"ok":false,"error":"%s"}' "$err"; exit 0; }
 		if [ "$kind" = node ]; then
+			# ensure a unique proxy name — mihomo rejects a name that collides with the profile or another node
+			b="$nm"; k=1
+			while [ "$k" -lt 30 ] && name_taken "$nm"; do k=$((k+1)); nm="$b-$k"; done
+			[ "$nm" = "$b" ] || yaml=$(printf '%s\n' "$yaml" | awk -v n="$nm" 'BEGIN{d=0} /name:/&&!d{sub(/name:.*/,"name: " n);d=1} {print}')
 			id=$(san_name "$nm"); [ -z "$id" ] && id="node-$(date +%s)"
 			printf '%s\n' "$yaml" > "$NODES_DIR/$id.yaml"
 		fi
@@ -692,8 +723,22 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 	elif [ "$action" = "nodecheck" ]; then
 		id=$(get_param id | sed 's/[^a-z0-9_-]//g')
 		rn=$(grep -m1 'name:' "$NODES_DIR/$id.yaml" 2>/dev/null | sed 's/.*name:[[:space:]]*//')
+		# fall back to the raw name param (profile nodes aren't in our store) for a live probe
+		[ -z "$rn" ] && rn=$(get_param name)
 		[ -z "$rn" ] && { json_header; printf '{"ok":false,"error":"not found"}'; exit 0; }
 		json_header; printf '{"ok":true,"delay":"%s"}' "$(mihomo_delay "$rn")"; exit 0
+
+	elif [ "$action" = "nodetoggle" ]; then
+		id=$(get_param id | sed 's/[^a-z0-9_-]//g')
+		[ -f "$NODES_DIR/$id.yaml" ] || { json_header; printf '{"ok":false,"error":"not found"}'; exit 0; }
+		if [ -f "$NODES_DIR/$id.off" ]; then rm -f "$NODES_DIR/$id.off"; en=1; else : > "$NODES_DIR/$id.off"; en=0; fi
+		regen_mixin; apply_nikki; sleep 6
+		if ! pgrep -f /usr/bin/mihomo >/dev/null; then
+			if [ "$en" = 1 ]; then : > "$NODES_DIR/$id.off"; else rm -f "$NODES_DIR/$id.off"; fi
+			regen_mixin; apply_nikki
+			json_header; printf '{"ok":false,"error":"reload failed (reverted)"}'; exit 0
+		fi
+		json_header; printf '{"ok":true,"enabled":%s}' "$en"; exit 0
 	fi
 
 	json_header; printf '{"ok":false,"error":"unknown action"}'; exit 0
@@ -905,6 +950,7 @@ const I18N = {
     nodesHint: "Свои VPN-выходы. Перетащи .conf или вставь конфиг/ссылку: AmneziaWG/WireGuard, vless://…, подписку https://…, или сырой clash-YAML. Добавленные ноды образуют группу UNBLOCK — выбирай «→ VPN (+ноды)» как действие правила.",
     nodeDrop: "Перетащи сюда файл .conf", nodeName: "имя (необязательно)", nodeAdd: "Добавить и проверить",
     validating: "Добавляю и проверяю ноду…", nodeMs: "мс", nodeNoResp: "не отвечает", nodeSub: "подписка",
+    nodeProfile: "из профиля", nodeOn: "вкл", nodeOff: "выкл",
     on_: "Включить ", off_: "Отключить ", upd_: "Обновить ",
     enabling: "Включаю ", disabling: "Отключаю ", updating: "Обновляю ",
     adding: "Добавляю ", removing: "Удаляю…", applying: "Применяю…", saving: "Сохраняю и применяю…",
@@ -943,6 +989,7 @@ const I18N = {
     nodesHint: "Your own VPN exits. Drop a .conf or paste a config/link: AmneziaWG/WireGuard, vless://…, a subscription https://…, or raw clash YAML. Added nodes form the UNBLOCK group — pick «→ VPN (+nodes)» as a rule action.",
     nodeDrop: "Drop a .conf file here", nodeName: "name (optional)", nodeAdd: "Add & check",
     validating: "Adding & checking node…", nodeMs: "ms", nodeNoResp: "no response", nodeSub: "subscription",
+    nodeProfile: "from profile", nodeOn: "on", nodeOff: "off",
     on_: "Enable ", off_: "Disable ", upd_: "Update ",
     enabling: "Enabling ", disabling: "Disabling ", updating: "Updating ",
     adding: "Adding ", removing: "Removing…", applying: "Applying…", saving: "Saving & applying…",
@@ -1177,15 +1224,29 @@ $("#autoIv").addEventListener("change", saveAutosync);
 let NODES = [], EXITG = "UNBLOCK";
 async function loadNodes(){
   try { NODES = await (await fetch("?api=nodes")).json(); } catch(e){ NODES = []; }
+  const esc = s => (s + "").replace(/[<>&"]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
+  const mine = NODES.filter(n => n.kind !== "profile");
   const ul = $("#nodeList"); ul.innerHTML = "";
-  $("#nodeCount").textContent = "(" + NODES.length + ")";
-  const o = $("#optUnblock"); o.value = EXITG; o.hidden = NODES.length === 0;
+  $("#nodeCount").textContent = "(" + mine.length + ")";
+  const o = $("#optUnblock"); o.value = EXITG; o.hidden = mine.length === 0;
   NODES.forEach(n => {
     const li = document.createElement("li");
-    const meta = n.kind === "provider" ? t("nodeSub") : (n.type + (n.host ? " · " + n.host : ""));
-    li.innerHTML = '<span class="dom">' + n.name + '</span><span class="meta">' + meta + '</span>' +
-      (n.kind === "node" ? '<button class="ghost" data-check="' + n.id + '">↻</button>' : '') +
-      '<button class="ghost" data-del="' + n.id + '">✕</button>';
+    const off = n.kind === "node" && n.enabled === 0;
+    const meta = n.kind === "provider" ? t("nodeSub")
+      : n.kind === "profile" ? t("nodeProfile")
+      : (n.type + (n.host ? " · " + n.host : ""));
+    let btns = "";
+    if (n.kind === "profile"){
+      btns = '<button class="ghost" data-checkname="' + encodeURIComponent(n.name) + '">↻</button>';
+    } else {
+      if (n.kind === "node"){
+        btns += '<button class="ghost" data-toggle="' + n.id + '">' + (off ? t("nodeOff") : t("nodeOn")) + '</button>';
+        btns += '<button class="ghost" data-check="' + n.id + '">↻</button>';
+      }
+      btns += '<button class="ghost" data-del="' + n.id + '">✕</button>';
+    }
+    li.innerHTML = '<span class="dom"' + (off ? ' style="opacity:.45"' : '') + '>' + esc(n.name) + '</span>' +
+      '<span class="meta">' + meta + '</span>' + btns;
     ul.appendChild(li);
   });
 }
@@ -1211,9 +1272,15 @@ $("#nodeList").addEventListener("click", async e => {
     const res = await api("nodedel", { id: b.dataset.del });
     if (res.ok){ setMsg($("#nodeMsg"), t("done")); loadNodes(); loadDomains(); }
     else { setMsg($("#nodeMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
-  } else if (b.dataset.check){
+  } else if (b.dataset.toggle){
+    b.disabled = true; setMsg($("#nodeMsg"), t("saving"));
+    const res = await api("nodetoggle", { id: b.dataset.toggle });
+    if (res.ok){ setMsg($("#nodeMsg"), t("done")); loadNodes(); loadDomains(); }
+    else { setMsg($("#nodeMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
+  } else if (b.dataset.check || b.dataset.checkname){
     b.disabled = true; setMsg($("#nodeMsg"), t("validating"));
-    const res = await api("nodecheck", { id: b.dataset.check });
+    const p = b.dataset.check ? { id: b.dataset.check } : { name: decodeURIComponent(b.dataset.checkname) };
+    const res = await api("nodecheck", p);
     b.disabled = false;
     if (res.ok) setMsg($("#nodeMsg"), (res.delay === "x" ? t("nodeNoResp") : res.delay + " " + t("nodeMs")), res.delay !== "x");
     else setMsg($("#nodeMsg"), t("errP") + (res.error || "?"), false);
