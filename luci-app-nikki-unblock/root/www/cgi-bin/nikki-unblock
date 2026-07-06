@@ -137,7 +137,7 @@ list_json() {
 		s=$(uci -q get "nikki.@rule[$i].src")
 		[ "$first" = 1 ] || printf ','
 		first=0
-		printf '{"idx":%d,"type":"%s","matcher":"%s","node":"%s","enabled":"%s","src":"%s"}' "$i" "$t" "$m" "$n" "$e" "$s"
+		printf '{"idx":%d,"type":"%s","matcher":"%s","node":"%s","enabled":"%s","src":"%s"}' "$i" "$(json_esc "$t")" "$(json_esc "$m")" "$(json_esc "$n")" "$e" "$(json_esc "$s")"
 		i=$((i + 1))
 	done
 	printf ']'
@@ -177,7 +177,7 @@ presets_json() {
 			# -f => empty on HTTP error (else the 404 page's junk breaks the JSON); files are "<id>.lst"
 			list=$(curl -sf --max-time 10 "$APPLIST_URL/$id" 2>/dev/null)
 			[ -z "$list" ] && list=$(curl -sf --max-time 10 "$APPLIST_URL/$id.lst" 2>/dev/null)
-			dom=$(printf '%s' "$list" | awk '{ sub(/\r$/,""); gsub(/[ \t]/,""); if ($0=="" || substr($0,1,1)=="#") next; printf "%s\"%s\"", sep, tolower($0); sep="," }')
+			dom=$(printf '%s' "$list" | awk '{ sub(/\r$/,""); gsub(/[ \t]/,""); if ($0=="" || substr($0,1,1)=="#") next; s=tolower($0); if (s !~ /^[a-z0-9.*_-]+$/ || s !~ /\./) next; printf "%s\"%s\"", sep, s; sep="," }')
 		fi
 		[ "$first" = 1 ] || printf ','; first=0
 		printf '{"id":"%s","name":"%s","geosite":"%s","node":"%s","ipcidr":[%s],"domains":[%s]}' "$id" "$name" "$geo" "$gnode" "$ips" "$dom"
@@ -212,8 +212,11 @@ rule_idx_of() {
 }
 
 fetch_list() {   # $1=preset id  $2=out file ; return non-zero if empty/unreachable (never wipe on failure)
-	curl -s --max-time 10 "$APPLIST_URL/$1" 2>/dev/null \
-		| awk '{ sub(/\r$/,""); gsub(/[ \t]/,""); if ($0=="" || substr($0,1,1)=="#") next; print tolower($0) }' \
+	# -f => empty on HTTP error (a 404 body is HTML, not a list); files are served as "<id>.lst".
+	# The domain-shape filter is a hard guard so a stray HTML/error page can never become "rules".
+	{ curl -sf --max-time 10 "$APPLIST_URL/$1" 2>/dev/null || curl -sf --max-time 10 "$APPLIST_URL/$1.lst" 2>/dev/null; } \
+		| awk '{ sub(/\r$/,""); gsub(/[ \t]/,""); if ($0=="" || substr($0,1,1)=="#") next;
+		         s=tolower($0); if (s !~ /^[a-z0-9.*_-]+$/ || s !~ /\./) next; print s }' \
 		| awk '!seen[$0]++' > "$2"
 	[ -s "$2" ]
 }
