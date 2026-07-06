@@ -21,7 +21,10 @@ a LuCI menu entry to open it.
   - **Domain-list** buttons (Torrents, Social) synced from editable `.lst` files.
   - **Ads → block** (`GEOSITE,category-ads-all,REJECT`).
 - **Manual rules** — add a `DOMAIN-SUFFIX` / `DOMAIN` / `DOMAIN-KEYWORD` / `GEOSITE` matcher with a
-  `PROXY` / `DIRECT` / `REJECT` action. List / bulk / full-text editor views.
+  `PROXY` / `DIRECT` / `REJECT` action. List / bulk / full-text editor views. The list is newest-first
+  and each row has inline dropdowns to **re-type or re-route an existing rule** on the spot.
+- **Manage tab** — start / stop / restart / reload the nikki service and toggle boot autostart, with a
+  live running indicator.
 - **IP exclusions** — manage `nikki.proxy.reserved_ip` (traffic to those dests skips Mihomo — handy
   for your own VPN nodes; the default private ranges are protected).
 - **Auto-update** — optional cron that keeps enabled list-presets in sync with the manifest.

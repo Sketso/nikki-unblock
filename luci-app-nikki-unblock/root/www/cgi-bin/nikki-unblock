@@ -175,7 +175,10 @@ presets_json() {
 			ips=$(printf '%s' "$idx" | jsonfilter -e "@[$i].ipcidr[*]" 2>/dev/null | awk '{printf "%s\"%s\"", sep, $0; sep=","}')
 			printf '{"id":"%s","name":"%s","geosite":"%s","node":"%s","ipcidr":[%s]}' "$id" "$name" "$geo" "$gnode" "$ips"
 		else
-			list=$(curl -s --max-time 10 "$APPLIST_URL/$id" 2>/dev/null)
+			# -f => empty on HTTP error (else curl prints the 404 page and junk breaks the JSON);
+			# list files are served as "<id>.lst", so fall back to that if the bare id 404s
+			list=$(curl -sf --max-time 10 "$APPLIST_URL/$id" 2>/dev/null)
+			[ -z "$list" ] && list=$(curl -sf --max-time 10 "$APPLIST_URL/$id.lst" 2>/dev/null)
 			dom=$(printf '%s' "$list" | awk '{ sub(/\r$/,""); gsub(/[ \t]/,""); if ($0=="" || substr($0,1,1)=="#") next; printf "%s\"%s\"", sep, tolower($0); sep="," }')
 			printf '{"id":"%s","name":"%s","domains":[%s]}' "$id" "$name" "$dom"
 		fi
@@ -586,6 +589,26 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		uci commit nikki; apply_nikki
 		json_header; printf '{"ok":true}'; exit 0
 
+	elif [ "$action" = "ruledit" ]; then
+		idx=$(get_param idx | sed 's/[^0-9]//g')
+		[ -z "$idx" ] && { json_header; printf '{"ok":false,"error":"bad idx"}'; exit 0; }
+		uci -q get "nikki.@rule[$idx]" >/dev/null 2>&1 || { json_header; printf '{"ok":false,"error":"no rule"}'; exit 0; }
+		ntype=$(get_param type); case "$ntype" in DOMAIN-SUFFIX|DOMAIN|DOMAIN-KEYWORD|GEOSITE) uci set "nikki.@rule[$idx].type=$ntype" ;; esac
+		nnode=$(get_param node); case "$nnode" in PROXY|DIRECT|REJECT|"$EXIT_GROUP") uci set "nikki.@rule[$idx].node=$nnode" ;; esac
+		uci commit nikki; apply_nikki
+		json_header; printf '{"ok":true}'; exit 0
+
+	elif [ "$action" = "svc" ]; then
+		op=$(get_param op)
+		case "$op" in
+			start|stop|restart|reload|enable|disable) /etc/init.d/nikki "$op" >/dev/null 2>&1 ;;
+			*) json_header; printf '{"ok":false,"error":"bad op"}'; exit 0 ;;
+		esac
+		case "$op" in start|stop|restart) sleep 3 ;; esac
+		running=0; pgrep -f /usr/bin/mihomo >/dev/null 2>&1 && running=1
+		booten=0; /etc/init.d/nikki enabled 2>/dev/null && booten=1
+		json_header; printf '{"ok":true,"running":%d,"boot":%d}' "$running" "$booten"; exit 0
+
 	elif [ "$action" = "ipadd" ]; then
 		ip=$(clean_ip "$(get_param ip)")
 		[ -z "$ip" ] && { json_header; printf '{"ok":false,"error":"empty ip"}'; exit 0; }
@@ -750,6 +773,12 @@ fi
 [ "$API" = "autosync" ] && { autosync_json; exit 0; }
 [ "$API" = "config" ] && { config_json; exit 0; }
 [ "$API" = "nodes" ] && { nodes_json; exit 0; }
+[ "$API" = "svcstatus" ] && {
+	json_header
+	running=0; pgrep -f /usr/bin/mihomo >/dev/null 2>&1 && running=1
+	booten=0; /etc/init.d/nikki enabled 2>/dev/null && booten=1
+	printf '{"running":%d,"boot":%d}' "$running" "$booten"; exit 0
+}
 
 # ---- HTML page -------------------------------------------------------------
 printf 'Status: 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n'
@@ -812,6 +841,18 @@ cat <<'HTML'
   .asrow { display: flex; gap: .45rem; align-items: center; font-size: .95rem; cursor: pointer; }
   #autoIv { width: 100%; margin-top: .45rem; padding: .4rem .5rem; border-radius: 8px; border: 1px solid #8884; background: #8881; color: inherit; }
   #autoIv:disabled { opacity: .5; }
+  /* dark, readable dropdown popups (option text was blending into the default light popup) */
+  @media (prefers-color-scheme: dark) {
+    select { background: #232a36; color: #e5e7eb; }
+    option { background: #232a36; color: #e5e7eb; }
+  }
+  li select.edit { flex: 0 0 auto; font-size: .72rem; padding: .2rem .3rem; border-radius: 6px; border: 1px solid #8884; background: #8881; color: inherit; }
+  li .ms { font-size: .72rem; opacity: .7; min-width: 3.4rem; text-align: right; font-variant-numeric: tabular-nums; }
+  .svc { display: flex; flex-direction: column; gap: .8rem; max-width: 440px; }
+  .svc .st { font-size: 1rem; font-weight: 600; }
+  .svc .dot { display: inline-block; width: .62rem; height: .62rem; border-radius: 50%; margin-right: .45rem; vertical-align: middle; background: #8886; }
+  .svc .dot.up { background: #16a34a; } .svc .dot.down { background: #dc2626; }
+  .svc .btns { display: flex; gap: .5rem; flex-wrap: wrap; }
 </style>
 </head>
 <body>
@@ -821,6 +862,7 @@ cat <<'HTML'
     <button class="tab active" data-view="domains" data-i18n="tabDomains"></button>
     <button class="tab" data-view="ips" data-i18n="tabIps"></button>
     <button class="tab" data-view="nodes" data-i18n="tabNodes"></button>
+    <button class="tab" data-view="mgmt" data-i18n="tabMgmt"></button>
   </div>
 
   <!-- ================= DOMAINS ================= -->
@@ -914,8 +956,24 @@ cat <<'HTML'
     <ul id="nodeList"></ul>
   </section>
 
+  <!-- ================= MANAGEMENT ================= -->
+  <section class="view" id="view-mgmt">
+    <div class="svc">
+      <div class="st"><span class="dot" id="svcDot"></span><span id="svcState">…</span></div>
+      <div class="hint"><span data-i18n="svcBoot"></span>: <b id="svcBoot">…</b></div>
+      <div class="btns">
+        <button type="button" id="svcToggle" data-op="start" data-i18n="svcStart"></button>
+        <button type="button" class="ghost" id="svcRestart" data-i18n="svcRestart"></button>
+        <button type="button" class="ghost" id="svcReload" data-i18n="svcReload"></button>
+        <button type="button" class="ghost" id="svcBootBtn" data-op="enable" data-i18n="svcAutostart"></button>
+      </div>
+      <div class="msg" id="svcMsg"></div>
+    </div>
+  </section>
+
 <script>
 const $ = s => document.querySelector(s);
+const escH = s => (s + "").replace(/[<>&"]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
 let RULES = [], PRESETS = [], LANG = "ru";
 
 const I18N = {
@@ -951,6 +1009,11 @@ const I18N = {
     nodeDrop: "Перетащи сюда файл .conf", nodeName: "имя (необязательно)", nodeAdd: "Добавить и проверить",
     validating: "Добавляю и проверяю ноду…", nodeMs: "мс", nodeNoResp: "не отвечает", nodeSub: "подписка",
     nodeProfile: "из профиля", nodeOn: "вкл", nodeOff: "выкл",
+    tabMgmt: "Управление",
+    svcStart: "Запустить", svcStop: "Остановить", svcRestart: "Перезапустить сервис",
+    svcReload: "Перечитать конфиг", svcAutostart: "Автозапуск вкл/выкл",
+    svcRunning: "nikki работает", svcStopped: "nikki остановлен",
+    svcBoot: "Автозапуск при загрузке", svcOn: "вкл", svcOff: "выкл",
     on_: "Включить ", off_: "Отключить ", upd_: "Обновить ",
     enabling: "Включаю ", disabling: "Отключаю ", updating: "Обновляю ",
     adding: "Добавляю ", removing: "Удаляю…", applying: "Применяю…", saving: "Сохраняю и применяю…",
@@ -990,6 +1053,11 @@ const I18N = {
     nodeDrop: "Drop a .conf file here", nodeName: "name (optional)", nodeAdd: "Add & check",
     validating: "Adding & checking node…", nodeMs: "ms", nodeNoResp: "no response", nodeSub: "subscription",
     nodeProfile: "from profile", nodeOn: "on", nodeOff: "off",
+    tabMgmt: "Manage",
+    svcStart: "Start", svcStop: "Stop", svcRestart: "Restart service",
+    svcReload: "Reload config", svcAutostart: "Toggle autostart",
+    svcRunning: "nikki running", svcStopped: "nikki stopped",
+    svcBoot: "Start on boot", svcOn: "on", svcOff: "off",
     on_: "Enable ", off_: "Disable ", upd_: "Update ",
     enabling: "Enabling ", disabling: "Disabling ", updating: "Updating ",
     adding: "Adding ", removing: "Removing…", applying: "Applying…", saving: "Saving & applying…",
@@ -1031,22 +1099,41 @@ document.querySelectorAll(".tab").forEach(tb => tb.addEventListener("click", () 
   document.querySelectorAll(".view").forEach(x => x.classList.remove("active"));
   tb.classList.add("active");
   $("#view-" + tb.dataset.view).classList.add("active");
+  if (tb.dataset.view === "nodes") loadNodes().then(autoPingNodes);
+  else if (tb.dataset.view === "mgmt") loadSvc();
 }));
 
 /* ---------- domains ---------- */
 function suffixMatchers(){
   return new Set(RULES.filter(x => x.type === "DOMAIN-SUFFIX" && x.node === "PROXY").map(x => x.matcher));
 }
+function typeOpts(){
+  return '<option value="DOMAIN-SUFFIX">' + t("tSuffix") + '</option>' +
+         '<option value="DOMAIN">' + t("tDomain") + '</option>' +
+         '<option value="DOMAIN-KEYWORD">' + t("tKeyword") + '</option>' +
+         '<option value="GEOSITE">GEOSITE</option>';
+}
+function nodeOpts(cur){
+  let o = '<option value="PROXY">' + t("nProxy") + '</option>';
+  if (!$("#optUnblock").hidden || cur === EXITG) o += '<option value="' + EXITG + '">' + t("nUnblock") + '</option>';
+  o += '<option value="DIRECT">' + t("nDirect") + '</option><option value="REJECT">' + t("nReject") + '</option>';
+  return o;
+}
 function renderList(){
   const ul = $("#list"); ul.innerHTML = "";
-  RULES.forEach(x => {
+  // newest first (rules are appended to UCI, so reverse for display; idx values are preserved)
+  [...RULES].reverse().forEach(x => {
     const li = document.createElement("li");
     if (x.enabled === "0") li.className = "off";
     li.innerHTML =
-      '<span class="dom">' + x.matcher + '</span>' +
-      '<span class="meta">' + x.type + ' → ' + x.node + '</span>' +
+      '<span class="dom">' + escH(x.matcher) + '</span>' +
+      '<select class="edit" data-field="type">' + typeOpts() + '</select>' +
+      '<select class="edit" data-field="node">' + nodeOpts(x.node) + '</select>' +
       '<button class="ghost" data-act="toggle" data-idx="' + x.idx + '">' + (x.enabled === "0" ? "on" : "off") + '</button>' +
       '<button class="ghost" data-act="del" data-idx="' + x.idx + '">✕</button>';
+    li.dataset.idx = x.idx;
+    li.querySelector('[data-field="type"]').value = x.type;
+    li.querySelector('[data-field="node"]').value = x.node;
     ul.appendChild(li);
   });
   $("#count").textContent = "(" + suffixMatchers().size + ")";
@@ -1161,6 +1248,17 @@ $("#list").addEventListener("click", async e => {
   if (res.ok){ setMsg($("#msg"), t("done")); loadDomains(); }
   else { setMsg($("#msg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
 });
+// inline edit of an existing rule's type/action via the per-row dropdowns
+$("#list").addEventListener("change", async e => {
+  const sel = e.target.closest("select.edit"); if (!sel) return;
+  const li = sel.closest("li"); const idx = li.dataset.idx;
+  const type = li.querySelector('[data-field="type"]').value;
+  const node = li.querySelector('[data-field="node"]').value;
+  setMsg($("#msg"), t("applying"));
+  const res = await api("ruledit", { idx, type, node });
+  if (res.ok){ setMsg($("#msg"), t("done")); loadDomains(); }
+  else { setMsg($("#msg"), t("errP") + (res.error || "?"), false); }
+});
 
 /* ---------- ip exclusions ---------- */
 async function loadIps(){
@@ -1229,7 +1327,7 @@ async function loadNodes(){
   const ul = $("#nodeList"); ul.innerHTML = "";
   $("#nodeCount").textContent = "(" + mine.length + ")";
   const o = $("#optUnblock"); o.value = EXITG; o.hidden = mine.length === 0;
-  NODES.forEach(n => {
+  NODES.forEach((n, i) => {
     const li = document.createElement("li");
     const off = n.kind === "node" && n.enabled === 0;
     const meta = n.kind === "provider" ? t("nodeSub")
@@ -1245,10 +1343,23 @@ async function loadNodes(){
       }
       btns += '<button class="ghost" data-del="' + n.id + '">✕</button>';
     }
+    const ms = n.kind === "provider" ? "" : '<span class="ms" data-ms="' + i + '"></span>';
     li.innerHTML = '<span class="dom"' + (off ? ' style="opacity:.45"' : '') + '>' + esc(n.name) + '</span>' +
-      '<span class="meta">' + meta + '</span>' + btns;
+      '<span class="meta">' + meta + '</span>' + ms + btns;
     ul.appendChild(li);
   });
+}
+// auto-ping every checkable node (ours by id, profile ones by name) concurrently
+async function autoPingNodes(){
+  await Promise.all(NODES.map(async (n, i) => {
+    if (n.kind === "provider" || (n.kind === "node" && n.enabled === 0)) return;
+    const el = $('#nodeList [data-ms="' + i + '"]'); if (!el) return;
+    el.textContent = "…";
+    try {
+      const r = await api("nodecheck", n.kind === "profile" ? { name: n.name } : { id: n.id });
+      el.textContent = r.ok ? (r.delay === "x" ? t("nodeNoResp") : r.delay + " " + t("nodeMs")) : "";
+    } catch(e){ el.textContent = ""; }
+  }));
 }
 async function addNodeCfg(cfg, name){
   if (!cfg.trim()) return;
@@ -1295,6 +1406,31 @@ $("#nodeList").addEventListener("click", async e => {
   dz.addEventListener("drop", e => { toggle(false)(e); readFile(e.dataTransfer.files[0]); });
   dz.addEventListener("click", () => { const i = document.createElement("input"); i.type = "file"; i.onchange = () => readFile(i.files[0]); i.click(); });
 })();
+
+/* ---------- management (nikki service control) ---------- */
+function renderSvc(s){
+  const run = s.running === 1;
+  $("#svcDot").className = "dot " + (run ? "up" : "down");
+  $("#svcState").textContent = run ? t("svcRunning") : t("svcStopped");
+  $("#svcBoot").textContent = s.boot === 1 ? t("svcOn") : t("svcOff");
+  const tg = $("#svcToggle"); tg.textContent = run ? t("svcStop") : t("svcStart"); tg.dataset.op = run ? "stop" : "start";
+  $("#svcBootBtn").dataset.op = s.boot === 1 ? "disable" : "enable";
+}
+async function loadSvc(){
+  try { renderSvc(await (await fetch("?api=svcstatus")).json()); } catch(e){}
+}
+async function svcDo(op, btn){
+  if (!op) return;
+  btn.disabled = true; setMsg($("#svcMsg"), t("applying"));
+  let s; try { s = await api("svc", { op }); } catch(e){ s = {}; }
+  btn.disabled = false;
+  if (s && s.ok){ setMsg($("#svcMsg"), t("done")); renderSvc(s); }
+  else setMsg($("#svcMsg"), t("errP") + ((s && s.error) || "?"), false);
+}
+$("#svcToggle").addEventListener("click", e => svcDo(e.currentTarget.dataset.op, e.currentTarget));
+$("#svcRestart").addEventListener("click", e => svcDo("restart", e.currentTarget));
+$("#svcReload").addEventListener("click", e => svcDo("reload", e.currentTarget));
+$("#svcBootBtn").addEventListener("click", e => svcDo(e.currentTarget.dataset.op, e.currentTarget));
 
 /* ---------- boot ---------- */
 (async () => {
