@@ -14,12 +14,15 @@ if ! uci -q get nikki-unblock.config >/dev/null 2>&1; then
 	uci -q set nikki-unblock.config=nikki-unblock
 	uci -q set nikki-unblock.config.applist_url='https://sketso.github.io/nikki-unblock/applist'
 	uci -q set nikki-unblock.config.autosync_enabled='0'
-	uci -q set nikki-unblock.config.autosync_interval='6h'
+	uci -q set nikki-unblock.config.autosync_interval='24h'
 	uci -q set nikki-unblock.config.lang='ru'
 	uci -q set nikki-unblock.config.base_group='PROXY'
 	uci -q set nikki-unblock.config.exit_group='UNBLOCK'
 	uci -q commit nikki-unblock
 fi
+
+# Drop any stale autosync cron line from the predecessor CGI (nikki-domains), if present.
+[ -f /etc/crontabs/root ] && sed -i '/nikki-domains/d' /etc/crontabs/root && /etc/init.d/cron restart >/dev/null 2>&1
 
 # Refresh the LuCI menu/index cache so the new entry shows up.
 rm -f /tmp/luci-indexcache* 2>/dev/null

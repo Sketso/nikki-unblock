@@ -10,6 +10,8 @@ TYPE_DEFAULT="DOMAIN-SUFFIX"
 SELF="/www/cgi-bin/nikki-unblock"
 CRONTAB="/etc/crontabs/root"
 CRON_TAG="# nikki-unblock-autosync"
+PRESET_CACHE="/tmp/nikki-unblock-presets.json"   # server-side cache of presets_json (applist assembly)
+PRESET_TTL=3600                                   # 1 h; presets depend only on the applist, not router state
 
 # Exit routing group. Added VPN nodes join a fallback group `exit_group` (UNBLOCK) = the profile's
 # base group + user nodes. "Via VPN" rules target it. Kept as a config option for portability.
@@ -157,10 +159,26 @@ iplist_json() {
 }
 
 # fetch service presets from applist server-side and emit
+# ---- applist domain fetch (SINGLE source of truth) -------------------------
+# Fetch a preset's domain list from the applist and print clean, deduped, lowercased
+# domains — one per line, EMPTY on any HTTP error. Both the display path (presets_json)
+# and the rule-writing path (fetch_list/do_preset_sync) go through here so the -sf/.lst
+# fallback and the domain-shape filter live in exactly ONE place. NEVER fetch a list with
+# a raw `curl -s $id` again: a 404 body is HTML and once became "rules" (the v1.6.1 bug).
+#   -f            => curl prints nothing on HTTP error (a 404 page is HTML, not a list)
+#   $id || $id.lst => the applist serves files as "<id>.lst" (clean-URL alias may 404)
+#   domain-shape  => hard guard; a stray HTML/error line can never survive as a rule
+applist_domains() {   # $1 = preset id ; prints clean domains (one per line), empty on error
+	{ curl -sf --max-time 10 "$APPLIST_URL/$1" 2>/dev/null || curl -sf --max-time 10 "$APPLIST_URL/$1.lst" 2>/dev/null; } \
+		| awk '{ sub(/\r$/,""); gsub(/[ \t]/,""); if ($0=="" || substr($0,1,1)=="#") next;
+		         s=tolower($0); if (s !~ /^[a-z0-9.*_-]+$/ || s !~ /\./) next; print s }' \
+		| awk '!seen[$0]++'
+}
+
 # [{id,name,geosite,node,ipcidr[],domains[]}] — an entry may carry a geosite AND a domain list
 # (hybrid): the list is fetched when there is no geosite, or when the entry sets "list": true.
+# Prints ONLY the JSON array (no HTTP header) so the endpoint can cache the assembled body.
 presets_json() {
-	json_header
 	idx=$(curl -sf --max-time 10 "$APPLIST_URL/index.json" 2>/dev/null)
 	printf '['
 	first=1; i=0
@@ -174,10 +192,8 @@ presets_json() {
 		ips=$(printf '%s' "$idx" | jsonfilter -e "@[$i].ipcidr[*]" 2>/dev/null | awk '{printf "%s\"%s\"", sep, $0; sep=","}')
 		dom=""
 		if [ -z "$geo" ] || [ -n "$wantlist" ]; then
-			# -f => empty on HTTP error (else the 404 page's junk breaks the JSON); files are "<id>.lst"
-			list=$(curl -sf --max-time 10 "$APPLIST_URL/$id" 2>/dev/null)
-			[ -z "$list" ] && list=$(curl -sf --max-time 10 "$APPLIST_URL/$id.lst" 2>/dev/null)
-			dom=$(printf '%s' "$list" | awk '{ sub(/\r$/,""); gsub(/[ \t]/,""); if ($0=="" || substr($0,1,1)=="#") next; s=tolower($0); if (s !~ /^[a-z0-9.*_-]+$/ || s !~ /\./) next; printf "%s\"%s\"", sep, s; sep="," }')
+			# unified fetch + shape filter (applist_domains); quote the clean lines into JSON
+			dom=$(applist_domains "$id" | awk '{ printf "%s\"%s\"", sep, $0; sep="," }')
 		fi
 		[ "$first" = 1 ] || printf ','; first=0
 		printf '{"id":"%s","name":"%s","geosite":"%s","node":"%s","ipcidr":[%s],"domains":[%s]}' "$id" "$name" "$geo" "$gnode" "$ips" "$dom"
@@ -212,12 +228,8 @@ rule_idx_of() {
 }
 
 fetch_list() {   # $1=preset id  $2=out file ; return non-zero if empty/unreachable (never wipe on failure)
-	# -f => empty on HTTP error (a 404 body is HTML, not a list); files are served as "<id>.lst".
-	# The domain-shape filter is a hard guard so a stray HTML/error page can never become "rules".
-	{ curl -sf --max-time 10 "$APPLIST_URL/$1" 2>/dev/null || curl -sf --max-time 10 "$APPLIST_URL/$1.lst" 2>/dev/null; } \
-		| awk '{ sub(/\r$/,""); gsub(/[ \t]/,""); if ($0=="" || substr($0,1,1)=="#") next;
-		         s=tolower($0); if (s !~ /^[a-z0-9.*_-]+$/ || s !~ /\./) next; print s }' \
-		| awk '!seen[$0]++' > "$2"
+	# Delegates to applist_domains (the single fetch/-sf/.lst/shape-filter source of truth).
+	applist_domains "$1" > "$2"
 	[ -s "$2" ]
 }
 
@@ -292,16 +304,18 @@ sync_all() {
 		i=$((i + 1))
 	done
 	[ $((SYNC_ADDED + SYNC_REMOVED)) -gt 0 ] && { uci commit nikki; apply_nikki; }
+	rm -f "$PRESET_CACHE"   # applist lists were just re-fetched — drop the display cache so the UI shows fresh
 	logger -t nikki-unblock "autosync: +$SYNC_ADDED -$SYNC_REMOVED"
 }
 
 # ---- autosync (state in UCI, executed by cron) -----------------------------
 autosync_sched() {
 	case "$1" in
-		1h)  echo "0 * * * *" ;;
-		12h) echo "0 */12 * * *" ;;
-		24h) echo "0 4 * * *" ;;
-		*)   echo "0 */6 * * *" ;;
+		1h)     echo "0 * * * *" ;;
+		12h)    echo "0 */12 * * *" ;;
+		24h)    echo "0 4 * * *" ;;
+		weekly) echo "0 4 * * 1" ;;
+		*)      echo "0 */6 * * *" ;;
 	esac
 }
 autosync_set() {   # $1=on(0/1) $2=interval
@@ -309,7 +323,8 @@ autosync_set() {   # $1=on(0/1) $2=interval
 	uci set nikki-unblock.config.autosync_interval="$2" 2>/dev/null
 	uci commit nikki-unblock 2>/dev/null
 	touch "$CRONTAB"
-	sed -i "/$CRON_TAG/d" "$CRONTAB"
+	# drop our old line + any stale legacy nikki-domains autosync line (predecessor CGI)
+	sed -i "/$CRON_TAG/d; /nikki-domains/d" "$CRONTAB"
 	if [ "$1" = 1 ]; then
 		echo "$(autosync_sched "$2") $SELF sync $CRON_TAG interval=$2" >> "$CRONTAB"
 		/etc/init.d/cron enable >/dev/null 2>&1
@@ -319,7 +334,7 @@ autosync_set() {   # $1=on(0/1) $2=interval
 autosync_json() {
 	json_header
 	en=$(uci -q get nikki-unblock.config.autosync_enabled 2>/dev/null)
-	iv=$(uci -q get nikki-unblock.config.autosync_interval 2>/dev/null); [ -z "$iv" ] && iv=6h
+	iv=$(uci -q get nikki-unblock.config.autosync_interval 2>/dev/null); [ -z "$iv" ] && iv=24h
 	[ "$en" = 1 ] && printf '{"enabled":true,"interval":"%s"}' "$iv" || printf '{"enabled":false,"interval":"%s"}' "$iv"
 }
 
@@ -780,7 +795,21 @@ fi
 
 [ "$API" = "list" ] && { list_json; exit 0; }
 [ "$API" = "iplist" ] && { iplist_json; exit 0; }
-[ "$API" = "presets" ] && { presets_json; exit 0; }
+[ "$API" = "presets" ] && {
+	json_header
+	# `fresh=1` forces a rebuild (manual refresh after editing the applist).
+	case "$QUERY_STRING" in *fresh=1*) rm -f "$PRESET_CACHE" ;; esac
+	# Serve the cache if it's younger than the TTL (cold build does index.json + N .lst curls ~7 s).
+	if [ -f "$PRESET_CACHE" ]; then
+		age=$(( $(date +%s) - $(date -r "$PRESET_CACHE" +%s 2>/dev/null || echo 0) ))
+		[ "$age" -ge 0 ] && [ "$age" -lt "$PRESET_TTL" ] && { cat "$PRESET_CACHE"; exit 0; }
+	fi
+	body=$(presets_json)
+	# Only cache a well-formed, non-empty array so a transient fetch failure can't pin an empty result.
+	case "$body" in \[?*\]) printf '%s' "$body" > "$PRESET_CACHE" ;; esac
+	printf '%s' "$body"
+	exit 0
+}
 [ "$API" = "autosync" ] && { autosync_json; exit 0; }
 [ "$API" = "config" ] && { config_json; exit 0; }
 [ "$API" = "nodes" ] && { nodes_json; exit 0; }
@@ -788,7 +817,14 @@ fi
 	json_header
 	running=0; pgrep -f /usr/bin/mihomo >/dev/null 2>&1 && running=1
 	booten=0; /etc/init.d/nikki enabled 2>/dev/null && booten=1
-	printf '{"running":%d,"boot":%d}' "$running" "$booten"; exit 0
+	# Startup guard: does the configured base_group actually exist in mihomo? A wrong
+	# base_group name (profile's proxy-group isn't "PROXY") makes every "→ VPN" rule point
+	# at a nonexistent group. Only meaningful while running (down → /proxies won't answer).
+	base_ok=1
+	[ "$running" = 1 ] && { curl -s -m 5 -H "Authorization: Bearer $(mihomo_secret)" \
+		"$MIHOMO_API/proxies/$(urlenc_all "$BASE_GROUP")" 2>/dev/null | grep -q '"name"' || base_ok=0; }
+	printf '{"running":%d,"boot":%d,"base_group":"%s","base_ok":%d}' \
+		"$running" "$booten" "$BASE_GROUP" "$base_ok"; exit 0
 }
 
 # ---- HTML page -------------------------------------------------------------
@@ -809,6 +845,8 @@ cat <<'HTML'
   .lang a { cursor: pointer; opacity: .5; text-decoration: none; color: inherit; }
   .lang a.on { opacity: 1; font-weight: 600; text-decoration: underline; }
   h3 { font-size: .9rem; margin: .1rem 0 .5rem; opacity: .8; }
+  .banner { margin: 0 0 1rem; padding: .7rem .9rem; border-radius: 8px; font-size: .9rem; border: 1px solid #d9770699; background: #f59e0b22; }
+  .banner code { background: #8882; padding: 0 .25rem; border-radius: 4px; }
   .tabs { display: flex; gap: .4rem; margin-bottom: 1rem; border-bottom: 1px solid #8883; }
   .tab { background: none; color: inherit; padding: .5rem .9rem; border: 0; border-bottom: 2px solid transparent; cursor: pointer; font-size: 1rem; opacity: .6; }
   .tab.active { opacity: 1; border-bottom-color: #2563eb; font-weight: 600; }
@@ -881,6 +919,12 @@ cat <<'HTML'
   .pcard .pname { flex: 1; font-size: .9rem; line-height: 1.25; }
   .pcard .pinfo { background: none; border: 1px solid #8886; color: inherit; width: 1.35rem; height: 1.35rem; min-width: 1.35rem; border-radius: 50%; padding: 0; font-size: .8rem; line-height: 1; opacity: .65; }
   .pcard .pinfo:hover { opacity: 1; border-color: #2563eb; }
+  @keyframes shimmer { 0% { background-position: -300px 0; } 100% { background-position: 300px 0; } }
+  .skel { background: linear-gradient(90deg, #8881 25%, #8884 37%, #8881 63%); background-size: 600px 100%; animation: shimmer 1.3s infinite linear; border-radius: 8px; }
+  @media (prefers-reduced-motion: reduce) { .skel { animation: none; } }
+  .skcard { height: 2.5rem; margin-bottom: .45rem; }
+  #list li.skrow { border: 0; padding: .35rem 0; }
+  .skrow .skel { height: 1.4rem; }
   /* modal */
   .modal { position: fixed; inset: 0; background: #0009; display: flex; align-items: center; justify-content: center; padding: 1rem; z-index: 50; }
   .modal[hidden] { display: none; }
@@ -899,6 +943,7 @@ cat <<'HTML'
 <body>
   <h1><span data-i18n="h1"></span>
     <span class="lang"><a data-lang="ru">RU</a> · <a data-lang="en">EN</a></span></h1>
+  <div class="banner" id="guard" hidden></div>
   <div class="tabs">
     <button class="tab active" data-view="domains" data-i18n="tabDomains"></button>
     <button class="tab" data-view="ips" data-i18n="tabIps"></button>
@@ -958,12 +1003,13 @@ cat <<'HTML'
         <div class="msg" id="presetMsg"></div>
 
         <div class="autosync">
-          <label class="asrow"><input type="checkbox" id="autoOn"> <span data-i18n="autoUpdate"></span></label>
+          <div class="asrow"><label class="sw"><input type="checkbox" id="autoOn"><span class="sl"></span></label> <span data-i18n="autoUpdate"></span></div>
           <select id="autoIv">
             <option value="1h" data-i18n="iv1h"></option>
             <option value="6h" data-i18n="iv6h"></option>
             <option value="12h" data-i18n="iv12h"></option>
             <option value="24h" data-i18n="iv24h"></option>
+            <option value="weekly" data-i18n="ivWeekly"></option>
           </select>
           <div class="hint" data-i18n="autoHint"></div>
           <div class="msg" id="autoMsg"></div>
@@ -1053,8 +1099,8 @@ const I18N = {
     bulkHint: "Полный список доменов, по одному в строке. «Сохранить» синхронизирует: добавит новые и удалит убранные. Понимает вставку v2ray-списков.",
     save: "Сохранить", cancel: "Отмена",
     unblock: "Разблокировать", loading: "Загрузка…",
-    autoUpdate: "Авто-апдейт", iv1h: "каждый час", iv6h: "каждые 6 часов", iv12h: "каждые 12 часов", iv24h: "раз в сутки",
-    autoHint: "Сам синхронизирует включённые наборы-списки: добавляет новые домены и убирает исчезнувшие.",
+    autoUpdate: "Авто-апдейт", iv1h: "каждый час", iv6h: "каждые 6 часов", iv12h: "каждые 12 часов", iv24h: "раз в сутки", ivWeekly: "раз в неделю",
+    autoHint: "Сам синхронизирует включённые наборы-списки: добавляет новые домены и убирает исчезнувшие. Лёгкая операция, по умолчанию ночью (гео-базы обновляет сам mihomo).",
     ipHint: "IP/подсети, трафик к которым идёт мимо mihomo напрямую (например, VPN-ноды). Голый IPv4 получит /32.",
     exclusions: "Исключения", system: "системный",
     phDomain: "example.com", phGeosite: "telegram, youtube, netflix…", phIp: "1.2.3.0/24  ·  1.2.3.4",
@@ -1065,6 +1111,8 @@ const I18N = {
     nodeDrop: "Перетащи сюда файл .conf", nodeName: "имя (необязательно)", nodeAdd: "Добавить и проверить",
     validating: "Добавляю и проверяю ноду…", nodeMs: "мс", nodeNoResp: "не отвечает", nodeSub: "подписка",
     nodeProfile: "из профиля", nodeOn: "вкл", nodeOff: "выкл",
+    guardBad1: "⚠ Proxy-группа ", guardBad2: " не найдена в mihomo. Правила «→ VPN» указывают на несуществующую группу. Задай базовую группу равной имени proxy-группы твоего профиля: ",
+    guardFix: "uci set nikki-unblock.config.base_group='ИМЯ' && uci commit",
     tabMgmt: "Управление",
     svcStart: "Запустить", svcStop: "Остановить", svcRestart: "Перезапустить сервис",
     svcReload: "Перечитать конфиг", svcAutostart: "Автозапуск вкл/выкл",
@@ -1099,8 +1147,8 @@ const I18N = {
     bulkHint: "Full domain list, one per line. «Save» syncs: adds new lines and removes the ones you deleted. Understands pasted v2ray lists.",
     save: "Save", cancel: "Cancel",
     unblock: "Unblock", loading: "Loading…",
-    autoUpdate: "Auto-update", iv1h: "hourly", iv6h: "every 6 hours", iv12h: "every 12 hours", iv24h: "daily",
-    autoHint: "Keeps enabled list-presets in sync: adds new domains and removes vanished ones.",
+    autoUpdate: "Auto-update", iv1h: "hourly", iv6h: "every 6 hours", iv12h: "every 12 hours", iv24h: "daily", ivWeekly: "weekly",
+    autoHint: "Keeps enabled list-presets in sync: adds new domains and removes vanished ones. Light; runs nightly by default (geo databases are updated by mihomo itself).",
     ipHint: "IPs/subnets whose traffic goes straight past mihomo (e.g. VPN nodes). A bare IPv4 gets /32.",
     exclusions: "Exclusions", system: "system",
     phDomain: "example.com", phGeosite: "telegram, youtube, netflix…", phIp: "1.2.3.0/24  ·  1.2.3.4",
@@ -1111,6 +1159,8 @@ const I18N = {
     nodeDrop: "Drop a .conf file here", nodeName: "name (optional)", nodeAdd: "Add & check",
     validating: "Adding & checking node…", nodeMs: "ms", nodeNoResp: "no response", nodeSub: "subscription",
     nodeProfile: "from profile", nodeOn: "on", nodeOff: "off",
+    guardBad1: "⚠ Proxy-group ", guardBad2: " was not found in mihomo. «→ VPN» rules point at a nonexistent group. Set the base group to your profile's proxy-group name: ",
+    guardFix: "uci set nikki-unblock.config.base_group='NAME' && uci commit",
     tabMgmt: "Manage",
     svcStart: "Start", svcStop: "Stop", svcRestart: "Restart service",
     svcReload: "Reload config", svcAutostart: "Toggle autostart",
@@ -1136,6 +1186,7 @@ function applyI18n(){
   $("#modeToggle").textContent = listMode ? t("showItems") : t("showList");
   $("#domain").placeholder = $("#rtype").value === "GEOSITE" ? t("phGeosite") : $("#rtype").value === "IP-CIDR" ? t("phIp") : t("phDomain");
   renderList(); renderPresets(); loadIps();
+  renderGuard(LASTSVC);
 }
 function setLang(l){
   LANG = (l === "en") ? "en" : "ru";
@@ -1297,8 +1348,14 @@ function renderPresets(){
 $("#pmClose").addEventListener("click", () => { $("#pmodal").hidden = true; });
 $("#pmodal").addEventListener("click", e => { if (e.target.id === "pmodal") $("#pmodal").hidden = true; });
 document.addEventListener("keydown", e => { if (e.key === "Escape") $("#pmodal").hidden = true; });
+/* first-load skeletons (shimmer placeholders) — shown only until the first data arrives */
+let listReady = false, presetsReady = false;
+function skelPresets(){ $("#presets").innerHTML = '<div class="skel skcard"></div>'.repeat(8); }
+function skelList(){ $("#list").innerHTML = '<li class="skrow"><div class="skel"></div></li>'.repeat(6); }
 async function loadDomains(){
+  if (!listReady && !listMode) skelList();
   RULES = await (await fetch("?api=list")).json();
+  listReady = true;
   renderList(); renderPresets();
   if (!$("#bulkWrap").hidden) $("#bulk").value = [...suffixMatchers()].join("\n");
 }
@@ -1407,16 +1464,18 @@ $("#ipList").addEventListener("click", async e => {
 /* ---------- presets + autosync loaders ---------- */
 async function loadPresets(){
   const box = $("#presets");
+  if (!presetsReady) skelPresets();
   try {
     PRESETS = await (await fetch("?api=presets")).json();
     if (!Array.isArray(PRESETS) || !PRESETS.length) throw 0;
+    presetsReady = true;
     renderPresets(); renderList();  // re-filter the list now that preset ownership is known
   } catch(e){ PRESETS = []; box.innerHTML = ""; setMsg($("#presetMsg"), t("listsNA"), false); }
 }
 async function loadAutosync(){
   try {
     const s = await (await fetch("?api=autosync")).json();
-    $("#autoOn").checked = !!s.enabled; $("#autoIv").value = s.interval || "6h"; $("#autoIv").disabled = !s.enabled;
+    $("#autoOn").checked = !!s.enabled; $("#autoIv").value = s.interval || "24h"; $("#autoIv").disabled = !s.enabled;
   } catch(e){}
 }
 async function saveAutosync(){
@@ -1530,8 +1589,20 @@ function renderSvc(s){
   $("#svcRun").checked = run;
   $("#svcBootChk").checked = s.boot === 1;
 }
+let LASTSVC = null;
+function renderGuard(s){
+  const g = $("#guard"); if (!g) return;
+  if (s && s.running === 1 && s.base_ok === 0){
+    g.textContent = "";
+    g.append(t("guardBad1"));
+    const c = document.createElement("code"); c.textContent = s.base_group; g.append(c);
+    g.append(t("guardBad2"));
+    const f = document.createElement("code"); f.textContent = t("guardFix"); g.append(f);
+    g.hidden = false;
+  } else { g.hidden = true; }
+}
 async function loadSvc(){
-  try { renderSvc(await (await fetch("?api=svcstatus")).json()); } catch(e){}
+  try { LASTSVC = await (await fetch("?api=svcstatus")).json(); renderSvc(LASTSVC); renderGuard(LASTSVC); } catch(e){}
 }
 async function svcDo(op, el){
   if (!op) return;
@@ -1552,7 +1623,7 @@ $("#svcReload").addEventListener("click", e => svcDo("reload", e.currentTarget))
   try { const c = await (await fetch("?api=config")).json(); def = c.lang || "ru"; EXITG = c.exit_group || "UNBLOCK"; } catch(e){}
   try { LANG = localStorage.nikkiLang || def; } catch(e){ LANG = def; }
   applyI18n();
-  loadDomains(); loadIps(); loadPresets(); loadAutosync(); loadNodes();
+  loadDomains(); loadIps(); loadPresets(); loadAutosync(); loadNodes(); loadSvc();
 })();
 </script>
 </body>

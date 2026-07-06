@@ -65,6 +65,18 @@ wget -O - https://github.com/sketso/nikki-unblock/raw/main/feed.sh | sh
 
 Open it in **LuCI → Services → "nikki · Unblock"**, or directly at **http://&lt;router-ip&gt;/nikki**.
 
+> ### ⚠ Set `base_group` if your proxy-group isn't `PROXY`
+> nikki-unblock routes "→ VPN" rules and pools your VPN nodes through your mihomo profile's **exit
+> proxy-group**. It assumes that group is named **`PROXY`**. If your working profile calls it something
+> else (`🚀 Proxy`, `Select`, …), point `base_group` at the real name — otherwise every "→ VPN" rule
+> targets a group that doesn't exist and nothing is tunneled:
+> ```sh
+> uci set nikki-unblock.config.base_group='YOUR-GROUP-NAME' && uci commit nikki-unblock
+> ```
+> The UI shows a warning banner on load if the configured `base_group` isn't found in mihomo, so you'll
+> know if it's wrong. (Prerequisite either way: a **working nikki profile that defines a proxy-group** —
+> set that up in nikki before adding rules here.)
+
 ## Configuration (`uci show nikki-unblock`)
 
 | Option | Default | Meaning |
