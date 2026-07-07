@@ -31,7 +31,10 @@ a LuCI menu entry to open it.
   newest-first and each row has inline dropdowns to **re-type or re-route an existing rule** on the spot,
   plus an iOS-style on/off switch.
 - **Manage tab** — start / stop / restart / reload the nikki service and toggle boot autostart, with a
-  live running indicator.
+  live running indicator; plus an **Updates** block showing installed versions with one-click
+  **Update nikki-unblock** (pulls the latest release `.apk`), **Update nikki** (`apk upgrade nikki` +
+  mihomo), and **Update all**. Updates run in the background (apk outlasts the CGI timeout) with a live
+  log that keeps streaming even if you navigate away.
 - **IP exclusions** — manage `nikki.proxy.reserved_ip` (traffic to those dests skips Mihomo — handy
   for your own VPN nodes; the default private ranges are protected).
 - **Auto-update** — optional cron that keeps enabled list-presets in sync with the manifest.

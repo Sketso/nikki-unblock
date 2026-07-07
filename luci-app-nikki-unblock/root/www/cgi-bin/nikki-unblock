@@ -12,6 +12,12 @@ CRONTAB="/etc/crontabs/root"
 CRON_TAG="# nikki-unblock-autosync"
 PRESET_CACHE="/tmp/nikki-unblock-presets.json"   # server-side cache of presets_json (applist assembly)
 PRESET_TTL=3600                                   # 1 h; presets depend only on the applist, not router state
+UPD_LOG="/tmp/nikki-unblock-update.log"          # live log of the async update runner
+UPD_LOCK="/tmp/nikki-unblock-update.lock"        # holds the runner PID while an update is in progress
+UPD_SCRIPT="/tmp/nikki-unblock-update.sh"        # generated per run, executed detached (setsid)
+# nikki-unblock isn't in an apk repo (installed from a local file), so self-update pulls the latest
+# release .apk straight from GitHub (same as feed.sh) and `apk add` upgrades it in place.
+SELF_APK="https://github.com/Sketso/nikki-unblock/releases/latest/download/luci-app-nikki-unblock.apk"
 
 # Exit routing group. Added VPN nodes join a fallback group `exit_group` (UNBLOCK) = the profile's
 # base group + user nodes. "Via VPN" rules target it. Kept as a config option for portability.
@@ -338,6 +344,66 @@ autosync_json() {
 	[ "$en" = 1 ] && printf '{"enabled":true,"interval":"%s"}' "$iv" || printf '{"enabled":false,"interval":"%s"}' "$iv"
 }
 
+# ---- updates (apk) ---------------------------------------------------------
+# apk can take much longer than uhttpd's 60 s CGI timeout, so an update runs DETACHED (setsid) to a
+# log file; the browser starts it (POST update) and polls ?api=updatestatus until a __DONE__ marker.
+pkg_ver() {   # installed version-release of package $1 (name may itself contain dashes)
+	line=$(apk list -I "$1" 2>/dev/null | grep -m1 "^$1-[0-9]" | awk '{print $1}')
+	printf '%s' "${line#"$1"-}"
+}
+versions_json() {
+	json_header
+	printf '{"self":"%s","nikki":"%s","luci":"%s","mihomo":"%s"}' \
+		"$(pkg_ver luci-app-nikki-unblock)" "$(pkg_ver nikki)" \
+		"$(pkg_ver luci-app-nikki)" "$(pkg_ver mihomo-meta)"
+}
+upd_running() {   # 0 (true) if an update runner is alive
+	[ -f "$UPD_LOCK" ] || return 1
+	kill -0 "$(cat "$UPD_LOCK" 2>/dev/null)" 2>/dev/null
+}
+update_start() {   # $1=op(self|nikki|all) ; 0=started 1=busy 2=bad op
+	_op="$1"
+	case "$_op" in self|nikki|all) ;; *) return 2 ;; esac
+	upd_running && return 1
+	: > "$UPD_LOG"
+	{
+		printf '#!/bin/sh\nexec >> "%s" 2>&1\nrc=0\n' "$UPD_LOG"
+		printf 'echo ">> update: %s"\n' "$_op"
+		# nikki FIRST, self LAST: a self-update replaces this CGI, so keep it to the very end
+		# (for op=all) — the poll endpoint then disappears only once everything else is done.
+		case "$_op" in nikki|all)
+			printf 'echo ">> apk update"; apk update\n'
+			printf 'echo ">> upgrading nikki + mihomo"; apk upgrade nikki luci-app-nikki mihomo-meta || rc=$?\n' ;;
+		esac
+		case "$_op" in self|all)
+			printf 'echo ">> nikki-unblock: fetching latest release .apk"\n'
+			printf 'if wget -q -O /tmp/nu-new.apk "%s"; then apk add --allow-untrusted /tmp/nu-new.apk || rc=$?; else rc=1; echo "!! download failed"; fi\n' "$SELF_APK"
+			printf 'rm -f /tmp/nu-new.apk\n' ;;
+		esac
+		printf 'echo "__DONE__:$rc"\nrm -f "%s"\n' "$UPD_LOCK"
+	} > "$UPD_SCRIPT"
+	setsid sh "$UPD_SCRIPT" >/dev/null 2>&1 &
+	echo $! > "$UPD_LOCK"
+	return 0
+}
+# JSON-escape a whole file into one string body (quotes/backslashes + newlines/CR + strip other ctrl)
+json_log() {
+	sed 's/\\/\\\\/g; s/"/\\"/g; s/\r//g; s/\t/\\t/g' "$1" 2>/dev/null \
+		| tr -d '\000-\010\013\014\016-\037' \
+		| awk 'BEGIN{ORS=""} {print (NR>1?"\\n":"") $0}'
+}
+updatestatus_json() {
+	json_header
+	_run=0; _done=0; _code=""
+	if grep -q '^__DONE__:' "$UPD_LOG" 2>/dev/null; then
+		_done=1; _code=$(grep '^__DONE__:' "$UPD_LOG" | tail -1 | cut -d: -f2)
+	elif upd_running; then
+		_run=1
+	fi
+	printf '{"running":%d,"done":%d,"code":"%s","log":"%s"}' \
+		"$_run" "$_done" "$_code" "$(json_log "$UPD_LOG")"
+}
+
 # ---- VPN nodes (exit configs -> mihomo proxies via nikki mixin) -------------
 # Added nodes are stored as mihomo proxy YAML snippets in $NODES_DIR; subscription URLs as
 # proxy-provider snippets in $PROV_DIR. regen_mixin() rebuilds /etc/nikki/mixin.yaml (CLEAN yaml —
@@ -635,6 +701,16 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		booten=0; /etc/init.d/nikki enabled 2>/dev/null && booten=1
 		json_header; printf '{"ok":true,"running":%d,"boot":%d}' "$running" "$booten"; exit 0
 
+	elif [ "$action" = "update" ]; then
+		update_start "$(get_param op)"; rc=$?
+		json_header
+		case "$rc" in
+			0) printf '{"ok":true,"started":true}' ;;
+			1) printf '{"ok":false,"error":"busy"}' ;;
+			*) printf '{"ok":false,"error":"bad op"}' ;;
+		esac
+		exit 0
+
 	elif [ "$action" = "ipadd" ]; then
 		ip=$(clean_ip "$(get_param ip)")
 		[ -z "$ip" ] && { json_header; printf '{"ok":false,"error":"empty ip"}'; exit 0; }
@@ -811,6 +887,8 @@ fi
 	exit 0
 }
 [ "$API" = "autosync" ] && { autosync_json; exit 0; }
+[ "$API" = "versions" ] && { versions_json; exit 0; }
+[ "$API" = "updatestatus" ] && { updatestatus_json; exit 0; }
 [ "$API" = "config" ] && { config_json; exit 0; }
 [ "$API" = "nodes" ] && { nodes_json; exit 0; }
 [ "$API" = "svcstatus" ] && {
@@ -910,6 +988,12 @@ cat <<'HTML'
   .sw input:checked + .sl { background: #16a34a; }
   .sw input:checked + .sl::before { transform: translateX(16px); }
   .sw input:disabled + .sl { opacity: .5; cursor: default; }
+  .upd { margin-top: 1.1rem; padding-top: .9rem; border-top: 1px solid #8882; }
+  .upd h3 { margin: 0 0 .5rem; }
+  .uprow { display: flex; justify-content: space-between; align-items: baseline; gap: .6rem; font-size: .9rem; padding: .18rem 0; }
+  .uprow .upname { opacity: .85; }
+  .uprow .upver { font-family: ui-monospace, monospace; opacity: .7; font-size: .82rem; text-align: right; }
+  .uplog { background: #0000001f; border: 1px solid #8884; border-radius: 8px; padding: .5rem .6rem; font-family: ui-monospace, monospace; font-size: .76rem; line-height: 1.4; max-height: 13rem; overflow: auto; white-space: pre-wrap; word-break: break-word; margin: .6rem 0 0; }
   .swrow { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .6rem 0; border-bottom: 1px solid #8882; }
   .swrow .swlabel { font-size: .95rem; }
   /* preset cards */
@@ -1061,6 +1145,19 @@ cat <<'HTML'
       </div>
       <div class="msg" id="svcMsg"></div>
     </div>
+
+    <div class="svc upd">
+      <h3 data-i18n="updTitle"></h3>
+      <div class="uprow"><span class="upname">nikki-unblock</span><span class="upver" id="verSelf">…</span></div>
+      <div class="uprow"><span class="upname">nikki + mihomo</span><span class="upver" id="verNikki">…</span></div>
+      <div class="btns">
+        <button type="button" class="ghost" id="updSelf" data-i18n="updSelf"></button>
+        <button type="button" class="ghost" id="updNikki" data-i18n="updNikki"></button>
+        <button type="button" id="updAll" data-i18n="updAll"></button>
+      </div>
+      <pre class="uplog" id="updLog" hidden></pre>
+      <div class="msg" id="updMsg"></div>
+    </div>
   </section>
 
   <!-- preset contents modal -->
@@ -1118,6 +1215,8 @@ const I18N = {
     svcReload: "Перечитать конфиг", svcAutostart: "Автозапуск вкл/выкл",
     svcRunning: "nikki работает", svcStopped: "nikki остановлен",
     svcBoot: "Автозапуск при загрузке", svcOn: "вкл", svcOff: "выкл",
+    updTitle: "Обновление", updSelf: "Обновить nikki-unblock", updNikki: "Обновить nikki", updAll: "Обновить всё",
+    updRunning: "Обновляю… (можно закрыть — продолжится в фоне)", updOkCode: "Готово", updBad: "Ошибка, код ",
     on_: "Включить ", off_: "Отключить ", upd_: "Обновить ",
     enabling: "Включаю ", disabling: "Отключаю ", updating: "Обновляю ",
     adding: "Добавляю ", removing: "Удаляю…", applying: "Применяю…", saving: "Сохраняю и применяю…",
@@ -1166,6 +1265,8 @@ const I18N = {
     svcReload: "Reload config", svcAutostart: "Toggle autostart",
     svcRunning: "nikki running", svcStopped: "nikki stopped",
     svcBoot: "Start on boot", svcOn: "on", svcOff: "off",
+    updTitle: "Updates", updSelf: "Update nikki-unblock", updNikki: "Update nikki", updAll: "Update all",
+    updRunning: "Updating… (you can leave — it continues in the background)", updOkCode: "Done", updBad: "Failed, code ",
     on_: "Enable ", off_: "Disable ", upd_: "Update ",
     enabling: "Enabling ", disabling: "Disabling ", updating: "Updating ",
     adding: "Adding ", removing: "Removing…", applying: "Applying…", saving: "Saving & applying…",
@@ -1617,13 +1718,61 @@ $("#svcBootChk").addEventListener("change", e => svcDo(e.currentTarget.checked ?
 $("#svcRestart").addEventListener("click", e => svcDo("restart", e.currentTarget));
 $("#svcReload").addEventListener("click", e => svcDo("reload", e.currentTarget));
 
+/* ---------- updates (apk, async) ---------- */
+async function loadVersions(){
+  try {
+    const v = await (await fetch("?api=versions")).json();
+    $("#verSelf").textContent = v.self || "?";
+    $("#verNikki").textContent = (v.nikki || "?") + " · mihomo " + (v.mihomo || "?");
+  } catch(e){}
+}
+function updBtns(dis){ ["#updSelf","#updNikki","#updAll"].forEach(id => { $(id).disabled = dis; }); }
+let updPolling = false;
+async function pollUpdate(){
+  if (updPolling) return; updPolling = true;
+  updBtns(true);
+  const log = $("#updLog"); log.hidden = false;
+  setMsg($("#updMsg"), t("updRunning"));
+  let bad = 0;
+  const finish = (ok, code) => {
+    updPolling = false; updBtns(false);
+    setMsg($("#updMsg"), ok ? t("updOkCode") : (t("updBad") + code), ok);
+    loadVersions(); loadSvc();
+  };
+  const tick = async () => {
+    let s = null;
+    try { s = await (await fetch("?api=updatestatus")).json(); bad = 0; } catch(e){ bad++; }
+    if (s){
+      if (s.log !== undefined && s.log !== "") { log.textContent = s.log; log.scrollTop = log.scrollHeight; }
+      if (s.done){ finish(s.code === "0", s.code); return; }
+    } else if (bad >= 3){
+      // The endpoint stopped returning JSON — a self-update most likely replaced the CGI with a
+      // version that predates ?api=updatestatus. The detached apk job still finished; assume success.
+      finish(true, "0"); return;
+    }
+    setTimeout(tick, 1500);
+  };
+  tick();
+}
+async function doUpdate(op){
+  updBtns(true); setMsg($("#updMsg"), t("applying"));
+  let r; try { r = await api("update", { op }); } catch(e){ r = {}; }
+  if (r && r.ok){ pollUpdate(); }
+  else { updBtns(false); setMsg($("#updMsg"), t("errP") + ((r && r.error) || "?"), false); }
+}
+$("#updSelf").addEventListener("click", () => doUpdate("self"));
+$("#updNikki").addEventListener("click", () => doUpdate("nikki"));
+$("#updAll").addEventListener("click", () => doUpdate("all"));
+
 /* ---------- boot ---------- */
 (async () => {
   let def = "ru";
   try { const c = await (await fetch("?api=config")).json(); def = c.lang || "ru"; EXITG = c.exit_group || "UNBLOCK"; } catch(e){}
   try { LANG = localStorage.nikkiLang || def; } catch(e){ LANG = def; }
   applyI18n();
-  loadDomains(); loadIps(); loadPresets(); loadAutosync(); loadNodes(); loadSvc();
+  loadDomains(); loadIps(); loadPresets(); loadAutosync(); loadNodes(); loadSvc(); loadVersions();
+  // resume the log view if an update is already running (started from another tab/session)
+  try { const s = await (await fetch("?api=updatestatus")).json(); if (s && s.running) pollUpdate(); } catch(e){}
 })();
 </script>
 </body>
