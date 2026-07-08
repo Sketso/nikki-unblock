@@ -26,15 +26,18 @@ a LuCI menu entry to open it.
   - **Ads → block** (`GEOSITE,category-ads-all,REJECT`).
   - Rules a preset owns are hidden from the manual list below (to keep it about *your* domains); they
     stay visible in the preset card's popup and in the "show as list" view.
-- **Manual rules** — add a `DOMAIN-SUFFIX` / `DOMAIN` / `DOMAIN-KEYWORD` / `GEOSITE` / `IP-CIDR` matcher
-  with a `PROXY` / `DIRECT` / `REJECT` action. List / bulk / full-text editor views. The list is
+- **Manual rules** — add a `DOMAIN-SUFFIX` / `DOMAIN` / `DOMAIN-KEYWORD` / `GEOSITE` / `GEOIP` / `IP-CIDR`
+  matcher with a `PROXY` / `DIRECT` / `REJECT` action. `GEOIP` routes by country (`ru`, `cn`) or service
+  (`telegram`, `google`, `netflix`) from an auto-updating IP database — enable it once via the Manage
+  tab's **Update geo** button (downloads GeoIP.dat and switches mihomo to geodata-mode). List / bulk / full-text editor views. The list is
   newest-first and each row has inline dropdowns to **re-type or re-route an existing rule** on the spot,
   plus an iOS-style on/off switch.
 - **Manage tab** — start / stop / restart / reload the nikki service and toggle boot autostart, with a
   live running indicator; plus an **Updates** block showing installed versions with one-click
   **Update nikki-unblock** (pulls the latest release `.apk`), **Update nikki** (`apk upgrade nikki` +
-  mihomo), and **Update all**. Updates run in the background (apk outlasts the CGI timeout) with a live
-  log that keeps streaming even if you navigate away.
+  mihomo), and **Update geo** (downloads GeoSite/GeoIP databases + enables GeoIP), and **Update all**. Updates run in
+  the background (apk outlasts the CGI timeout) with a live log that keeps streaming even if you
+  navigate away.
 - **IP exclusions** — manage `nikki.proxy.reserved_ip` (traffic to those dests skips Mihomo — handy
   for your own VPN nodes; the default private ranges are protected).
 - **Auto-update** — optional cron that keeps enabled list-presets in sync with the manifest.

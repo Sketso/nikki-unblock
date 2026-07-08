@@ -18,6 +18,12 @@ UPD_SCRIPT="/tmp/nikki-unblock-update.sh"        # generated per run, executed d
 # nikki-unblock isn't in an apk repo (installed from a local file), so self-update pulls the latest
 # release .apk straight from GitHub (same as feed.sh) and `apk add` upgrades it in place.
 SELF_APK="https://github.com/Sketso/nikki-unblock/releases/latest/download/luci-app-nikki-unblock.apk"
+# GeoIP/GeoSite databases (V2Ray .dat format). GeoIP.dat (not just Country.mmdb) carries service
+# CATEGORIES (telegram, google, netflix, …) — needed for GEOIP,<service> rules — so we run mihomo in
+# geodata-mode (nikki.mixin.geoip_format=dat). Refreshed by the `op=geo` update action.
+GEO_RUN="/etc/nikki/run"
+GEOSITE_URL="https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat"
+GEOIP_DAT_URL="https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.dat"
 
 # Exit routing group. Added VPN nodes join a fallback group `exit_group` (UNBLOCK) = the profile's
 # base group + user nodes. "Via VPN" rules target it. Kept as a config option for portability.
@@ -115,6 +121,9 @@ delete_rule() {
 		i=$((i + 1))
 	done
 }
+
+# GeoIP is "ready" when GeoIP.dat is present (mihomo geodata-mode) — GEOIP rules need it to load.
+geoip_ready() { [ -s /etc/nikki/run/GeoIP.dat ]; }
 
 # delete first DOMAIN-SUFFIX rule whose matcher == $1
 delete_domain() {
@@ -353,17 +362,22 @@ pkg_ver() {   # installed version-release of package $1 (name may itself contain
 }
 versions_json() {
 	json_header
-	printf '{"self":"%s","nikki":"%s","luci":"%s","mihomo":"%s"}' \
+	# GeoIP "enabled" = GeoIP.dat present AND mihomo in geodata-mode; report its file date if so.
+	geo_ok=0; geo_date=""
+	if geoip_ready && [ "$(uci -q get nikki.mixin.geoip_format)" = dat ]; then
+		geo_ok=1; geo_date=$(date -r /etc/nikki/run/GeoIP.dat '+%Y-%m-%d' 2>/dev/null)
+	fi
+	printf '{"self":"%s","nikki":"%s","luci":"%s","mihomo":"%s","geo_ok":%d,"geo_date":"%s"}' \
 		"$(pkg_ver luci-app-nikki-unblock)" "$(pkg_ver nikki)" \
-		"$(pkg_ver luci-app-nikki)" "$(pkg_ver mihomo-meta)"
+		"$(pkg_ver luci-app-nikki)" "$(pkg_ver mihomo-meta)" "$geo_ok" "$geo_date"
 }
 upd_running() {   # 0 (true) if an update runner is alive
 	[ -f "$UPD_LOCK" ] || return 1
 	kill -0 "$(cat "$UPD_LOCK" 2>/dev/null)" 2>/dev/null
 }
-update_start() {   # $1=op(self|nikki|all) ; 0=started 1=busy 2=bad op
+update_start() {   # $1=op(self|nikki|geo|all) ; 0=started 1=busy 2=bad op
 	_op="$1"
-	case "$_op" in self|nikki|all) ;; *) return 2 ;; esac
+	case "$_op" in self|nikki|geo|all) ;; *) return 2 ;; esac
 	upd_running && return 1
 	: > "$UPD_LOG"
 	{
@@ -374,6 +388,13 @@ update_start() {   # $1=op(self|nikki|all) ; 0=started 1=busy 2=bad op
 		case "$_op" in nikki|all)
 			printf 'echo ">> apk update"; apk update\n'
 			printf 'echo ">> upgrading nikki + mihomo"; apk upgrade nikki luci-app-nikki mihomo-meta || rc=$?\n' ;;
+		esac
+		case "$_op" in geo|all)
+			# enable geodata-mode (GEOIP uses GeoIP.dat categories) + auto-update, then refresh both DBs
+			printf 'echo ">> geo: enabling GeoIP (geodata-mode) + auto-update"\n'
+			printf 'uci -q set nikki.mixin.geoip_format=dat; uci -q set nikki.mixin.geox_auto_update=1; [ -n "$(uci -q get nikki.mixin.geox_update_interval)" ] || uci -q set nikki.mixin.geox_update_interval=168; uci -q commit nikki\n'
+			printf 'for gg in "GeoSite.dat %s" "GeoIP.dat %s"; do set -- $gg; echo ">> downloading $1"; if curl -sfL --max-time 120 -o "%s/$1.new" "$2"; then if [ "$(wc -c < "%s/$1.new")" -gt 100000 ]; then mv "%s/$1.new" "%s/$1"; echo "   $1 ok"; else echo "!! $1 too small"; rm -f "%s/$1.new"; rc=1; fi; else echo "!! $1 download failed"; rm -f "%s/$1.new"; rc=1; fi; done\n' "$GEOSITE_URL" "$GEOIP_DAT_URL" "$GEO_RUN" "$GEO_RUN" "$GEO_RUN" "$GEO_RUN" "$GEO_RUN" "$GEO_RUN"
+			printf 'echo ">> reloading nikki"; /etc/init.d/nikki reload\n' ;;
 		esac
 		case "$_op" in self|all)
 			printf 'echo ">> nikki-unblock: fetching latest release .apk"\n'
@@ -594,11 +615,12 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 
 	if [ "$action" = "add" ]; then
 		rtype=$(get_param type)
-		case "$rtype" in DOMAIN-SUFFIX|DOMAIN|DOMAIN-KEYWORD|GEOSITE|IP-CIDR) ;; *) rtype=DOMAIN-SUFFIX ;; esac
+		case "$rtype" in DOMAIN-SUFFIX|DOMAIN|DOMAIN-KEYWORD|GEOSITE|IP-CIDR|GEOIP) ;; *) rtype=DOMAIN-SUFFIX ;; esac
 		rnode=$(get_param node)
 		case "$rnode" in PROXY|DIRECT|REJECT|"$EXIT_GROUP") ;; *) rnode=PROXY ;; esac
 		case "$rtype" in
 			GEOSITE)        val=$(printf '%s' "$(get_param domain)" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9._!-]//g') ;;
+			GEOIP)          val=$(printf '%s' "$(get_param domain)" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9-]//g') ;;
 			DOMAIN-KEYWORD) val=$(printf '%s' "$(get_param domain)" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9.*-]//g') ;;
 			IP-CIDR)        val=$(clean_ip "$(get_param domain)")
 			                case "$val" in */*) ;; *) val="$val/32" ;; esac
@@ -606,10 +628,17 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			*)              val=$(printf '%s' "$(get_param domain)" | parse_domains | head -1) ;;
 		esac
 		[ -z "$val" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
+		# GEOIP rules need GeoIP.dat loaded, else mihomo won't start — refuse until GeoIP is enabled.
+		[ "$rtype" = GEOIP ] && ! geoip_ready && { json_header; printf '{"ok":false,"error":"geoip_off"}'; exit 0; }
 		if [ "$(rule_exists "$rtype" "$val")" = 1 ]; then
 			json_header; printf '{"ok":true,"dup":true}'; exit 0
 		fi
 		add_rule "$rtype" "$val" "$rnode"; uci commit nikki; apply_nikki
+		# a bad geoip code can break the config — revert if mihomo went down
+		if [ "$rtype" = GEOIP ] && ! pgrep -f /usr/bin/mihomo >/dev/null; then
+			delete_rule GEOIP "$val"; uci commit nikki; apply_nikki
+			json_header; printf '{"ok":false,"error":"rejected (reverted)"}'; exit 0
+		fi
 		json_header; printf '{"ok":true}'; exit 0
 
 	elif [ "$action" = "addbulk" ]; then
@@ -680,7 +709,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		[ -z "$idx" ] && { json_header; printf '{"ok":false,"error":"bad idx"}'; exit 0; }
 		uci -q get "nikki.@rule[$idx]" >/dev/null 2>&1 || { json_header; printf '{"ok":false,"error":"no rule"}'; exit 0; }
 		oldt=$(uci -q get "nikki.@rule[$idx].type"); oldn=$(uci -q get "nikki.@rule[$idx].node")
-		ntype=$(get_param type); case "$ntype" in DOMAIN-SUFFIX|DOMAIN|DOMAIN-KEYWORD|GEOSITE|IP-CIDR) uci set "nikki.@rule[$idx].type=$ntype" ;; esac
+		ntype=$(get_param type); case "$ntype" in DOMAIN-SUFFIX|DOMAIN|DOMAIN-KEYWORD|GEOSITE|IP-CIDR|GEOIP) uci set "nikki.@rule[$idx].type=$ntype" ;; esac
 		nnode=$(get_param node); case "$nnode" in PROXY|DIRECT|REJECT|"$EXIT_GROUP") uci set "nikki.@rule[$idx].node=$nnode" ;; esac
 		uci commit nikki; apply_nikki; sleep 3
 		if ! pgrep -f /usr/bin/mihomo >/dev/null; then
@@ -1045,6 +1074,7 @@ cat <<'HTML'
             <option value="DOMAIN" data-i18n="tDomain"></option>
             <option value="DOMAIN-KEYWORD" data-i18n="tKeyword"></option>
             <option value="GEOSITE">GEOSITE</option>
+            <option value="GEOIP">GEOIP</option>
             <option value="IP-CIDR">IP-CIDR</option>
           </select>
           <input id="domain" placeholder="example.com" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required>
@@ -1150,9 +1180,11 @@ cat <<'HTML'
       <h3 data-i18n="updTitle"></h3>
       <div class="uprow"><span class="upname">nikki-unblock</span><span class="upver" id="verSelf">…</span></div>
       <div class="uprow"><span class="upname">nikki + mihomo</span><span class="upver" id="verNikki">…</span></div>
+      <div class="uprow"><span class="upname">GeoIP / GeoSite</span><span class="upver" id="verGeo">…</span></div>
       <div class="btns">
         <button type="button" class="ghost" id="updSelf" data-i18n="updSelf"></button>
         <button type="button" class="ghost" id="updNikki" data-i18n="updNikki"></button>
+        <button type="button" class="ghost" id="updGeo" data-i18n="updGeo"></button>
         <button type="button" id="updAll" data-i18n="updAll"></button>
       </div>
       <pre class="uplog" id="updLog" hidden></pre>
@@ -1186,7 +1218,8 @@ const I18N = {
       "<li><b>точный домен</b> (DOMAIN) — только указанное имя.</li>" +
       "<li><b>подстрока</b> (DOMAIN-KEYWORD) — если имя <i>содержит</i> слово: <code>google</code> → всё, где есть «google» (широко).</li>" +
       "<li><b>GEOSITE</b> — готовая категория из базы (обновляется сама). В поле пишешь <i>имя категории</i>: <code>telegram</code>, <code>youtube</code>, <code>netflix</code>… Одно правило заменяет список.</li>" +
-      "<li><b>IP-CIDR</b> — маршрут по IP-адресу или подсети, а не по домену. Нужен, когда сервис ходит по «голым» IP (например, медиа Telegram), которые не ловятся доменными правилами. Пишешь один адрес <code>1.2.3.4</code> (это то же, что <code>/32</code>) или подсеть <code>1.2.3.0/24</code>. <b>Маска</b> после «/» задаёт размер диапазона: <code>/32</code> — ровно один адрес, <code>/24</code> — 256 адресов (…0–…255), <code>/16</code> — 65536, <code>/8</code> — 16 млн. Чем меньше число, тем шире диапазон.</li></ul>" +
+      "<li><b>IP-CIDR</b> — маршрут по IP-адресу или подсети, а не по домену. Нужен, когда сервис ходит по «голым» IP (например, медиа Telegram), которые не ловятся доменными правилами. Пишешь один адрес <code>1.2.3.4</code> (это то же, что <code>/32</code>) или подсеть <code>1.2.3.0/24</code>. <b>Маска</b> после «/» задаёт размер диапазона: <code>/32</code> — ровно один адрес, <code>/24</code> — 256 адресов (…0–…255), <code>/16</code> — 65536, <code>/8</code> — 16 млн. Чем меньше число, тем шире диапазон.</li>" +
+      "<li><b>GEOIP</b> — маршрут по стране или сервису из базы IP (обновляется сама), не по домену. В поле пишешь код: страну <code>ru</code>, <code>cn</code> или сервис <code>telegram</code>, <code>google</code>, <code>netflix</code>. Ловит и «голые» IP, которые не видны доменным правилам. Требует включённой базы GeoIP — если её нет, включи кнопкой «Обновить geo» во вкладке «Управление».</li></ul>" +
       "<p><b>Действие</b> (правый список):</p><ul>" +
       "<li><b>→ VPN</b> (PROXY) — пустить через VPN (разблокировать).</li>" +
       "<li><b>→ напрямую</b> (DIRECT) — в обход VPN.</li>" +
@@ -1200,7 +1233,7 @@ const I18N = {
     autoHint: "Сам синхронизирует включённые наборы-списки: добавляет новые домены и убирает исчезнувшие. Лёгкая операция, по умолчанию ночью (гео-базы обновляет сам mihomo).",
     ipHint: "IP/подсети, трафик к которым идёт мимо mihomo напрямую (например, VPN-ноды). Голый IPv4 получит /32.",
     exclusions: "Исключения", system: "системный",
-    phDomain: "example.com", phGeosite: "telegram, youtube, netflix…", phIp: "1.2.3.0/24  ·  1.2.3.4",
+    phDomain: "example.com", phGeosite: "telegram, youtube, netflix…", phGeoip: "ru · telegram · google…", phIp: "1.2.3.0/24  ·  1.2.3.4",
     done: "Готово", errP: "Ошибка: ", dup: "Уже есть в списке", listsNA: "Списки недоступны",
     pmShow: "Показать состав", pmGeo: "Поддерживаемая категория доменов — обновляется автоматически из базы. Показаны только дополнительные IP-подсети.",
     tabNodes: "Ноды", nUnblock: "→ VPN (+ноды)",
@@ -1215,7 +1248,8 @@ const I18N = {
     svcReload: "Перечитать конфиг", svcAutostart: "Автозапуск вкл/выкл",
     svcRunning: "nikki работает", svcStopped: "nikki остановлен",
     svcBoot: "Автозапуск при загрузке", svcOn: "вкл", svcOff: "выкл",
-    updTitle: "Обновление", updSelf: "Обновить nikki-unblock", updNikki: "Обновить nikki", updAll: "Обновить всё",
+    updTitle: "Обновление", updSelf: "Обновить nikki-unblock", updNikki: "Обновить nikki", updGeo: "Обновить geo", updAll: "Обновить всё",
+    geoOn: "включено", geoOff: "выключено", geoipNeed: "Сначала включи базу GeoIP: «Обновить geo» во вкладке «Управление».",
     updRunning: "Обновляю… (можно закрыть — продолжится в фоне)", updOkCode: "Готово", updBad: "Ошибка, код ",
     on_: "Включить ", off_: "Отключить ", upd_: "Обновить ",
     enabling: "Включаю ", disabling: "Отключаю ", updating: "Обновляю ",
@@ -1236,7 +1270,8 @@ const I18N = {
       "<li><b>exact domain</b> (DOMAIN) — only the exact name.</li>" +
       "<li><b>keyword</b> (DOMAIN-KEYWORD) — if the name <i>contains</i> the word: <code>google</code> → everything with «google» (broad).</li>" +
       "<li><b>GEOSITE</b> — a ready category from the DB (auto-updates). Type the <i>category name</i>: <code>telegram</code>, <code>youtube</code>, <code>netflix</code>… One rule replaces a whole list.</li>" +
-      "<li><b>IP-CIDR</b> — routes by IP address or subnet instead of by domain. Needed when a service talks to raw IPs (e.g. Telegram media) that domain rules can't catch. Enter a single address <code>1.2.3.4</code> (same as <code>/32</code>) or a subnet <code>1.2.3.0/24</code>. The <b>mask</b> after «/» sets the range size: <code>/32</code> = exactly one address, <code>/24</code> = 256 (…0–…255), <code>/16</code> = 65536, <code>/8</code> = 16M. The smaller the number, the wider the range.</li></ul>" +
+      "<li><b>IP-CIDR</b> — routes by IP address or subnet instead of by domain. Needed when a service talks to raw IPs (e.g. Telegram media) that domain rules can't catch. Enter a single address <code>1.2.3.4</code> (same as <code>/32</code>) or a subnet <code>1.2.3.0/24</code>. The <b>mask</b> after «/» sets the range size: <code>/32</code> = exactly one address, <code>/24</code> = 256 (…0–…255), <code>/16</code> = 65536, <code>/8</code> = 16M. The smaller the number, the wider the range.</li>" +
+      "<li><b>GEOIP</b> — routes by country or service from an IP database (auto-updates), not by domain. Type a code: a country <code>ru</code>, <code>cn</code> or a service <code>telegram</code>, <code>google</code>, <code>netflix</code>. Catches raw IPs domain rules miss. Needs the GeoIP database enabled — if it's off, turn it on with the «Update geo» button in the Manage tab.</li></ul>" +
       "<p><b>Action</b> (right select):</p><ul>" +
       "<li><b>→ VPN</b> (PROXY) — route via VPN (unblock).</li>" +
       "<li><b>→ direct</b> (DIRECT) — bypass the VPN.</li>" +
@@ -1250,7 +1285,7 @@ const I18N = {
     autoHint: "Keeps enabled list-presets in sync: adds new domains and removes vanished ones. Light; runs nightly by default (geo databases are updated by mihomo itself).",
     ipHint: "IPs/subnets whose traffic goes straight past mihomo (e.g. VPN nodes). A bare IPv4 gets /32.",
     exclusions: "Exclusions", system: "system",
-    phDomain: "example.com", phGeosite: "telegram, youtube, netflix…", phIp: "1.2.3.0/24  ·  1.2.3.4",
+    phDomain: "example.com", phGeosite: "telegram, youtube, netflix…", phGeoip: "ru · telegram · google…", phIp: "1.2.3.0/24  ·  1.2.3.4",
     done: "Done", errP: "Error: ", dup: "Already in the list", listsNA: "Lists unavailable",
     pmShow: "Show contents", pmGeo: "A maintained domain category — auto-updated from the DB. Only the extra IP subnets are listed.",
     tabNodes: "Nodes", nUnblock: "→ VPN (+nodes)",
@@ -1265,7 +1300,8 @@ const I18N = {
     svcReload: "Reload config", svcAutostart: "Toggle autostart",
     svcRunning: "nikki running", svcStopped: "nikki stopped",
     svcBoot: "Start on boot", svcOn: "on", svcOff: "off",
-    updTitle: "Updates", updSelf: "Update nikki-unblock", updNikki: "Update nikki", updAll: "Update all",
+    updTitle: "Updates", updSelf: "Update nikki-unblock", updNikki: "Update nikki", updGeo: "Update geo", updAll: "Update all",
+    geoOn: "enabled", geoOff: "disabled", geoipNeed: "Enable the GeoIP database first: «Update geo» in the Manage tab.",
     updRunning: "Updating… (you can leave — it continues in the background)", updOkCode: "Done", updBad: "Failed, code ",
     on_: "Enable ", off_: "Disable ", upd_: "Update ",
     enabling: "Enabling ", disabling: "Disabling ", updating: "Updating ",
@@ -1285,7 +1321,7 @@ function applyI18n(){
   document.querySelectorAll("[data-i18n-ph]").forEach(el => el.placeholder = t(el.dataset.i18nPh));
   document.querySelectorAll(".lang a").forEach(a => a.classList.toggle("on", a.dataset.lang === LANG));
   $("#modeToggle").textContent = listMode ? t("showItems") : t("showList");
-  $("#domain").placeholder = $("#rtype").value === "GEOSITE" ? t("phGeosite") : $("#rtype").value === "IP-CIDR" ? t("phIp") : t("phDomain");
+  $("#domain").placeholder = $("#rtype").value === "GEOSITE" ? t("phGeosite") : $("#rtype").value === "GEOIP" ? t("phGeoip") : $("#rtype").value === "IP-CIDR" ? t("phIp") : t("phDomain");
   renderList(); renderPresets(); loadIps();
   renderGuard(LASTSVC);
 }
@@ -1322,6 +1358,7 @@ function typeOpts(){
          '<option value="DOMAIN">' + t("tDomain") + '</option>' +
          '<option value="DOMAIN-KEYWORD">' + t("tKeyword") + '</option>' +
          '<option value="GEOSITE">GEOSITE</option>' +
+         '<option value="GEOIP">GEOIP</option>' +
          '<option value="IP-CIDR">IP-CIDR</option>';
 }
 function nodeOpts(cur){
@@ -1488,7 +1525,7 @@ $("#saveList").addEventListener("click", async () => {
   else setMsg($("#msg"), t("errP") + (res.error || "?"), false);
 });
 $("#rtype").addEventListener("change", () => {
-  $("#domain").placeholder = $("#rtype").value === "GEOSITE" ? t("phGeosite") : $("#rtype").value === "IP-CIDR" ? t("phIp") : t("phDomain");
+  $("#domain").placeholder = $("#rtype").value === "GEOSITE" ? t("phGeosite") : $("#rtype").value === "GEOIP" ? t("phGeoip") : $("#rtype").value === "IP-CIDR" ? t("phIp") : t("phDomain");
 });
 $("#addForm").addEventListener("submit", async e => {
   e.preventDefault();
@@ -1499,6 +1536,7 @@ $("#addForm").addEventListener("submit", async e => {
   const res = await api("add", { domain: d, type, node });
   $("#addBtn").disabled = false;
   if (res.ok){ setMsg($("#msg"), res.dup ? t("dup") : (t("done") + ": " + type + " «" + d + "» → " + node)); $("#domain").value = ""; loadDomains(); }
+  else if (res.error === "geoip_off") setMsg($("#msg"), t("geoipNeed"), false);
   else setMsg($("#msg"), t("errP") + (res.error || "?"), false);
 });
 $("#list").addEventListener("click", async e => {
@@ -1719,14 +1757,17 @@ $("#svcRestart").addEventListener("click", e => svcDo("restart", e.currentTarget
 $("#svcReload").addEventListener("click", e => svcDo("reload", e.currentTarget));
 
 /* ---------- updates (apk, async) ---------- */
+let GEO_OK = false;
 async function loadVersions(){
   try {
     const v = await (await fetch("?api=versions")).json();
     $("#verSelf").textContent = v.self || "?";
     $("#verNikki").textContent = (v.nikki || "?") + " · mihomo " + (v.mihomo || "?");
+    GEO_OK = v.geo_ok === 1;
+    $("#verGeo").textContent = GEO_OK ? (t("geoOn") + (v.geo_date ? " · " + v.geo_date : "")) : t("geoOff");
   } catch(e){}
 }
-function updBtns(dis){ ["#updSelf","#updNikki","#updAll"].forEach(id => { $(id).disabled = dis; }); }
+function updBtns(dis){ ["#updSelf","#updNikki","#updGeo","#updAll"].forEach(id => { $(id).disabled = dis; }); }
 let updPolling = false;
 async function pollUpdate(){
   if (updPolling) return; updPolling = true;
@@ -1762,6 +1803,7 @@ async function doUpdate(op){
 }
 $("#updSelf").addEventListener("click", () => doUpdate("self"));
 $("#updNikki").addEventListener("click", () => doUpdate("nikki"));
+$("#updGeo").addEventListener("click", () => doUpdate("geo"));
 $("#updAll").addEventListener("click", () => doUpdate("all"));
 
 /* ---------- boot ---------- */
