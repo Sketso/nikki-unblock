@@ -361,6 +361,9 @@ pkg_ver() {   # installed version-release of package $1 (name may itself contain
 	line=$(apk list -I "$1" 2>/dev/null | grep -m1 "^$1-[0-9]" | awk '{print $1}')
 	printf '%s' "${line#"$1"-}"
 }
+# nikki ships mihomo as a separate package whose name varies (mihomo-meta / mihomo-alpha / mihomo) —
+# detect the installed one so version display and `apk upgrade` target the right package.
+mihomo_pkg() { apk list -I 2>/dev/null | grep -oE '^mihomo(-[a-z]+)?' | head -1; }
 versions_json() {
 	json_header
 	# GeoIP "enabled" = GeoIP.dat present AND mihomo in geodata-mode; report its file date if so.
@@ -370,7 +373,7 @@ versions_json() {
 	fi
 	printf '{"self":"%s","nikki":"%s","luci":"%s","mihomo":"%s","geo_ok":%d,"geo_date":"%s"}' \
 		"$(pkg_ver luci-app-nikki-unblock)" "$(pkg_ver nikki)" \
-		"$(pkg_ver luci-app-nikki)" "$(pkg_ver mihomo-meta)" "$geo_ok" "$geo_date"
+		"$(pkg_ver luci-app-nikki)" "$(pkg_ver "$(mihomo_pkg)")" "$geo_ok" "$geo_date"
 }
 upd_running() {   # 0 (true) if an update runner is alive
 	[ -f "$UPD_LOCK" ] || return 1
@@ -387,8 +390,9 @@ update_start() {   # $1=op(self|nikki|geo|all) ; 0=started 1=busy 2=bad op
 		# nikki FIRST, self LAST: a self-update replaces this CGI, so keep it to the very end
 		# (for op=all) — the poll endpoint then disappears only once everything else is done.
 		case "$_op" in nikki|all)
+			_mp=$(mihomo_pkg)   # mihomo-meta / mihomo-alpha / mihomo — whichever is installed
 			printf 'echo ">> apk update"; apk update\n'
-			printf 'echo ">> upgrading nikki + mihomo"; apk upgrade nikki luci-app-nikki mihomo-meta || rc=$?\n' ;;
+			printf 'echo ">> upgrading nikki + mihomo"; apk upgrade nikki luci-app-nikki %s || rc=$?\n' "$_mp" ;;
 		esac
 		case "$_op" in geo|all)
 			# enable geodata-mode (GEOIP uses GeoIP.dat categories) + auto-update, then refresh both DBs
