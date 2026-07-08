@@ -46,8 +46,11 @@ a LuCI menu entry to open it.
   for your own VPN nodes; the default private ranges are protected).
 - **Auto-update** — optional cron that keeps enabled list-presets in sync with the manifest.
 - **VPN nodes** — a tab to add your own exit configs (drag-drop a file or paste): **AmneziaWG /
-  WireGuard `.conf`**, a **subscription link** (remnawave/clash → mihomo proxy-provider), **share-links**
-  (`vless://`, `vmess://`, `trojan://`, `ss://`, `hysteria2://`), or **raw clash/mihomo YAML**. Each is
+  WireGuard `.conf`**, a **subscription link**, **share-links** (`vless://`, `vmess://`, `trojan://`,
+  `ss://`, `hysteria2://` — incl. `xhttp`/`grpc`/`ws` transports + `reality`), or **raw clash/mihomo
+  YAML**. A **subscription link** is fetched and decoded (base64 or clash) and imported as individual,
+  reorderable nodes — so it works even when a panel's clash output is empty (e.g. some remnawave setups).
+  A **Ping all** button probes every exit at once. Each is
   converted to a mihomo proxy, injected into nikki, and **auto-checked** (latency probe via the mihomo
   API). Added nodes form a fallback group `UNBLOCK` (= your profile's base group + the added nodes);
   A bad config is auto-reverted so it can't break nikki. The **Exits** list unifies your **profile

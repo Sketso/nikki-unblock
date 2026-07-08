@@ -502,6 +502,7 @@ sharelink_to_yaml() {
 		_sni=$(urldec "$(qparam "$_query" sni)"); [ -z "$_sni" ] && _sni=$(urldec "$(qparam "$_query" peer)")
 		_net=$(qparam "$_query" type); [ -z "$_net" ] && _net=tcp
 		_sec=$(qparam "$_query" security); _fp=$(qparam "$_query" fp); _path=$(urldec "$(qparam "$_query" path)"); _hosth=$(urldec "$(qparam "$_query" host)")
+		_mode=$(qparam "$_query" mode); _svc=$(urldec "$(qparam "$_query" serviceName)")
 		echo "  - name: $_n"
 		echo "    type: $_scheme"
 		echo "    server: $_host"; echo "    port: $_port"
@@ -513,8 +514,12 @@ sharelink_to_yaml() {
 		_pbk=$(qparam "$_query" pbk); _sid=$(qparam "$_query" sid)
 		[ -n "$_pbk" ] && { echo "    reality-opts:"; echo "      public-key: $_pbk"; [ -n "$_sid" ] && echo "      short-id: $_sid"; }
 		_flow=$(qparam "$_query" flow); [ -n "$_flow" ] && echo "    flow: $_flow"
-		case "$_net" in ws) echo "    ws-opts:"; echo "      path: ${_path:-/}"; [ -n "$_hosth" ] && { echo "      headers:"; echo "        Host: $_hosth"; } ;; esac
-		;;
+		case "$_net" in
+		ws) echo "    ws-opts:"; echo "      path: ${_path:-/}"; [ -n "$_hosth" ] && { echo "      headers:"; echo "        Host: $_hosth"; } ;;
+		xhttp) echo "    xhttp-opts:"; [ -n "$_hosth" ] && echo "      host: $_hosth"; echo "      mode: ${_mode:-auto}"; [ -n "$_path" ] && echo "      path: $_path" ;;
+		grpc) echo "    grpc-opts:"; echo "      grpc-service-name: ${_svc:-$_path}" ;;
+		esac
+		return 0 ;;   # never let a trailing conditional (e.g. empty path) set a non-zero exit
 	ss)
 		# ss://base64(method:pass)@host:port  OR  ss://base64(method:pass@host:port)
 		_b="${_rest%@*}"; _hp="${_rest#*@}"
@@ -523,13 +528,13 @@ sharelink_to_yaml() {
 		_method="${_mp%%:*}"; _pass="${_mp#*:}"
 		echo "  - name: $_n"; echo "    type: ss"; echo "    server: $_host"; echo "    port: $_port"
 		echo "    cipher: $_method"; echo "    password: $_pass"; echo "    udp: true"
-		;;
+		return 0 ;;
 	hysteria2|hy2)
 		_uup="${_rest%@*}"; _hp="${_rest#*@}"; _host="${_hp%:*}"; _port="${_hp##*:}"
 		_sni=$(urldec "$(qparam "$_query" sni)")
 		echo "  - name: $_n"; echo "    type: hysteria2"; echo "    server: $_host"; echo "    port: $_port"
 		echo "    password: $_uup"; [ -n "$_sni" ] && echo "    sni: $_sni"
-		;;
+		return 0 ;;
 	vmess)
 		_j=$(b64dec "$_rest")
 		_jf() { printf '%s' "$_j" | jsonfilter -e "@.$1" 2>/dev/null; }
@@ -537,7 +542,7 @@ sharelink_to_yaml() {
 		echo "    uuid: $(_jf id)"; echo "    alterId: $(_jf aid)"; echo "    cipher: auto"; echo "    udp: true"
 		_tls=$(_jf tls); [ "$_tls" = tls ] && echo "    tls: true"
 		_net=$(_jf net); [ -n "$_net" ] && echo "    network: $_net"
-		;;
+		return 0 ;;
 	*) return 1 ;;
 	esac
 }
@@ -892,9 +897,24 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			[ -z "$yaml" ] && [ -z "$err" ] && err="could not parse link"
 			;;
 		http://*|https://*)
-			kind=provider; [ -z "$nm" ] && nm="sub-$(date +%s)"; pid=$(san_name "$nm")
-			{ echo "  $pid:"; echo "    type: http"; echo "    url: $fl"; echo "    interval: 86400"
-			  echo "    health-check: {enable: true, url: http://cp.cloudflare.com/generate_204, interval: 300}"; } > "$PROV_DIR/$pid.yaml"
+			# Fetch the subscription ourselves. Two kinds:
+			#  - v2ray/base64 (or plain) list of share-links -> convert each into an individual node
+			#    (manageable/orderable; needed because clash-UA output is often empty, e.g. remnawave).
+			#  - real clash YAML with proxies: -> keep as an auto-updating proxy-provider (as before).
+			subbody=$(curl -s --max-time 20 "$fl" 2>/dev/null)
+			subdec=$(printf '%s' "$subbody" | base64 -d 2>/dev/null)
+			LINKS="/tmp/nu-sublinks.$$"
+			printf '%s\n%s\n' "$subdec" "$subbody" | grep -oiE '^(vless|vmess|trojan|ss|hysteria2|hy2|tuic)://[^[:space:]]+' | awk '!seen[$0]++' > "$LINKS"
+			if [ -s "$LINKS" ]; then
+				kind=multi; [ -z "$nm" ] && nm="sub"; subpfx=$(san_name "$nm")
+			elif printf '%s' "$subbody" | grep -q 'proxies:'; then
+				kind=provider; [ -z "$nm" ] && nm="sub-$(date +%s)"; pid=$(san_name "$nm")
+				{ echo "  $pid:"; echo "    type: http"; echo "    url: $fl"; echo "    interval: 86400"
+				  echo "    health-check: {enable: true, url: http://cp.cloudflare.com/generate_204, interval: 300}"; } > "$PROV_DIR/$pid.yaml"
+				rm -f "$LINKS"
+			else
+				rm -f "$LINKS"; err="subscription returned no usable nodes"
+			fi
 			;;
 		*)
 			# raw clash/mihomo proxy: a mapping or a "- name:" item. Normalize to a 1-item seq at
@@ -907,6 +927,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			;;
 		esac
 		[ -n "$err" ] && { json_header; printf '{"ok":false,"error":"%s"}' "$err"; exit 0; }
+		multiids=""
 		if [ "$kind" = node ]; then
 			# ensure a unique proxy name — mihomo rejects a name that collides with the profile or another node
 			b="$nm"; k=1
@@ -914,17 +935,39 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			[ "$nm" = "$b" ] || yaml=$(printf '%s\n' "$yaml" | awk -v n="$nm" 'BEGIN{d=0} /name:/&&!d{sub(/name:.*/,"name: " n);d=1} {print}')
 			id=$(san_name "$nm"); [ -z "$id" ] && id="node-$(date +%s)"
 			printf '%s\n' "$yaml" > "$NODES_DIR/$id.yaml"
+		elif [ "$kind" = multi ]; then
+			# a subscription of share-links: convert each to an individual node
+			added=0; i=0
+			while IFS= read -r lk; do
+				[ -z "$lk" ] && continue
+				i=$((i + 1))
+				lname=$(urldec "$(printf '%s' "$lk" | sed 's/.*#//')"); [ "$lname" = "$lk" ] && lname=""
+				[ -z "$lname" ] && lname="$nm-$i"
+				ny=$(sharelink_to_yaml "$lk" "$lname") || continue
+				[ -z "$ny" ] && continue
+				b="$lname"; k=1
+				while [ "$k" -lt 30 ] && name_taken "$lname"; do k=$((k+1)); lname="$b-$k"; done
+				[ "$lname" = "$b" ] || ny=$(printf '%s\n' "$ny" | awk -v n="$lname" 'BEGIN{d=0} /name:/&&!d{sub(/name:.*/,"name: " n);d=1} {print}')
+				nid=$(san_name "$lname"); [ -z "$nid" ] && nid="$subpfx-$i"
+				printf '%s\n' "$ny" > "$NODES_DIR/$nid.yaml"
+				multiids="$multiids $nid"; added=$((added + 1))
+			done < "$LINKS"
+			rm -f "$LINKS"
+			[ "$added" = 0 ] && { json_header; printf '{"ok":false,"error":"no links could be parsed"}'; exit 0; }
 		fi
 		regen_mixin; apply_nikki; sleep 6
 		if ! pgrep -f /usr/bin/mihomo >/dev/null; then
 			# config broke nikki -> roll back and report
 			rm -f "$NODES_DIR/$id.yaml" "$PROV_DIR/$pid.yaml"
+			for x in $multiids; do rm -f "$NODES_DIR/$x.yaml"; done
 			regen_mixin; apply_nikki
 			json_header; printf '{"ok":false,"error":"config rejected by mihomo (reverted)"}'; exit 0
 		fi
 		if [ "$kind" = node ]; then
 			rn=$(grep -m1 'name:' "$NODES_DIR/$id.yaml" | sed 's/.*name:[[:space:]]*//')
 			json_header; printf '{"ok":true,"kind":"node","id":"%s","name":"%s","delay":"%s"}' "$id" "$rn" "$(mihomo_delay "$rn")"; exit 0
+		elif [ "$kind" = multi ]; then
+			json_header; printf '{"ok":true,"kind":"multi","added":%d}' "$added"; exit 0
 		fi
 		json_header; printf '{"ok":true,"kind":"provider","id":"%s"}' "$pid"; exit 0
 
@@ -1274,6 +1317,7 @@ cat <<'HTML'
         <button type="button" data-mode="fallback" data-i18n="modePriority"></button>
         <button type="button" data-mode="urltest" data-i18n="modeAuto"></button>
       </div>
+      <button type="button" class="ghost" id="pingAll" data-i18n="pingAll"></button>
     </div>
     <div class="hint" id="modeHint"></div>
     <ul id="nodeList" class="nodelist"></ul>
@@ -1340,7 +1384,7 @@ const I18N = {
     exitsTitle: "Выходы (порядок = приоритет)", modePriority: "Приоритет", modeAuto: "Авто",
     modePriHint: "Сверху вниз: верхняя нода — основная, при сбое переходит на следующую. Перетаскивай ⠿ для порядка.",
     modeAutoHint: "Автовыбор самой быстрой ноды по пингу (перепроверка каждые 5 мин). Порядок игнорируется.",
-    nodeActive: "активна", dragHint: "Перетащи для порядка",
+    nodeActive: "активна", dragHint: "Перетащи для порядка", pingAll: "Пинг всех", subAdded: "добавлено нод: ",
     provTitle: "Подписки", provNodes: "нод", provDelConfirm: "Удалить подписку целиком? Все её ноды пропадут (по отдельности их удалить нельзя).",
     migrateRules: "Перенести старые правила «→ VPN» на эту группу", migrateConfirm: "Перевести все правила «→ VPN» (профиль) на управляемую группу выходов? Порядок/автовыбор начнут влиять на них.",
     helpSummary: "❓ Что за пункты и как пользоваться",
@@ -1398,7 +1442,7 @@ const I18N = {
     exitsTitle: "Exits (order = priority)", modePriority: "Priority", modeAuto: "Auto",
     modePriHint: "Top-down: the top node is primary, falls through to the next on failure. Drag ⠿ to reorder.",
     modeAutoHint: "Auto-picks the fastest node by ping (re-checked every 5 min). Order is ignored.",
-    nodeActive: "active", dragHint: "Drag to reorder",
+    nodeActive: "active", dragHint: "Drag to reorder", pingAll: "Ping all", subAdded: "nodes added: ",
     provTitle: "Subscriptions", provNodes: "nodes", provDelConfirm: "Delete the whole subscription? All its nodes go away (they can't be removed individually).",
     migrateRules: "Move old «→ VPN» rules onto this group", migrateConfirm: "Move all «→ VPN» (profile) rules onto the managed exit group? Ordering/auto-select will start affecting them.",
     helpSummary: "❓ What these mean & how to use",
@@ -1826,9 +1870,10 @@ async function addNodeCfg(cfg, name){
   if (res.ok){
     let m = t("done");
     if (res.kind === "node") m += " · " + res.name + " — " + (res.delay === "x" ? t("nodeNoResp") : res.delay + " " + t("nodeMs"));
+    else if (res.kind === "multi") m += " · " + t("subAdded") + res.added;
     setMsg($("#nodeMsg"), m, res.kind !== "node" || res.delay !== "x");
     $("#nodeCfg").value = ""; $("#nodeName").value = "";
-    loadNodes(); loadDomains();
+    loadNodes().then(autoPingNodes); loadDomains();
   } else setMsg($("#nodeMsg"), t("errP") + (res.error || "?"), false);
 }
 $("#nodeForm").addEventListener("submit", e => { e.preventDefault(); addNodeCfg($("#nodeCfg").value, $("#nodeName").value.trim()); });
@@ -1874,6 +1919,8 @@ $("#provList").addEventListener("click", async e => {
   if (res.ok){ setMsg($("#nodeMsg"), t("done")); loadNodes().then(autoPingNodes); loadDomains(); }
   else { setMsg($("#nodeMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
 });
+// ping all exit nodes at once
+$("#pingAll").addEventListener("click", e => { e.currentTarget.blur(); autoPingNodes(); });
 // migrate existing "→ VPN" rules onto the managed exit group
 $("#migrateBtn").addEventListener("click", async e => {
   if (!confirm(t("migrateConfirm"))) return;
