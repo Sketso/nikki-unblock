@@ -50,10 +50,11 @@ a LuCI menu entry to open it.
   `ss://`, `hysteria2://` — incl. `xhttp`/`grpc`/`ws` transports + `reality`), or **raw clash/mihomo
   YAML**. A **subscription link** is fetched and decoded (base64 or clash) and imported as individual,
   reorderable nodes — so it works even when a panel's clash output is empty (e.g. some remnawave setups).
-  A **Ping all** button probes every exit at once. Each is
-  converted to a mihomo proxy, injected into nikki, and **auto-checked** (latency probe via the mihomo
-  API). Added nodes form a fallback group `UNBLOCK` (= your profile's base group + the added nodes);
-  A bad config is auto-reverted so it can't break nikki. The **Exits** list unifies your **profile
+  Imported subscriptions are **tracked and refreshable**: a ↻ button (and an optional auto-refresh
+  schedule) re-syncs them — adding new nodes, updating rotated keys, removing departed ones — while
+  keeping your order and enable/disable state. A **Ping all** button probes every exit at once. Each
+  node is converted to a mihomo proxy, injected into nikki, and **auto-checked** (latency probe via the
+  mihomo API). A bad config is auto-reverted so it can't break nikki. The **Exits** list unifies your **profile
   nodes** (referenced by name) and your added nodes into one **drag-to-reorder** list, with:
   - a **Priority ↔ Auto** switch — *Priority* (`fallback`) uses the top node and falls through to the
     next on failure (drag to set the order); *Auto* (`url-test`) auto-picks the fastest by ping,

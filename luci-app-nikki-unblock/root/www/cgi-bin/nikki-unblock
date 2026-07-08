@@ -38,6 +38,8 @@ NODES_DIR="/etc/nikki-unblock/nodes"
 PROV_DIR="/etc/nikki-unblock/providers"
 ORDER_FILE="/etc/nikki-unblock/nodes.order"   # exit node names in user-chosen order (profile + ours)
 OFF_FILE="/etc/nikki-unblock/nodes.off"        # disabled exit node names (works for profile + our nodes)
+SUBS_DIR="/etc/nikki-unblock/subs"             # tracked link-subscriptions: <subid>.conf (url + name)
+SUB_TAG="# nikki-unblock-subsync"              # crontab marker for subscription auto-refresh
 MIXIN_FILE="/etc/nikki/mixin.yaml"
 MIHOMO_API="http://127.0.0.1:9090"
 
@@ -611,6 +613,77 @@ regen_mixin() {
 	uci set nikki.mixin.mixin_file_content=1 2>/dev/null; uci commit nikki 2>/dev/null
 }
 
+# ---- link subscriptions (tracked & refreshable) ---------------------------
+# Fetch a subscription URL -> share-links (base64 or plain text), one per line, deduped.
+sub_links() {
+	_b=$(curl -s --max-time 20 "$1" 2>/dev/null)
+	{ printf '%s' "$_b" | base64 -d 2>/dev/null; printf '\n%s\n' "$_b"; } \
+		| grep -oiE '^(vless|vmess|trojan|ss|hysteria2|hy2|tuic)://[^[:space:]]+' | awk '!seen[$0]++'
+}
+sub_owned_ids() { for s in "$NODES_DIR"/*.src; do [ -f "$s" ] || continue; [ "$(cat "$s" 2>/dev/null)" = "$1" ] && basename "$s" .src; done; }
+node_name_of() { grep -m1 'name:' "$NODES_DIR/$1.yaml" 2>/dev/null | sed 's/.*name:[[:space:]]*//'; }
+# Sync one subscription (matched by node NAME): update changed, add new, remove departed. Preserves
+# order/enable (they key on name). Does NOT reload — caller regens. Returns 1 if empty/unreachable (no-op).
+sub_sync() {   # $1=subid $2=url $3=name-prefix
+	_sid="$1"; _url="$2"; _pfx="$3"
+	LL="/tmp/nu-sl.$$"; sub_links "$_url" > "$LL"
+	[ -s "$LL" ] || { rm -f "$LL"; return 1; }
+	OWN="/tmp/nu-own.$$"; : > "$OWN"
+	for oid in $(sub_owned_ids "$_sid"); do printf '%s\t%s\n' "$(node_name_of "$oid")" "$oid" >> "$OWN"; done
+	KEEP="/tmp/nu-keep.$$"; : > "$KEEP"
+	i=0
+	while IFS= read -r lk; do
+		[ -z "$lk" ] && continue; i=$((i + 1))
+		lname=$(urldec "$(printf '%s' "$lk" | sed 's/.*#//')"); case "$lname" in "$lk") lname="" ;; esac
+		[ -z "$lname" ] && lname="$_pfx-$i"
+		ny=$(sharelink_to_yaml "$lk" "$lname" </dev/null) || continue
+		[ -z "$ny" ] && continue
+		printf '%s\n' "$lname" >> "$KEEP"
+		oid=$(grep -m1 -F "$(printf '%s\t' "$lname")" "$OWN" | cut -f2)
+		if [ -n "$oid" ]; then
+			printf '%s\n' "$ny" > "$NODES_DIR/$oid.yaml"   # update in place (id/order/off keyed by name)
+		else
+			b="$lname"; k=1
+			while [ "$k" -lt 30 ] && name_taken "$lname"; do k=$((k + 1)); lname="$b-$k"; done
+			[ "$lname" = "$b" ] || ny=$(printf '%s\n' "$ny" | awk -v n="$lname" 'BEGIN{d=0} /name:/&&!d{sub(/name:.*/,"name: " n);d=1} {print}')
+			nid=$(san_name "$lname"); [ -z "$nid" ] && nid="$_pfx-$i-$(date +%s)"
+			printf '%s\n' "$ny" > "$NODES_DIR/$nid.yaml"; printf '%s' "$_sid" > "$NODES_DIR/$nid.src"
+		fi
+	done < "$LL"
+	# remove owned nodes whose NAME left the subscription
+	while IFS= read -r line; do
+		onm=$(printf '%s' "$line" | cut -f1); oid=$(printf '%s' "$line" | cut -f2)
+		[ -z "$oid" ] && continue
+		grep -qxF "$onm" "$KEEP" || { rm -f "$NODES_DIR/$oid.yaml" "$NODES_DIR/$oid.src"
+			for L in "$ORDER_FILE" "$OFF_FILE"; do [ -f "$L" ] && [ -n "$onm" ] && { grep -vxF "$onm" "$L" > "$L.t" 2>/dev/null; mv "$L.t" "$L"; }; done; }
+	done < "$OWN"
+	rm -f "$LL" "$OWN" "$KEEP"; return 0
+}
+subrefresh_all() {
+	_ch=0
+	for c in "$SUBS_DIR"/*.conf; do
+		[ -f "$c" ] || continue
+		sid=$(basename "$c" .conf); url=$(grep -m1 '^url=' "$c" | cut -d= -f2-); nm=$(grep -m1 '^name=' "$c" | cut -d= -f2-)
+		sub_sync "$sid" "$url" "$nm" && _ch=1
+	done
+	[ "$_ch" = 1 ] && { regen_mixin; apply_nikki; }
+	logger -t nikki-unblock "subsync: refreshed link-subscriptions"
+}
+subauto_set() {   # $1=on(0/1) $2=interval
+	uci set nikki-unblock.config.subauto="$1" 2>/dev/null
+	uci set nikki-unblock.config.subauto_interval="$2" 2>/dev/null
+	uci commit nikki-unblock 2>/dev/null
+	touch "$CRONTAB"; sed -i "/$SUB_TAG/d" "$CRONTAB"
+	if [ "$1" = 1 ]; then echo "$(autosync_sched "$2") $SELF subsync $SUB_TAG interval=$2" >> "$CRONTAB"; /etc/init.d/cron enable >/dev/null 2>&1; fi
+	/etc/init.d/cron restart >/dev/null 2>&1
+}
+subauto_json() {
+	json_header
+	en=$(uci -q get nikki-unblock.config.subauto 2>/dev/null)
+	iv=$(uci -q get nikki-unblock.config.subauto_interval 2>/dev/null); [ -z "$iv" ] && iv=24h
+	[ "$en" = 1 ] && printf '{"enabled":true,"interval":"%s"}' "$iv" || printf '{"enabled":false,"interval":"%s"}' "$iv"
+}
+
 # Unified exit list as JSON — NEVER includes secrets. Shape:
 # {mode, active, nodes:[{name,kind,id,type,host,enabled,active}], providers:[{id,name,count}]}
 # nodes[] = ordered union of profile nodes (kind:profile, id="") + our nodes (kind:node, id=file).
@@ -646,12 +719,20 @@ nodes_json() {
 	rm -f "$OM"
 	printf '],"providers":['
 	first=1
+	# tracked link-subscriptions (refreshable; their nodes are the individual ones above)
+	for f in "$SUBS_DIR"/*.conf; do
+		[ -f "$f" ] || continue
+		sid=$(basename "$f" .conf); snm=$(grep -m1 '^name=' "$f" | cut -d= -f2-)
+		[ "$first" = 1 ] || printf ','; first=0
+		printf '{"id":"%s","name":"%s","count":%s,"kind":"sub"}' "$sid" "$(json_esc "$snm")" "$(sub_owned_ids "$sid" | grep -c .)"
+	done
+	# clash proxy-providers (auto-updating bundles; all-or-nothing)
 	for f in "$PROV_DIR"/*.yaml; do
 		[ -f "$f" ] || continue
 		nm=$(head -1 "$f" | sed 's/[[:space:]]*\([^:]*\):.*/\1/')
 		cnt=$(curl -s -m 6 -H "Authorization: Bearer $sec" "$MIHOMO_API/providers/proxies" 2>/dev/null | jsonfilter -e "@.providers[\"$nm\"].proxies[*].name" 2>/dev/null | grep -c .)
 		[ "$first" = 1 ] || printf ','; first=0
-		printf '{"id":"%s","name":"%s","count":%s}' "$(basename "$f" .yaml)" "$(json_esc "$nm")" "${cnt:-0}"
+		printf '{"id":"%s","name":"%s","count":%s,"kind":"provider"}' "$(basename "$f" .yaml)" "$(json_esc "$nm")" "${cnt:-0}"
 	done
 	printf ']}'
 }
@@ -660,6 +741,8 @@ nodes_json() {
 [ "$1" = "sync" ] && { sync_all; exit 0; }
 # CLI: rebuild the managed exit-group mixin (used by post-install to create UNBLOCK once)
 [ "$1" = "regen" ] && { regen_mixin; exit 0; }
+# cron/CLI: refresh all tracked link-subscriptions (add/update/remove nodes)
+[ "$1" = "subsync" ] && { subrefresh_all; exit 0; }
 
 # ---- API -------------------------------------------------------------------
 
@@ -882,7 +965,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		raw=$(get_param config | sed 's/\r//g')
 		nm=$(get_param name)
 		fl=$(printf '%s' "$raw" | grep -vE '^[[:space:]]*$' | head -1)
-		err=""; kind=node; yaml=""; id=""; pid=""
+		err=""; kind=node; yaml=""; id=""; pid=""; subid=""
 		case "$fl" in
 		"[Interface]"*)
 			WGCONF="/tmp/nu-wg.$$"; printf '%s\n' "$raw" > "$WGCONF"
@@ -903,17 +986,14 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			#  - real clash YAML with proxies: -> keep as an auto-updating proxy-provider (as before).
 			subbody=$(curl -s --max-time 20 "$fl" 2>/dev/null)
 			subdec=$(printf '%s' "$subbody" | base64 -d 2>/dev/null)
-			LINKS="/tmp/nu-sublinks.$$"
-			printf '%s\n%s\n' "$subdec" "$subbody" | grep -oiE '^(vless|vmess|trojan|ss|hysteria2|hy2|tuic)://[^[:space:]]+' | awk '!seen[$0]++' > "$LINKS"
-			if [ -s "$LINKS" ]; then
-				kind=multi; [ -z "$nm" ] && nm="sub"; subpfx=$(san_name "$nm")
+			if printf '%s\n%s\n' "$subdec" "$subbody" | grep -qiE '^(vless|vmess|trojan|ss|hysteria2|hy2|tuic)://'; then
+				kind=multi; [ -z "$nm" ] && nm="sub"   # tracked link-subscription -> individual nodes (sub_sync)
 			elif printf '%s' "$subbody" | grep -q 'proxies:'; then
 				kind=provider; [ -z "$nm" ] && nm="sub-$(date +%s)"; pid=$(san_name "$nm")
 				{ echo "  $pid:"; echo "    type: http"; echo "    url: $fl"; echo "    interval: 86400"
 				  echo "    health-check: {enable: true, url: http://cp.cloudflare.com/generate_204, interval: 300}"; } > "$PROV_DIR/$pid.yaml"
-				rm -f "$LINKS"
 			else
-				rm -f "$LINKS"; err="subscription returned no usable nodes"
+				err="subscription returned no usable nodes"
 			fi
 			;;
 		*)
@@ -936,30 +1016,24 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			id=$(san_name "$nm"); [ -z "$id" ] && id="node-$(date +%s)"
 			printf '%s\n' "$yaml" > "$NODES_DIR/$id.yaml"
 		elif [ "$kind" = multi ]; then
-			# a subscription of share-links: convert each to an individual node
-			added=0; i=0
-			while IFS= read -r lk; do
-				[ -z "$lk" ] && continue
-				i=$((i + 1))
-				lname=$(urldec "$(printf '%s' "$lk" | sed 's/.*#//')"); [ "$lname" = "$lk" ] && lname=""
-				[ -z "$lname" ] && lname="$nm-$i"
-				ny=$(sharelink_to_yaml "$lk" "$lname") || continue
-				[ -z "$ny" ] && continue
-				b="$lname"; k=1
-				while [ "$k" -lt 30 ] && name_taken "$lname"; do k=$((k+1)); lname="$b-$k"; done
-				[ "$lname" = "$b" ] || ny=$(printf '%s\n' "$ny" | awk -v n="$lname" 'BEGIN{d=0} /name:/&&!d{sub(/name:.*/,"name: " n);d=1} {print}')
-				nid=$(san_name "$lname"); [ -z "$nid" ] && nid="$subpfx-$i"
-				printf '%s\n' "$ny" > "$NODES_DIR/$nid.yaml"
-				multiids="$multiids $nid"; added=$((added + 1))
-			done < "$LINKS"
-			rm -f "$LINKS"
-			[ "$added" = 0 ] && { json_header; printf '{"ok":false,"error":"no links could be parsed"}'; exit 0; }
+			# a tracked link-subscription: create its record + import nodes via sub_sync (refreshable later)
+			mkdir -p "$SUBS_DIR"
+			subid=$(san_name "$nm"); [ -z "$subid" ] && subid="sub-$(date +%s)"
+			# avoid clobbering an existing sub of the same name
+			[ -f "$SUBS_DIR/$subid.conf" ] && subid="$subid-$(date +%s)"
+			{ printf 'url=%s\n' "$fl"; printf 'name=%s\n' "$nm"; } > "$SUBS_DIR/$subid.conf"
+			if ! sub_sync "$subid" "$fl" "$nm"; then
+				rm -f "$SUBS_DIR/$subid.conf"; json_header; printf '{"ok":false,"error":"no links could be parsed"}'; exit 0
+			fi
+			added=$(sub_owned_ids "$subid" | grep -c .)
+			multiids=$(sub_owned_ids "$subid" | tr '\n' ' ')
 		fi
 		regen_mixin; apply_nikki; sleep 6
 		if ! pgrep -f /usr/bin/mihomo >/dev/null; then
 			# config broke nikki -> roll back and report
 			rm -f "$NODES_DIR/$id.yaml" "$PROV_DIR/$pid.yaml"
-			for x in $multiids; do rm -f "$NODES_DIR/$x.yaml"; done
+			for x in $multiids; do rm -f "$NODES_DIR/$x.yaml" "$NODES_DIR/$x.src"; done
+			[ -n "$subid" ] && rm -f "$SUBS_DIR/$subid.conf"
 			regen_mixin; apply_nikki
 			json_header; printf '{"ok":false,"error":"config rejected by mihomo (reverted)"}'; exit 0
 		fi
@@ -975,7 +1049,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		id=$(get_param id | sed 's/[^a-z0-9_-]//g')
 		if [ -n "$id" ]; then
 			nm=$(grep -m1 'name:' "$NODES_DIR/$id.yaml" 2>/dev/null | sed 's/.*name:[[:space:]]*//')
-			rm -f "$NODES_DIR/$id.yaml" "$NODES_DIR/$id.off" "$PROV_DIR/$id.yaml"
+			rm -f "$NODES_DIR/$id.yaml" "$NODES_DIR/$id.off" "$NODES_DIR/$id.src" "$PROV_DIR/$id.yaml"
 			# drop the name from the order/off lists too
 			for L in "$ORDER_FILE" "$OFF_FILE"; do
 				[ -n "$nm" ] && [ -f "$L" ] && { grep -vxF "$nm" "$L" > "$L.tmp" 2>/dev/null; mv "$L.tmp" "$L"; }
@@ -1035,6 +1109,38 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		apply_nikki; sleep 4
 		pgrep -f /usr/bin/mihomo >/dev/null || apply_nikki
 		json_header; printf '{"ok":true,"changed":%d}' "$changed"; exit 0
+
+	elif [ "$action" = "subrefresh" ]; then
+		sid=$(get_param id | sed 's/[^a-z0-9_-]//g')
+		[ -f "$SUBS_DIR/$sid.conf" ] || { json_header; printf '{"ok":false,"error":"no sub"}'; exit 0; }
+		url=$(grep -m1 '^url=' "$SUBS_DIR/$sid.conf" | cut -d= -f2-); snm=$(grep -m1 '^name=' "$SUBS_DIR/$sid.conf" | cut -d= -f2-)
+		BK="/tmp/nu-subbk.$$"; rm -rf "$BK"; mkdir -p "$BK"; cp "$NODES_DIR"/* "$BK/" 2>/dev/null
+		if sub_sync "$sid" "$url" "$snm"; then
+			regen_mixin; apply_nikki; sleep 6
+			if ! pgrep -f /usr/bin/mihomo >/dev/null; then
+				rm -f "$NODES_DIR"/*.yaml "$NODES_DIR"/*.src 2>/dev/null; cp "$BK"/* "$NODES_DIR/" 2>/dev/null
+				regen_mixin; apply_nikki; rm -rf "$BK"
+				json_header; printf '{"ok":false,"error":"refresh broke mihomo (reverted)"}'; exit 0
+			fi
+			rm -rf "$BK"; json_header; printf '{"ok":true,"count":%d}' "$(sub_owned_ids "$sid" | grep -c .)"; exit 0
+		fi
+		rm -rf "$BK"; json_header; printf '{"ok":false,"error":"subscription empty/unreachable"}'; exit 0
+
+	elif [ "$action" = "subdel" ]; then
+		sid=$(get_param id | sed 's/[^a-z0-9_-]//g')
+		for oid in $(sub_owned_ids "$sid"); do
+			onm=$(node_name_of "$oid"); rm -f "$NODES_DIR/$oid.yaml" "$NODES_DIR/$oid.src"
+			for L in "$ORDER_FILE" "$OFF_FILE"; do [ -f "$L" ] && [ -n "$onm" ] && { grep -vxF "$onm" "$L" > "$L.t" 2>/dev/null; mv "$L.t" "$L"; }; done
+		done
+		rm -f "$SUBS_DIR/$sid.conf"
+		regen_mixin; apply_nikki
+		json_header; printf '{"ok":true}'; exit 0
+
+	elif [ "$action" = "subauto" ]; then
+		on=$(get_param on | sed 's/[^01]//g'); [ -z "$on" ] && on=0
+		iv=$(get_param interval | sed 's/[^0-9a-z]//g'); [ -z "$iv" ] && iv=24h
+		subauto_set "$on" "$iv"
+		json_header; printf '{"ok":true,"enabled":%s,"interval":"%s"}' "$([ "$on" = 1 ] && echo true || echo false)" "$iv"; exit 0
 	fi
 
 	json_header; printf '{"ok":false,"error":"unknown action"}'; exit 0
@@ -1059,6 +1165,7 @@ fi
 }
 [ "$API" = "autosync" ] && { autosync_json; exit 0; }
 [ "$API" = "versions" ] && { versions_json; exit 0; }
+[ "$API" = "subauto" ] && { subauto_json; exit 0; }
 [ "$API" = "updatestatus" ] && { updatestatus_json; exit 0; }
 [ "$API" = "config" ] && { config_json; exit 0; }
 [ "$API" = "nodes" ] && { nodes_json; exit 0; }
@@ -1325,6 +1432,18 @@ cat <<'HTML'
 
     <h3 id="provHead" hidden><span data-i18n="provTitle"></span></h3>
     <ul id="provList"></ul>
+    <div class="autosync" id="subAutoRow" hidden>
+      <div class="asrow"><label class="sw"><input type="checkbox" id="subAutoOn"><span class="sl"></span></label> <span data-i18n="subAutoLabel"></span></div>
+      <select id="subAutoIv">
+        <option value="1h" data-i18n="iv1h"></option>
+        <option value="6h" data-i18n="iv6h"></option>
+        <option value="12h" data-i18n="iv12h"></option>
+        <option value="24h" data-i18n="iv24h"></option>
+        <option value="weekly" data-i18n="ivWeekly"></option>
+      </select>
+      <div class="hint" data-i18n="subAutoHint"></div>
+    </div>
+    <div class="msg" id="subMsg"></div>
   </section>
 
   <!-- ================= MANAGEMENT ================= -->
@@ -1386,6 +1505,8 @@ const I18N = {
     modeAutoHint: "Автовыбор самой быстрой ноды по пингу (перепроверка каждые 5 мин). Порядок игнорируется.",
     nodeActive: "активна", dragHint: "Перетащи для порядка", pingAll: "Пинг всех", subAdded: "добавлено нод: ",
     provTitle: "Подписки", provNodes: "нод", provDelConfirm: "Удалить подписку целиком? Все её ноды пропадут (по отдельности их удалить нельзя).",
+    subRefresh: "Обновить подписку", subRefreshing: "Обновляю подписку…", subAutoLabel: "Автообновление подписок",
+    subAutoHint: "Периодически перекачивает подписки: добавляет новые ноды, обновляет ключи, убирает исчезнувшие (порядок и вкл/выкл сохраняются).",
     migrateRules: "Перенести старые правила «→ VPN» на эту группу", migrateConfirm: "Перевести все правила «→ VPN» (профиль) на управляемую группу выходов? Порядок/автовыбор начнут влиять на них.",
     helpSummary: "❓ Что за пункты и как пользоваться",
     helpBody: "<p><b>Тип условия</b> (левый список):</p><ul>" +
@@ -1444,6 +1565,8 @@ const I18N = {
     modeAutoHint: "Auto-picks the fastest node by ping (re-checked every 5 min). Order is ignored.",
     nodeActive: "active", dragHint: "Drag to reorder", pingAll: "Ping all", subAdded: "nodes added: ",
     provTitle: "Subscriptions", provNodes: "nodes", provDelConfirm: "Delete the whole subscription? All its nodes go away (they can't be removed individually).",
+    subRefresh: "Refresh subscription", subRefreshing: "Refreshing subscription…", subAutoLabel: "Auto-refresh subscriptions",
+    subAutoHint: "Periodically re-fetches subscriptions: adds new nodes, updates keys, removes departed ones (order and on/off are preserved).",
     migrateRules: "Move old «→ VPN» rules onto this group", migrateConfirm: "Move all «→ VPN» (profile) rules onto the managed exit group? Ordering/auto-select will start affecting them.",
     helpSummary: "❓ What these mean & how to use",
     helpBody: "<p><b>Match type</b> (left select):</p><ul>" +
@@ -1843,13 +1966,30 @@ async function loadNodes(){
     ul.appendChild(li);
   });
   const ph = $("#provHead"), pl = $("#provList"); pl.innerHTML = ""; ph.hidden = PROVIDERS.length === 0;
+  let hasSub = false;
   PROVIDERS.forEach(p => {
+    const isSub = p.kind === "sub"; if (isSub) hasSub = true;
     const li = document.createElement("li");
+    let btns = "";
+    if (isSub) btns += '<button class="ghost" data-subrefresh="' + p.id + '" title="' + escH(t("subRefresh")) + '">↻</button>';
+    btns += '<button class="ghost" data-delprov="' + p.id + '" data-kind="' + (p.kind || "provider") + '">✕</button>';
     li.innerHTML = '<span class="dom">' + escH(p.name) + '</span>' +
-      '<span class="meta">' + t("nodeSub") + " · " + p.count + " " + t("provNodes") + '</span>' +
-      '<button class="ghost" data-delprov="' + p.id + '">✕</button>';
+      '<span class="meta">' + t("nodeSub") + " · " + p.count + " " + t("provNodes") + '</span>' + btns;
     pl.appendChild(li);
   });
+  $("#subAutoRow").hidden = !hasSub;
+  if (hasSub) loadSubAuto();
+}
+async function loadSubAuto(){
+  try { const s = await (await fetch("?api=subauto")).json();
+    $("#subAutoOn").checked = !!s.enabled; $("#subAutoIv").value = s.interval || "24h"; $("#subAutoIv").disabled = !s.enabled;
+  } catch(e){}
+}
+async function saveSubAuto(){
+  const on = $("#subAutoOn").checked ? 1 : 0; $("#subAutoIv").disabled = !on;
+  setMsg($("#subMsg"), t("saving"));
+  const res = await api("subauto", { on, interval: $("#subAutoIv").value });
+  setMsg($("#subMsg"), res && res.ok ? (res.enabled ? t("done") + " · " + res.interval : t("done")) : t("errP"), !res || res.ok);
 }
 // auto-ping every enabled exit node (by name) concurrently
 async function autoPingNodes(){
@@ -1910,15 +2050,25 @@ $("#nodeMode").addEventListener("click", async e => {
   if (res && res.ok){ setMsg($("#nodeMsg"), t("done")); loadNodes().then(autoPingNodes); }
   else setMsg($("#nodeMsg"), t("errP") + ((res && res.error) || "?"), false);
 });
-// provider (subscription) delete — all-or-nothing
+// subscription refresh + delete
 $("#provList").addEventListener("click", async e => {
+  const r = e.target.closest("button[data-subrefresh]");
+  if (r){
+    r.disabled = true; setMsg($("#subMsg"), t("subRefreshing"));
+    const res = await api("subrefresh", { id: r.dataset.subrefresh });
+    if (res && res.ok){ setMsg($("#subMsg"), t("done") + " · " + res.count); loadNodes().then(autoPingNodes); loadDomains(); }
+    else { setMsg($("#subMsg"), t("errP") + ((res && res.error) || "?"), false); r.disabled = false; }
+    return;
+  }
   const b = e.target.closest("button[data-delprov]"); if (!b) return;
   if (!confirm(t("provDelConfirm"))) return;
-  b.disabled = true; setMsg($("#nodeMsg"), t("removing"));
-  const res = await api("nodedel", { id: b.dataset.delprov });
-  if (res.ok){ setMsg($("#nodeMsg"), t("done")); loadNodes().then(autoPingNodes); loadDomains(); }
-  else { setMsg($("#nodeMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
+  b.disabled = true; setMsg($("#subMsg"), t("removing"));
+  const res = await api(b.dataset.kind === "sub" ? "subdel" : "nodedel", { id: b.dataset.delprov });
+  if (res.ok){ setMsg($("#subMsg"), t("done")); loadNodes().then(autoPingNodes); loadDomains(); }
+  else { setMsg($("#subMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
 });
+$("#subAutoOn").addEventListener("change", saveSubAuto);
+$("#subAutoIv").addEventListener("change", () => { if ($("#subAutoOn").checked) saveSubAuto(); });
 // ping all exit nodes at once
 $("#pingAll").addEventListener("click", e => { e.currentTarget.blur(); autoPingNodes(); });
 // migrate existing "→ VPN" rules onto the managed exit group
