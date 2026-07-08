@@ -10,5 +10,7 @@ config nikki-unblock 'config'
 	# VPN nodes tab: the profile's existing exit proxy-group (added nodes are pooled together with it).
 	# Set this to your mihomo profile's proxy-group name if it isn't "PROXY".
 	option base_group 'PROXY'
-	# Name of the combined group (base_group + added nodes) that "→ VPN (+nodes)" rules target.
+	# Name of the managed exit group (ordered profile + added nodes) that "→ VPN" rules target.
 	option exit_group 'UNBLOCK'
+	# Exit-node selection: 'fallback' (priority order, top-first) or 'urltest' (auto lowest-latency).
+	option node_mode 'fallback'

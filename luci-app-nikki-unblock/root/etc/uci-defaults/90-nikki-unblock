@@ -18,11 +18,24 @@ if ! uci -q get nikki-unblock.config >/dev/null 2>&1; then
 	uci -q set nikki-unblock.config.lang='ru'
 	uci -q set nikki-unblock.config.base_group='PROXY'
 	uci -q set nikki-unblock.config.exit_group='UNBLOCK'
+	uci -q set nikki-unblock.config.node_mode='fallback'
 	uci -q commit nikki-unblock
 fi
 
 # Drop any stale autosync cron line from the predecessor CGI (nikki-domains), if present.
 [ -f /etc/crontabs/root ] && sed -i '/nikki-domains/d' /etc/crontabs/root && /etc/init.d/cron restart >/dev/null 2>&1
+
+# One-time: seed the exit-node mode + build the managed exit group (UNBLOCK) so "→ VPN" rules resolve.
+# Idempotent via a flag; runs the CGI's `regen` (queries mihomo for the profile's node names).
+if [ "$(uci -q get nikki-unblock.config._nodes_init 2>/dev/null)" != 1 ]; then
+	uci -q set nikki-unblock.config.node_mode='fallback'
+	uci -q set nikki-unblock.config._nodes_init='1'
+	uci -q commit nikki-unblock
+	if [ -x /www/cgi-bin/nikki-unblock ] && pgrep -f /usr/bin/mihomo >/dev/null 2>&1; then
+		/www/cgi-bin/nikki-unblock regen 2>/dev/null
+		/etc/init.d/nikki reload >/dev/null 2>&1
+	fi
+fi
 
 # Refresh the LuCI menu/index cache so the new entry shows up.
 rm -f /tmp/luci-indexcache* 2>/dev/null

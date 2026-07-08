@@ -50,10 +50,16 @@ a LuCI menu entry to open it.
   (`vless://`, `vmess://`, `trojan://`, `ss://`, `hysteria2://`), or **raw clash/mihomo YAML**. Each is
   converted to a mihomo proxy, injected into nikki, and **auto-checked** (latency probe via the mihomo
   API). Added nodes form a fallback group `UNBLOCK` (= your profile's base group + the added nodes);
-  pick **"→ VPN (+nodes)"** as a rule action to route through the extended pool. A bad config is
-  auto-reverted so it can't break nikki. The tab also lists your **profile's exit nodes** (read-only,
-  with an on-demand latency check) so you see the full picture, and each added node has an
-  **enable/disable** toggle (disabled nodes stay defined but drop out of the `UNBLOCK` pool).
+  A bad config is auto-reverted so it can't break nikki. The **Exits** list unifies your **profile
+  nodes** (referenced by name) and your added nodes into one **drag-to-reorder** list, with:
+  - a **Priority ↔ Auto** switch — *Priority* (`fallback`) uses the top node and falls through to the
+    next on failure (drag to set the order); *Auto* (`url-test`) auto-picks the fastest by ping,
+    re-checked periodically;
+  - an **enable/disable** toggle per node (works for profile nodes too — a disabled node drops out of
+    the pool), a live **active-node** indicator, and per-node latency;
+  - one managed exit group that **"→ VPN" routes through**, so ordering / auto-select apply to every
+    tunneled domain (a one-click button migrates older "→ VPN (profile)" rules onto it).
+  Subscriptions appear as bundles (all-or-nothing delete — you can't toggle a single proxy inside one).
 - Everything applies via `/etc/init.d/nikki reload`.
 
 ## Requirements

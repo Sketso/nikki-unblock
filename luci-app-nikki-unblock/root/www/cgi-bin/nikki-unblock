@@ -31,9 +31,13 @@ EXIT_GROUP="$(uci -q get nikki-unblock.config.exit_group 2>/dev/null)"; [ -z "$E
 BASE_GROUP="$(uci -q get nikki-unblock.config.base_group 2>/dev/null)"; [ -z "$BASE_GROUP" ] && BASE_GROUP="PROXY"
 # "Via VPN" default target stays the profile's base group (safe/unchanged). The EXIT_GROUP (UNBLOCK,
 # = base + added nodes) is offered as an extra rule target and only exists while ≥1 node is added.
-NODE_DEFAULT="$BASE_GROUP"
+# "→ VPN" now routes through the managed exit group (ordered profile + added nodes), not the raw
+# profile group — so node ordering / auto-select apply to every tunneled domain. (was $BASE_GROUP)
+NODE_DEFAULT="$EXIT_GROUP"
 NODES_DIR="/etc/nikki-unblock/nodes"
 PROV_DIR="/etc/nikki-unblock/providers"
+ORDER_FILE="/etc/nikki-unblock/nodes.order"   # exit node names in user-chosen order (profile + ours)
+OFF_FILE="/etc/nikki-unblock/nodes.off"        # disabled exit node names (works for profile + our nodes)
 MIXIN_FILE="/etc/nikki/mixin.yaml"
 MIHOMO_API="http://127.0.0.1:9090"
 
@@ -538,36 +542,62 @@ sharelink_to_yaml() {
 	esac
 }
 
+# ---- exit-node ordering / mode helpers -------------------------------------
+node_mode() { m=$(uci -q get nikki-unblock.config.node_mode 2>/dev/null); case "$m" in urltest|fallback) echo "$m" ;; *) echo fallback ;; esac; }
+# leaf proxy names of the profile's base group (live from mihomo)
+profile_node_names() { curl -s -m 6 -H "Authorization: Bearer $(mihomo_secret)" "$MIHOMO_API/proxies/$(urlenc_all "$BASE_GROUP")" 2>/dev/null | jsonfilter -e '@.all[*]' 2>/dev/null; }
+# names of our added nodes (from the store files)
+our_node_names() { for f in "$NODES_DIR"/*.yaml; do [ -f "$f" ] && grep -m1 'name:' "$f" | sed 's/.*name:[[:space:]]*//'; done; }
+node_disabled() { [ -f "$OFF_FILE" ] && grep -qxF "$1" "$OFF_FILE"; }
+# ALL exit node names (profile + ours) in the user's saved order; new names appended in natural order.
+ordered_exit_names() {
+	_all="/tmp/nu-exit.$$"
+	{ profile_node_names; our_node_names; } | awk 'NF && !seen[$0]++' > "$_all"
+	[ -f "$ORDER_FILE" ] || : > "$ORDER_FILE"
+	awk 'NR==FNR { if($0!=""){ all[++ak]=$0; has[$0]=1 } ; next }
+	     { if($0!="" && has[$0] && !pr[$0]){ print $0; pr[$0]=1 } }
+	     END { for(i=1;i<=ak;i++) if(!pr[all[i]]) print all[i] }' "$_all" "$ORDER_FILE"
+	rm -f "$_all"
+}
+
+# Rebuild /etc/nikki/mixin.yaml: our added nodes + providers, and the managed EXIT_GROUP as a flat,
+# user-ordered group of ALL exits (profile nodes by name + our nodes), type per node_mode
+# (fallback = priority/top-first, url-test = auto lowest-latency). Disabled names are dropped.
 regen_mixin() {
 	[ -f "$MIXIN_FILE.orig" ] || cp "$MIXIN_FILE" "$MIXIN_FILE.orig" 2>/dev/null
 	havenode=0; for f in "$NODES_DIR"/*.yaml; do [ -f "$f" ] && havenode=1; done
 	haveprov=0; for f in "$PROV_DIR"/*.yaml; do [ -f "$f" ] && haveprov=1; done
-	# no nodes/providers -> restore stock mixin + disable file-mixin (zero risk to nikki)
-	if [ "$havenode" = 0 ] && [ "$haveprov" = 0 ]; then
+	exits=$(ordered_exit_names)
+	# nothing to route through at all -> restore stock mixin, disable file-mixin (zero risk to nikki)
+	if [ -z "$exits" ] && [ "$haveprov" = 0 ]; then
 		[ -f "$MIXIN_FILE.orig" ] && cp "$MIXIN_FILE.orig" "$MIXIN_FILE"
 		uci set nikki.mixin.mixin_file_content=0 2>/dev/null; uci commit nikki 2>/dev/null
 		return 0
 	fi
+	# enabled exits, in order
+	enabled=$(printf '%s\n' "$exits" | while IFS= read -r n; do [ -n "$n" ] && { node_disabled "$n" || printf '%s\n' "$n"; }; done)
+	mode=$(node_mode)
 	{
 		echo "# managed by nikki-unblock — do not edit (source: /etc/nikki-unblock/)"
-		echo "nikki-proxies:"
-		for f in "$NODES_DIR"/*.yaml; do [ -f "$f" ] && cat "$f"; done
+		if [ "$havenode" = 1 ]; then
+			echo "nikki-proxies:"
+			for f in "$NODES_DIR"/*.yaml; do [ -f "$f" ] && cat "$f"; done
+		fi
 		if [ "$haveprov" = 1 ]; then
 			echo "proxy-providers:"
 			for f in "$PROV_DIR"/*.yaml; do [ -f "$f" ] && cat "$f"; done
 		fi
 		echo "nikki-proxy-groups:"
 		echo "  - name: $EXIT_GROUP"
-		echo "    type: fallback"
+		if [ "$mode" = urltest ]; then echo "    type: url-test"; echo "    tolerance: 50"; else echo "    type: fallback"; fi
 		echo "    url: http://cp.cloudflare.com/generate_204"
 		echo "    interval: 300"
 		echo "    proxies:"
-		echo "      - $BASE_GROUP"
-		for f in "$NODES_DIR"/*.yaml; do
-			[ -f "$f" ] || continue
-			[ -f "$NODES_DIR/$(basename "$f" .yaml).off" ] && continue   # disabled -> defined but not in the exit group
-			grep -m1 'name:' "$f" | sed 's/.*name:[[:space:]]*//; s/^/      - /'
-		done
+		if [ -n "$enabled" ]; then
+			printf '%s\n' "$enabled" | while IFS= read -r n; do printf '      - "%s"\n' "$n"; done
+		else
+			echo "      - $BASE_GROUP"   # every exit disabled -> keep the group valid via the profile
+		fi
 		if [ "$haveprov" = 1 ]; then
 			echo "    use:"
 			for f in "$PROV_DIR"/*.yaml; do [ -f "$f" ] && head -1 "$f" | sed 's/[[:space:]]*\([^:]*\):.*/      - \1/'; done
@@ -576,39 +606,55 @@ regen_mixin() {
 	uci set nikki.mixin.mixin_file_content=1 2>/dev/null; uci commit nikki 2>/dev/null
 }
 
-# list nodes/providers as JSON — NEVER includes secrets (name/type/host/kind only)
+# Unified exit list as JSON — NEVER includes secrets. Shape:
+# {mode, active, nodes:[{name,kind,id,type,host,enabled,active}], providers:[{id,name,count}]}
+# nodes[] = ordered union of profile nodes (kind:profile, id="") + our nodes (kind:node, id=file).
 nodes_json() {
-	json_header; printf '['; first=1
+	json_header
+	sec=$(mihomo_secret)
+	active=$(curl -s -m 6 -H "Authorization: Bearer $sec" "$MIHOMO_API/proxies/$(urlenc_all "$EXIT_GROUP")" 2>/dev/null | jsonfilter -e '@.now' 2>/dev/null)
+	# map: our node NAME -> "id\ttype\thost" (so we can tag ordered names as ours)
+	OM="/tmp/nu-omap.$$"; : > "$OM"
 	for f in "$NODES_DIR"/*.yaml; do
 		[ -f "$f" ] || continue
-		id=$(basename "$f" .yaml)
-		nm=$(grep -m1 'name:' "$f" | sed 's/.*name:[[:space:]]*//')
-		ty=$(grep -m1 'type:' "$f" | sed 's/.*type:[[:space:]]*//')
-		hs=$(grep -m1 'server:' "$f" | sed 's/.*server:[[:space:]]*//')
-		en=1; [ -f "$NODES_DIR/$id.off" ] && en=0
-		[ "$first" = 1 ] || printf ','; first=0
-		printf '{"id":"%s","kind":"node","name":"%s","type":"%s","host":"%s","enabled":%s}' "$id" "$(json_esc "$nm")" "$(json_esc "$ty")" "$(json_esc "$hs")" "$en"
+		fn=$(grep -m1 'name:' "$f" | sed 's/.*name:[[:space:]]*//')
+		fty=$(grep -m1 'type:' "$f" | sed 's/.*type:[[:space:]]*//')
+		fhs=$(grep -m1 'server:' "$f" | sed 's/.*server:[[:space:]]*//')
+		printf '%s\t%s\t%s\t%s\n' "$fn" "$(basename "$f" .yaml)" "$fty" "$fhs" >> "$OM"
 	done
+	printf '{"mode":"%s","active":"%s","nodes":[' "$(node_mode)" "$(json_esc "$active")"
+	first=1
+	ordered_exit_names | while IFS= read -r nm; do
+		[ -z "$nm" ] && continue
+		row=$(grep -m1 -F "$(printf '%s\t' "$nm")" "$OM" 2>/dev/null)
+		if [ -n "$row" ]; then
+			kind=node; id=$(printf '%s' "$row" | cut -f2); ty=$(printf '%s' "$row" | cut -f3); hs=$(printf '%s' "$row" | cut -f4)
+		else
+			kind=profile; id=""; ty=""; hs=""
+		fi
+		en=1; node_disabled "$nm" && en=0
+		act=0; [ "$nm" = "$active" ] && act=1
+		[ "$first" = 1 ] || printf ','; first=0
+		printf '{"name":"%s","kind":"%s","id":"%s","type":"%s","host":"%s","enabled":%s,"active":%s}' \
+			"$(json_esc "$nm")" "$kind" "$id" "$(json_esc "$ty")" "$(json_esc "$hs")" "$en" "$act"
+	done
+	rm -f "$OM"
+	printf '],"providers":['
+	first=1
 	for f in "$PROV_DIR"/*.yaml; do
 		[ -f "$f" ] || continue
 		nm=$(head -1 "$f" | sed 's/[[:space:]]*\([^:]*\):.*/\1/')
+		cnt=$(curl -s -m 6 -H "Authorization: Bearer $sec" "$MIHOMO_API/providers/proxies" 2>/dev/null | jsonfilter -e "@.providers[\"$nm\"].proxies[*].name" 2>/dev/null | grep -c .)
 		[ "$first" = 1 ] || printf ','; first=0
-		printf '{"id":"%s","kind":"provider","name":"%s","type":"subscription","host":"","enabled":1}' "$(basename "$f" .yaml)" "$(json_esc "$nm")"
+		printf '{"id":"%s","name":"%s","count":%s}' "$(basename "$f" .yaml)" "$(json_esc "$nm")" "${cnt:-0}"
 	done
-	# profile exit nodes = members of the base group (read-only; live from mihomo, managed in the nikki profile)
-	PL="/tmp/nu-pnodes.$$"
-	curl -s -m 6 -H "Authorization: Bearer $(mihomo_secret)" "$MIHOMO_API/proxies/$(urlenc_all "$BASE_GROUP")" 2>/dev/null | jsonfilter -e '@.all[*]' 2>/dev/null > "$PL"
-	while IFS= read -r pn; do
-		[ -z "$pn" ] && continue
-		[ "$first" = 1 ] || printf ','; first=0
-		printf '{"kind":"profile","name":"%s","type":"","host":"","enabled":1}' "$(json_esc "$pn")"
-	done < "$PL"
-	rm -f "$PL"
-	printf ']'
+	printf ']}'
 }
 
 # cron / CLI entry: `nikki-unblock sync`
 [ "$1" = "sync" ] && { sync_all; exit 0; }
+# CLI: rebuild the managed exit-group mixin (used by post-install to create UNBLOCK once)
+[ "$1" = "regen" ] && { regen_mixin; exit 0; }
 
 # ---- API -------------------------------------------------------------------
 
@@ -781,7 +827,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 
 	elif [ "$action" = "geosite_on" ]; then
 		cat=$(get_param cat | sed 's/[^a-z0-9._!-]//g')
-		gnode=$(get_param node); case "$gnode" in PROXY|DIRECT|REJECT) ;; *) gnode=PROXY ;; esac
+		# "VPN" presets now route through the managed exit group (EXIT_GROUP) by default too
+		gnode=$(get_param node); case "$gnode" in PROXY|DIRECT|REJECT|"$EXIT_GROUP") ;; *) gnode="$EXIT_GROUP" ;; esac
 		[ -z "$cat" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
 		changed=0
 		if [ "$(rule_exists GEOSITE "$cat")" != 1 ]; then add_rule GEOSITE "$cat" "$gnode"; changed=1; fi
@@ -883,7 +930,14 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 
 	elif [ "$action" = "nodedel" ]; then
 		id=$(get_param id | sed 's/[^a-z0-9_-]//g')
-		[ -n "$id" ] && rm -f "$NODES_DIR/$id.yaml" "$PROV_DIR/$id.yaml"
+		if [ -n "$id" ]; then
+			nm=$(grep -m1 'name:' "$NODES_DIR/$id.yaml" 2>/dev/null | sed 's/.*name:[[:space:]]*//')
+			rm -f "$NODES_DIR/$id.yaml" "$NODES_DIR/$id.off" "$PROV_DIR/$id.yaml"
+			# drop the name from the order/off lists too
+			for L in "$ORDER_FILE" "$OFF_FILE"; do
+				[ -n "$nm" ] && [ -f "$L" ] && { grep -vxF "$nm" "$L" > "$L.tmp" 2>/dev/null; mv "$L.tmp" "$L"; }
+			done
+		fi
 		regen_mixin; apply_nikki
 		json_header; printf '{"ok":true}'; exit 0
 
@@ -896,16 +950,48 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		json_header; printf '{"ok":true,"delay":"%s"}' "$(mihomo_delay "$rn")"; exit 0
 
 	elif [ "$action" = "nodetoggle" ]; then
-		id=$(get_param id | sed 's/[^a-z0-9_-]//g')
-		[ -f "$NODES_DIR/$id.yaml" ] || { json_header; printf '{"ok":false,"error":"not found"}'; exit 0; }
-		if [ -f "$NODES_DIR/$id.off" ]; then rm -f "$NODES_DIR/$id.off"; en=1; else : > "$NODES_DIR/$id.off"; en=0; fi
+		# toggle a node (profile OR ours) on/off by NAME via the shared off-list
+		nm=$(get_param name)
+		[ -z "$nm" ] && { json_header; printf '{"ok":false,"error":"no name"}'; exit 0; }
+		touch "$OFF_FILE"
+		if grep -qxF "$nm" "$OFF_FILE"; then
+			grep -vxF "$nm" "$OFF_FILE" > "$OFF_FILE.tmp"; mv "$OFF_FILE.tmp" "$OFF_FILE"; en=1
+		else
+			printf '%s\n' "$nm" >> "$OFF_FILE"; en=0
+		fi
 		regen_mixin; apply_nikki; sleep 6
 		if ! pgrep -f /usr/bin/mihomo >/dev/null; then
-			if [ "$en" = 1 ]; then : > "$NODES_DIR/$id.off"; else rm -f "$NODES_DIR/$id.off"; fi
+			if [ "$en" = 1 ]; then printf '%s\n' "$nm" >> "$OFF_FILE"; else grep -vxF "$nm" "$OFF_FILE" > "$OFF_FILE.tmp"; mv "$OFF_FILE.tmp" "$OFF_FILE"; fi
 			regen_mixin; apply_nikki
 			json_header; printf '{"ok":false,"error":"reload failed (reverted)"}'; exit 0
 		fi
 		json_header; printf '{"ok":true,"enabled":%s}' "$en"; exit 0
+
+	elif [ "$action" = "nodeorder" ]; then
+		# names = the full ordered list of exit node names, newline-separated
+		get_param names | sed 's/[[:space:]]*$//' | awk 'NF' > "$ORDER_FILE"
+		regen_mixin; apply_nikki
+		json_header; printf '{"ok":true}'; exit 0
+
+	elif [ "$action" = "nodemode" ]; then
+		m=$(get_param mode | sed 's/[^a-z-]//g'); case "$m" in urltest|fallback) ;; *) m=fallback ;; esac
+		uci set nikki-unblock.config.node_mode="$m" 2>/dev/null; uci commit nikki-unblock 2>/dev/null
+		regen_mixin; apply_nikki; sleep 3
+		pgrep -f /usr/bin/mihomo >/dev/null || apply_nikki
+		json_header; printf '{"ok":true,"mode":"%s"}' "$m"; exit 0
+
+	elif [ "$action" = "migraterules" ]; then
+		# move all "→ VPN" rules from the raw profile group ($BASE_GROUP) onto the managed exit group
+		regen_mixin   # make sure UNBLOCK exists before rules point at it
+		i=0; changed=0
+		while uci -q get "nikki.@rule[$i]" >/dev/null 2>&1; do
+			[ "$(uci -q get "nikki.@rule[$i].node")" = "$BASE_GROUP" ] && { uci set "nikki.@rule[$i].node=$EXIT_GROUP"; changed=$((changed + 1)); }
+			i=$((i + 1))
+		done
+		[ "$changed" -gt 0 ] && uci commit nikki
+		apply_nikki; sleep 4
+		pgrep -f /usr/bin/mihomo >/dev/null || apply_nikki
+		json_header; printf '{"ok":true,"changed":%d}' "$changed"; exit 0
 	fi
 
 	json_header; printf '{"ok":false,"error":"unknown action"}'; exit 0
@@ -987,6 +1073,20 @@ cat <<'HTML'
   .dropzone { border: 2px dashed #8885; border-radius: 10px; padding: 1.1rem; text-align: center; opacity: .7; margin-bottom: .5rem; cursor: pointer; font-size: .9rem; }
   .dropzone.drag { border-color: #2563eb; opacity: 1; background: #2563eb22; }
   #nodeCfg { min-height: 6rem; }
+  .exithead { display: flex; align-items: center; gap: .8rem; margin-top: 1rem; flex-wrap: wrap; }
+  .exithead h3 { margin: 0; }
+  .seg { display: inline-flex; border: 1px solid #8884; border-radius: 8px; overflow: hidden; }
+  .seg button { background: #8881; color: inherit; border: 0; padding: .35rem .7rem; font-size: .85rem; cursor: pointer; border-radius: 0; }
+  .seg button.on { background: #2563eb; color: #fff; }
+  .nodelist li { display: flex; align-items: center; gap: .5rem; }
+  .nodelist li.drag-over { border-top: 2px solid #2563eb; }
+  .nodelist li.off { opacity: .5; }
+  .nodelist .drag { cursor: grab; opacity: .4; font-size: 1.1rem; line-height: 1; user-select: none; touch-action: none; }
+  .nodelist .drag:active { cursor: grabbing; }
+  .nodelist .ndot { width: .55rem; height: .55rem; border-radius: 50%; background: #8885; flex: 0 0 auto; }
+  .nodelist .ndot.act { background: #16a34a; box-shadow: 0 0 0 3px #16a34a33; }
+  .nodelist .dom { flex: 0 1 auto; }
+  .nodelist .meta { margin-left: auto; opacity: .6; font-size: .8rem; white-space: nowrap; }
   button { padding: .6rem .9rem; font-size: 1rem; border: 0; border-radius: 8px; cursor: pointer; background: #2563eb; color: #fff; }
   button:disabled { opacity: .5; cursor: default; }
   button.ghost { background: #8883; color: inherit; padding: .35rem .6rem; font-size: .85rem; }
@@ -1092,10 +1192,10 @@ cat <<'HTML'
           </select>
           <input id="domain" placeholder="example.com" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required>
           <select id="rnode" data-i18n-title="nAction">
-            <option value="PROXY" data-i18n="nProxy"></option>
-            <option value="UNBLOCK" id="optUnblock" data-i18n="nUnblock" hidden></option>
+            <option value="UNBLOCK" data-i18n="nProxy"></option>
             <option value="DIRECT" data-i18n="nDirect"></option>
             <option value="REJECT" data-i18n="nReject"></option>
+            <option value="PROXY" data-i18n="nProxyProfile"></option>
           </select>
           <button type="submit" id="addBtn" data-i18n="add"></button>
         </form>
@@ -1167,8 +1267,20 @@ cat <<'HTML'
       <button type="submit" id="nodeBtn" data-i18n="nodeAdd"></button>
     </form>
     <div class="msg" id="nodeMsg"></div>
-    <h3><span data-i18n="tabNodes"></span> <span class="count" id="nodeCount"></span></h3>
-    <ul id="nodeList"></ul>
+
+    <div class="exithead">
+      <h3><span data-i18n="exitsTitle"></span></h3>
+      <div class="seg" id="nodeMode">
+        <button type="button" data-mode="fallback" data-i18n="modePriority"></button>
+        <button type="button" data-mode="urltest" data-i18n="modeAuto"></button>
+      </div>
+    </div>
+    <div class="hint" id="modeHint"></div>
+    <ul id="nodeList" class="nodelist"></ul>
+    <button type="button" class="ghost" id="migrateBtn" data-i18n="migrateRules" style="margin-top:.4rem;font-size:.8rem"></button>
+
+    <h3 id="provHead" hidden><span data-i18n="provTitle"></span></h3>
+    <ul id="provList"></ul>
   </section>
 
   <!-- ================= MANAGEMENT ================= -->
@@ -1224,7 +1336,13 @@ const I18N = {
     tabDomains: "Домены в туннель", tabIps: "IP-исключения",
     add: "Добавить", tType: "тип условия", nAction: "действие",
     tSuffix: "домен+поддомены", tDomain: "точный домен", tKeyword: "подстрока",
-    nProxy: "→ VPN", nDirect: "→ напрямую", nReject: "→ блок",
+    nProxy: "→ VPN", nDirect: "→ напрямую", nReject: "→ блок", nProxyProfile: "→ VPN (профиль)",
+    exitsTitle: "Выходы (порядок = приоритет)", modePriority: "Приоритет", modeAuto: "Авто",
+    modePriHint: "Сверху вниз: верхняя нода — основная, при сбое переходит на следующую. Перетаскивай ⠿ для порядка.",
+    modeAutoHint: "Автовыбор самой быстрой ноды по пингу (перепроверка каждые 5 мин). Порядок игнорируется.",
+    nodeActive: "активна", dragHint: "Перетащи для порядка",
+    provTitle: "Подписки", provNodes: "нод", provDelConfirm: "Удалить подписку целиком? Все её ноды пропадут (по отдельности их удалить нельзя).",
+    migrateRules: "Перенести старые правила «→ VPN» на эту группу", migrateConfirm: "Перевести все правила «→ VPN» (профиль) на управляемую группу выходов? Порядок/автовыбор начнут влиять на них.",
     helpSummary: "❓ Что за пункты и как пользоваться",
     helpBody: "<p><b>Тип условия</b> (левый список):</p><ul>" +
       "<li><b>домен+поддомены</b> (DOMAIN-SUFFIX) — обычный выбор: <code>telegram.org</code> ловит и <code>web.telegram.org</code>, и все поддомены.</li>" +
@@ -1276,7 +1394,13 @@ const I18N = {
     tabDomains: "Domains via VPN", tabIps: "IP exclusions",
     add: "Add", tType: "match type", nAction: "action",
     tSuffix: "domain + subdomains", tDomain: "exact domain", tKeyword: "keyword",
-    nProxy: "→ VPN", nDirect: "→ direct", nReject: "→ block",
+    nProxy: "→ VPN", nDirect: "→ direct", nReject: "→ block", nProxyProfile: "→ VPN (profile)",
+    exitsTitle: "Exits (order = priority)", modePriority: "Priority", modeAuto: "Auto",
+    modePriHint: "Top-down: the top node is primary, falls through to the next on failure. Drag ⠿ to reorder.",
+    modeAutoHint: "Auto-picks the fastest node by ping (re-checked every 5 min). Order is ignored.",
+    nodeActive: "active", dragHint: "Drag to reorder",
+    provTitle: "Subscriptions", provNodes: "nodes", provDelConfirm: "Delete the whole subscription? All its nodes go away (they can't be removed individually).",
+    migrateRules: "Move old «→ VPN» rules onto this group", migrateConfirm: "Move all «→ VPN» (profile) rules onto the managed exit group? Ordering/auto-select will start affecting them.",
     helpSummary: "❓ What these mean & how to use",
     helpBody: "<p><b>Match type</b> (left select):</p><ul>" +
       "<li><b>domain + subdomains</b> (DOMAIN-SUFFIX) — the usual choice: <code>telegram.org</code> also matches <code>web.telegram.org</code> and all subdomains.</li>" +
@@ -1375,9 +1499,10 @@ function typeOpts(){
          '<option value="IP-CIDR">IP-CIDR</option>';
 }
 function nodeOpts(cur){
-  let o = '<option value="PROXY">' + t("nProxy") + '</option>';
-  if (!$("#optUnblock").hidden || cur === EXITG) o += '<option value="' + EXITG + '">' + t("nUnblock") + '</option>';
+  // "→ VPN" = the managed exit group (EXITG); PROXY kept as the raw-profile advanced option
+  let o = '<option value="' + EXITG + '">' + t("nProxy") + '</option>';
   o += '<option value="DIRECT">' + t("nDirect") + '</option><option value="REJECT">' + t("nReject") + '</option>';
+  o += '<option value="PROXY">' + t("nProxyProfile") + '</option>';
   return o;
 }
 // a rule is "owned" by a preset (list-preset src tag, or a geosite/IP that a preset manages) -> hidden
@@ -1443,7 +1568,7 @@ async function presetToggle(p, wantOn){
   let ok = true, error;
   if (p.geosite){
     const ips = (p.ipcidr || []).join(",");
-    const r = wantOn ? await api("geosite_on", { cat: p.geosite, node: p.node || "PROXY", ips, geoip: p.geoip || "" })
+    const r = wantOn ? await api("geosite_on", { cat: p.geosite, node: p.node || EXITG, ips, geoip: p.geoip || "" })
                      : await api("geosite_off", { cat: p.geosite, ips, geoip: p.geoip || "" });
     if (!r || !r.ok){ ok = false; error = r && r.error; }
   }
@@ -1649,46 +1774,47 @@ $("#autoOn").addEventListener("change", saveAutosync);
 $("#autoIv").addEventListener("change", saveAutosync);
 
 /* ---------- vpn nodes ---------- */
-let NODES = [], EXITG = "UNBLOCK";
+let NODES = [], PROVIDERS = [], NODEMODE = "fallback", EXITG = "UNBLOCK";
 async function loadNodes(){
-  try { NODES = await (await fetch("?api=nodes")).json(); } catch(e){ NODES = []; }
-  const esc = s => (s + "").replace(/[<>&"]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
-  const mine = NODES.filter(n => n.kind !== "profile");
+  let d; try { d = await (await fetch("?api=nodes")).json(); } catch(e){ d = {}; }
+  NODES = (d && d.nodes) || []; PROVIDERS = (d && d.providers) || [];
+  NODEMODE = (d && d.mode) || "fallback";
+  document.querySelectorAll("#nodeMode button").forEach(b => b.classList.toggle("on", b.dataset.mode === NODEMODE));
+  $("#modeHint").textContent = NODEMODE === "urltest" ? t("modeAutoHint") : t("modePriHint");
   const ul = $("#nodeList"); ul.innerHTML = "";
-  $("#nodeCount").textContent = "(" + mine.length + ")";
-  const o = $("#optUnblock"); o.value = EXITG; o.hidden = mine.length === 0;
   NODES.forEach((n, i) => {
+    const off = n.enabled === 0;
     const li = document.createElement("li");
-    const off = n.kind === "node" && n.enabled === 0;
-    const meta = n.kind === "provider" ? t("nodeSub")
-      : n.kind === "profile" ? t("nodeProfile")
-      : (n.type + (n.host ? " · " + n.host : ""));
-    let btns = "";
-    if (n.kind === "profile"){
-      btns = '<button class="ghost" data-checkname="' + encodeURIComponent(n.name) + '">↻</button>';
-    } else {
-      if (n.kind === "node"){
-        btns += '<label class="sw"><input type="checkbox" data-toggle="' + n.id + '"' + (off ? "" : " checked") + '><span class="sl"></span></label>';
-        btns += '<button class="ghost" data-check="' + n.id + '">↻</button>';
-      }
-      btns += '<button class="ghost" data-del="' + n.id + '">✕</button>';
-    }
-    const ms = n.kind === "provider" ? "" : '<span class="ms" data-ms="' + i + '"></span>';
-    li.innerHTML = '<span class="dom"' + (off ? ' style="opacity:.45"' : '') + '>' + esc(n.name) + '</span>' +
-      '<span class="meta">' + meta + '</span>' + ms + btns;
+    li.draggable = true; li.dataset.name = n.name; if (off) li.classList.add("off");
+    const meta = (n.kind === "profile" ? t("nodeProfile") : (n.type + (n.host ? " · " + n.host : ""))) + (n.active ? " · " + t("nodeActive") : "");
+    li.innerHTML =
+      '<span class="drag" title="' + escH(t("dragHint")) + '">⠿</span>' +
+      '<span class="ndot' + (n.active ? " act" : "") + '"></span>' +
+      '<span class="dom">' + escH(n.name) + '</span>' +
+      '<span class="meta">' + escH(meta) + '</span>' +
+      '<span class="ms" data-ms="' + i + '"></span>' +
+      '<label class="sw"><input type="checkbox" data-toggle="' + encodeURIComponent(n.name) + '"' + (off ? "" : " checked") + '><span class="sl"></span></label>' +
+      '<button class="ghost" data-checkname="' + encodeURIComponent(n.name) + '">↻</button>' +
+      (n.kind === "node" ? '<button class="ghost" data-del="' + n.id + '">✕</button>' : '');
     ul.appendChild(li);
   });
+  const ph = $("#provHead"), pl = $("#provList"); pl.innerHTML = ""; ph.hidden = PROVIDERS.length === 0;
+  PROVIDERS.forEach(p => {
+    const li = document.createElement("li");
+    li.innerHTML = '<span class="dom">' + escH(p.name) + '</span>' +
+      '<span class="meta">' + t("nodeSub") + " · " + p.count + " " + t("provNodes") + '</span>' +
+      '<button class="ghost" data-delprov="' + p.id + '">✕</button>';
+    pl.appendChild(li);
+  });
 }
-// auto-ping every checkable node (ours by id, profile ones by name) concurrently
+// auto-ping every enabled exit node (by name) concurrently
 async function autoPingNodes(){
   await Promise.all(NODES.map(async (n, i) => {
-    if (n.kind === "provider" || (n.kind === "node" && n.enabled === 0)) return;
+    if (n.enabled === 0) return;
     const el = $('#nodeList [data-ms="' + i + '"]'); if (!el) return;
     el.textContent = "…";
-    try {
-      const r = await api("nodecheck", n.kind === "profile" ? { name: n.name } : { id: n.id });
-      el.textContent = r.ok ? (r.delay === "x" ? t("nodeNoResp") : r.delay + " " + t("nodeMs")) : "";
-    } catch(e){ el.textContent = ""; }
+    try { const r = await api("nodecheck", { name: n.name }); el.textContent = r.ok ? (r.delay === "x" ? t("nodeNoResp") : r.delay + " " + t("nodeMs")) : ""; }
+    catch(e){ el.textContent = ""; }
   }));
 }
 async function addNodeCfg(cfg, name){
@@ -1711,12 +1837,11 @@ $("#nodeList").addEventListener("click", async e => {
   if (b.dataset.del){
     b.disabled = true; setMsg($("#nodeMsg"), t("removing"));
     const res = await api("nodedel", { id: b.dataset.del });
-    if (res.ok){ setMsg($("#nodeMsg"), t("done")); loadNodes(); loadDomains(); }
+    if (res.ok){ setMsg($("#nodeMsg"), t("done")); loadNodes().then(autoPingNodes); loadDomains(); }
     else { setMsg($("#nodeMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
-  } else if (b.dataset.check || b.dataset.checkname){
+  } else if (b.dataset.checkname){
     b.disabled = true; setMsg($("#nodeMsg"), t("validating"));
-    const p = b.dataset.check ? { id: b.dataset.check } : { name: decodeURIComponent(b.dataset.checkname) };
-    const res = await api("nodecheck", p);
+    const res = await api("nodecheck", { name: decodeURIComponent(b.dataset.checkname) });
     b.disabled = false;
     if (res.ok) setMsg($("#nodeMsg"), (res.delay === "x" ? t("nodeNoResp") : res.delay + " " + t("nodeMs")), res.delay !== "x");
     else setMsg($("#nodeMsg"), t("errP") + (res.error || "?"), false);
@@ -1725,11 +1850,63 @@ $("#nodeList").addEventListener("click", async e => {
 $("#nodeList").addEventListener("change", async e => {
   const c = e.target.closest('input[data-toggle]'); if (!c) return;
   c.disabled = true; setMsg($("#nodeMsg"), t("saving"));
-  const res = await api("nodetoggle", { id: c.dataset.toggle });
-  if (res.ok){ setMsg($("#nodeMsg"), t("done")); }
-  else { setMsg($("#nodeMsg"), t("errP") + (res.error || "?"), false); }
-  loadNodes(); loadDomains();
+  const res = await api("nodetoggle", { name: decodeURIComponent(c.dataset.toggle) });
+  if (res && res.ok) setMsg($("#nodeMsg"), t("done"));
+  else setMsg($("#nodeMsg"), t("errP") + ((res && res.error) || "?"), false);
+  loadNodes().then(autoPingNodes); loadDomains();
 });
+// mode toggle (priority ↔ auto)
+$("#nodeMode").addEventListener("click", async e => {
+  const b = e.target.closest("button[data-mode]"); if (!b || b.dataset.mode === NODEMODE) return;
+  document.querySelectorAll("#nodeMode button").forEach(x => { x.disabled = true; });
+  setMsg($("#nodeMsg"), t("applying"));
+  const res = await api("nodemode", { mode: b.dataset.mode });
+  document.querySelectorAll("#nodeMode button").forEach(x => { x.disabled = false; });
+  if (res && res.ok){ setMsg($("#nodeMsg"), t("done")); loadNodes().then(autoPingNodes); }
+  else setMsg($("#nodeMsg"), t("errP") + ((res && res.error) || "?"), false);
+});
+// provider (subscription) delete — all-or-nothing
+$("#provList").addEventListener("click", async e => {
+  const b = e.target.closest("button[data-delprov]"); if (!b) return;
+  if (!confirm(t("provDelConfirm"))) return;
+  b.disabled = true; setMsg($("#nodeMsg"), t("removing"));
+  const res = await api("nodedel", { id: b.dataset.delprov });
+  if (res.ok){ setMsg($("#nodeMsg"), t("done")); loadNodes().then(autoPingNodes); loadDomains(); }
+  else { setMsg($("#nodeMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
+});
+// migrate existing "→ VPN" rules onto the managed exit group
+$("#migrateBtn").addEventListener("click", async e => {
+  if (!confirm(t("migrateConfirm"))) return;
+  e.currentTarget.disabled = true; setMsg($("#nodeMsg"), t("applying"));
+  const res = await api("migraterules", {});
+  e.currentTarget.disabled = false;
+  if (res && res.ok){ setMsg($("#nodeMsg"), t("done") + (res.changed ? " (" + res.changed + ")" : "")); loadDomains(); }
+  else setMsg($("#nodeMsg"), t("errP") + ((res && res.error) || "?"), false);
+});
+// drag-to-reorder exits (top = default / primary in Priority mode)
+(function(){
+  const ul = $("#nodeList"); let dragEl = null;
+  ul.addEventListener("dragstart", e => { const li = e.target.closest("li"); if (!li) return; dragEl = li; try { e.dataTransfer.effectAllowed = "move"; } catch(_){} });
+  ul.addEventListener("dragover", e => {
+    e.preventDefault(); const li = e.target.closest("li"); if (!li || li === dragEl) return;
+    ul.querySelectorAll("li.drag-over").forEach(x => x.classList.remove("drag-over")); li.classList.add("drag-over");
+  });
+  ul.addEventListener("dragleave", e => { const li = e.target.closest("li"); if (li) li.classList.remove("drag-over"); });
+  ul.addEventListener("dragend", () => { ul.querySelectorAll("li.drag-over").forEach(x => x.classList.remove("drag-over")); dragEl = null; });
+  ul.addEventListener("drop", async e => {
+    e.preventDefault(); const li = e.target.closest("li");
+    ul.querySelectorAll("li.drag-over").forEach(x => x.classList.remove("drag-over"));
+    if (!li || !dragEl || li === dragEl){ dragEl = null; return; }
+    const rect = li.getBoundingClientRect();
+    const after = (e.clientY - rect.top) > rect.height / 2;
+    ul.insertBefore(dragEl, after ? li.nextSibling : li); dragEl = null;
+    const names = [...ul.querySelectorAll("li")].map(x => x.dataset.name);
+    setMsg($("#nodeMsg"), t("saving"));
+    const res = await api("nodeorder", { names: names.join("\n") });
+    if (res && res.ok){ setMsg($("#nodeMsg"), t("done")); loadNodes().then(autoPingNodes); }
+    else { setMsg($("#nodeMsg"), t("errP") + ((res && res.error) || "?"), false); loadNodes(); }
+  });
+})();
 (function(){
   const dz = $("#dropzone");
   const readFile = f => { if (!f) return; const r = new FileReader(); r.onload = () => { $("#nodeCfg").value = r.result; if (!$("#nodeName").value) $("#nodeName").value = f.name.replace(/\.(conf|yaml|yml|txt)$/i, ""); }; r.readAsText(f); };
