@@ -20,6 +20,10 @@ a LuCI menu entry to open it.
     auto-updates with Mihomo's geosite DB. Telegram also adds its DC **IP-CIDR** ranges, IPv4 + IPv6
     (so Telegram Desktop + media work, not just web).
   - **Domain-list** cards (Torrents, Social) synced from editable `.lst` files.
+  - When the **GeoIP** database is enabled, cards that have a matching GeoIP category (Telegram,
+    Google, Netflix, Twitter/X, Instagram/Facebook) also lay down a `GEOIP,<service>` rule — a
+    belt-and-suspenders IP-level match on top of the geosite/domain rules. Toggling the card on/off
+    manages all facets together; if GeoIP is off the card just uses geosite (+ IP-CIDR) as before.
   - **Hybrid** cards can pair a geosite category *and* a supplementary list — e.g. **AI** =
     `category-ai-!cn` (comprehensive, auto-updating) + a curated `ai.lst` (ChatGPT/Claude/Gemini,
     Grok, Perplexity, Mistral, DeepSeek, Copilot, … — the transparent, editable part).

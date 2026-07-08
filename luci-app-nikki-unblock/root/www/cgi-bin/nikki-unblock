@@ -202,6 +202,7 @@ presets_json() {
 		[ -z "$id" ] && break
 		name=$(printf '%s' "$idx" | jsonfilter -e "@[$i].name" 2>/dev/null); [ -z "$name" ] && name="$id"
 		geo=$(printf '%s' "$idx" | jsonfilter -e "@[$i].geosite" 2>/dev/null)
+		gip=$(printf '%s' "$idx" | jsonfilter -e "@[$i].geoip" 2>/dev/null)
 		gnode=$(printf '%s' "$idx" | jsonfilter -e "@[$i].node" 2>/dev/null); [ -z "$gnode" ] && gnode=PROXY
 		wantlist=$(printf '%s' "$idx" | jsonfilter -e "@[$i].list" 2>/dev/null)
 		ips=$(printf '%s' "$idx" | jsonfilter -e "@[$i].ipcidr[*]" 2>/dev/null | awk '{printf "%s\"%s\"", sep, $0; sep=","}')
@@ -211,7 +212,7 @@ presets_json() {
 			dom=$(applist_domains "$id" | awk '{ printf "%s\"%s\"", sep, $0; sep="," }')
 		fi
 		[ "$first" = 1 ] || printf ','; first=0
-		printf '{"id":"%s","name":"%s","geosite":"%s","node":"%s","ipcidr":[%s],"domains":[%s]}' "$id" "$name" "$geo" "$gnode" "$ips" "$dom"
+		printf '{"id":"%s","name":"%s","geosite":"%s","geoip":"%s","node":"%s","ipcidr":[%s],"domains":[%s]}' "$id" "$name" "$geo" "$gip" "$gnode" "$ips" "$dom"
 		i=$((i + 1))
 	done
 	printf ']'
@@ -780,6 +781,12 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		[ -z "$cat" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
 		changed=0
 		if [ "$(rule_exists GEOSITE "$cat")" != 1 ]; then add_rule GEOSITE "$cat" "$gnode"; changed=1; fi
+		# geoip facet: add GEOIP,<code> alongside — but ONLY if the GeoIP DB is enabled, else skip
+		# (geosite + IP-CIDR remain the working fallback so mihomo never breaks).
+		gip=$(get_param geoip | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9-]//g')
+		if [ -n "$gip" ] && geoip_ready && [ "$(rule_exists GEOIP "$gip")" != 1 ]; then
+			add_rule GEOIP "$gip" "$gnode"; changed=1
+		fi
 		for ip in $(get_param ips | tr ',' ' '); do
 			ip=$(clean_ip "$ip"); [ -z "$ip" ] && continue
 			if [ "$(rule_exists IP-CIDR "$ip")" != 1 ]; then
@@ -795,6 +802,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		cat=$(get_param cat | sed 's/[^a-z0-9._!-]//g')
 		[ -z "$cat" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
 		delete_rule GEOSITE "$cat"
+		gip=$(get_param geoip | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9-]//g')
+		[ -n "$gip" ] && delete_rule GEOIP "$gip"
 		for ip in $(get_param ips | tr ',' ' '); do
 			ip=$(clean_ip "$ip"); [ -n "$ip" ] && delete_rule IP-CIDR "$ip"
 		done
@@ -1373,6 +1382,7 @@ function presetOwned(r){
   if (r.src) return true;
   for (const p of PRESETS){
     if (p.geosite && r.type === "GEOSITE" && r.matcher === p.geosite) return true;
+    if (p.geoip && r.type === "GEOIP" && r.matcher === p.geoip) return true;
     if (p.ipcidr && r.type === "IP-CIDR" && p.ipcidr.indexOf(r.matcher) >= 0) return true;
   }
   return false;
@@ -1415,6 +1425,9 @@ function listFacet(p){
 function presetState(p){
   const facets = [];
   if (p.geosite) facets.push(RULES.some(r => r.type === "GEOSITE" && r.matcher === p.geosite) ? "on" : "off");
+  // geoip facet only counts when the GeoIP DB is enabled — otherwise the rule can't be added and the
+  // card would be stuck "partial". While GeoIP is off, geosite + IP-CIDR fully define the preset.
+  if (p.geoip && GEO_OK) facets.push(RULES.some(r => r.type === "GEOIP" && r.matcher === p.geoip) ? "on" : "off");
   if ((p.domains || []).length) facets.push(listFacet(p));
   if (!facets.length) return { on: false, part: false };
   if (facets.every(f => f === "on")) return { on: true, part: false };
@@ -1426,8 +1439,8 @@ async function presetToggle(p, wantOn){
   let ok = true, error;
   if (p.geosite){
     const ips = (p.ipcidr || []).join(",");
-    const r = wantOn ? await api("geosite_on", { cat: p.geosite, node: p.node || "PROXY", ips })
-                     : await api("geosite_off", { cat: p.geosite, ips });
+    const r = wantOn ? await api("geosite_on", { cat: p.geosite, node: p.node || "PROXY", ips, geoip: p.geoip || "" })
+                     : await api("geosite_off", { cat: p.geosite, ips, geoip: p.geoip || "" });
     if (!r || !r.ok){ ok = false; error = r && r.error; }
   }
   if ((p.domains || []).length){
@@ -1443,6 +1456,9 @@ function showPresetInfo(p){
     h += '<div class="pmrow"><b>GEOSITE</b> · <code>' + escH(p.geosite) + '</code> → ' + escH(p.node || "PROXY") + '</div>';
     h += '<div class="pmnote">' + t("pmGeo") + '</div>';
   }
+  if (p.geoip){
+    h += '<div class="pmrow"><b>GEOIP</b> · <code>' + escH(p.geoip) + '</code> → ' + escH(p.node || "PROXY") + (GEO_OK ? "" : " · " + t("geoOff")) + '</div>';
+  }
   const ips = p.ipcidr || [];
   if (ips.length){
     h += '<div class="pmsub">IP-CIDR (' + ips.length + ')</div>';
@@ -1453,7 +1469,7 @@ function showPresetInfo(p){
     h += '<div class="pmsub">' + t("tSuffix") + ' (' + d.length + ')</div>';
     h += '<ul class="pmlist">' + d.map(x => '<li>' + escH(x) + '</li>').join("") + '</ul>';
   }
-  if (!p.geosite && !ips.length && !d.length) h += '<div class="pmnote">' + t("listsNA") + '</div>';
+  if (!p.geosite && !p.geoip && !ips.length && !d.length) h += '<div class="pmnote">' + t("listsNA") + '</div>';
   $("#pmBody").innerHTML = h;
   $("#pmodal").hidden = false;
 }
@@ -1763,8 +1779,11 @@ async function loadVersions(){
     const v = await (await fetch("?api=versions")).json();
     $("#verSelf").textContent = v.self || "?";
     $("#verNikki").textContent = (v.nikki || "?") + " · mihomo " + (v.mihomo || "?");
+    const wasGeo = GEO_OK;
     GEO_OK = v.geo_ok === 1;
     $("#verGeo").textContent = GEO_OK ? (t("geoOn") + (v.geo_date ? " · " + v.geo_date : "")) : t("geoOff");
+    // presets may load before versions — refresh cards so the geoip facet reflects the real DB state
+    if (wasGeo !== GEO_OK && PRESETS.length) renderPresets();
   } catch(e){}
 }
 function updBtns(dis){ ["#updSelf","#updNikki","#updGeo","#updAll"].forEach(id => { $(id).disabled = dis; }); }
