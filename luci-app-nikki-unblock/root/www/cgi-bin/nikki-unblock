@@ -42,6 +42,7 @@ SUBS_DIR="/etc/nikki-unblock/subs"             # tracked link-subscriptions: <su
 SUB_TAG="# nikki-unblock-subsync"              # crontab marker for subscription auto-refresh
 BACKUP_DIR="/etc/nikki-unblock/backups"        # rotating auto-backups (daily/weekly/monthly)
 BK_TAG="# nikki-unblock-backup"                # crontab marker for auto-backup
+MSS_FILE="/etc/nftables.d/10-mss-clamp.nft"    # optional MSS clamp (fixes mihomo large-download stalls)
 MIXIN_FILE="/etc/nikki/mixin.yaml"
 MIHOMO_API="http://127.0.0.1:9090"
 
@@ -744,6 +745,23 @@ backupauto_set() {   # $1=on(0/1)
 	if [ "$1" = 1 ]; then echo "30 4 * * * $SELF backupauto $BK_TAG" >> "$CRONTAB"; /etc/init.d/cron enable >/dev/null 2>&1; fi
 	/etc/init.d/cron restart >/dev/null 2>&1
 }
+# ---- MSS clamp -------------------------------------------------------------
+# Optional: clamp TCP MSS to route MTU on postrouting. Fixes large-download stalls seen with some
+# mihomo builds (mihomo-alpha) where a wrong MSS blackholes big transfers through the tunnel.
+mssclamp_on() { [ -f "$MSS_FILE" ]; }
+mssclamp_set() {   # $1 = on(0/1)
+	if [ "$1" = 1 ]; then
+		mkdir -p /etc/nftables.d
+		printf 'chain mss_clamp_all {\n    type filter hook postrouting priority mangle; policy accept;\n    tcp flags syn tcp option maxseg size set rt mtu\n}\n' > "$MSS_FILE"
+		fw4 reload >/dev/null 2>&1 || /etc/init.d/firewall reload >/dev/null 2>&1
+	else
+		rm -f "$MSS_FILE"
+		# fw4 reload alone doesn't drop a hook-chain from a removed include — delete it explicitly
+		nft delete chain inet fw4 mss_clamp_all 2>/dev/null
+		fw4 reload >/dev/null 2>&1 || /etc/init.d/firewall reload >/dev/null 2>&1
+	fi
+}
+
 backupauto_json() {
 	json_header
 	en=$(uci -q get nikki-unblock.config.backupauto 2>/dev/null)
@@ -1261,6 +1279,11 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		backupauto_set "$on"
 		[ "$on" = 1 ] && backup_auto_run   # write one immediately so there's something to restore
 		json_header; printf '{"ok":true,"enabled":%s}' "$([ "$on" = 1 ] && echo true || echo false)"; exit 0
+
+	elif [ "$action" = "mssclamp" ]; then
+		on=$(get_param on | sed 's/[^01]//g'); [ -z "$on" ] && on=0
+		mssclamp_set "$on"
+		json_header; printf '{"ok":true,"enabled":%s}' "$([ "$on" = 1 ] && echo true || echo false)"; exit 0
 	fi
 
 	json_header; printf '{"ok":false,"error":"unknown action"}'; exit 0
@@ -1300,8 +1323,9 @@ fi
 	base_ok=1
 	[ "$running" = 1 ] && { curl -s -m 5 -H "Authorization: Bearer $(mihomo_secret)" \
 		"$MIHOMO_API/proxies/$(urlenc_all "$BASE_GROUP")" 2>/dev/null | grep -q '"name"' || base_ok=0; }
-	printf '{"running":%d,"boot":%d,"base_group":"%s","base_ok":%d}' \
-		"$running" "$booten" "$BASE_GROUP" "$base_ok"; exit 0
+	mss=0; mssclamp_on && mss=1
+	printf '{"running":%d,"boot":%d,"base_group":"%s","base_ok":%d,"mss":%d}' \
+		"$running" "$booten" "$BASE_GROUP" "$base_ok" "$mss"; exit 0
 }
 
 # ---- HTML page -------------------------------------------------------------
@@ -1580,6 +1604,11 @@ cat <<'HTML'
         <span class="swlabel" data-i18n="svcBoot"></span>
         <label class="sw"><input type="checkbox" id="svcBootChk"><span class="sl"></span></label>
       </div>
+      <div class="swrow">
+        <span class="swlabel" data-i18n="mssLabel" data-i18n-title="mssHint"></span>
+        <label class="sw"><input type="checkbox" id="mssChk"><span class="sl"></span></label>
+      </div>
+      <div class="hint" data-i18n="mssHint"></div>
       <div class="btns">
         <button type="button" class="ghost" id="svcRestart" data-i18n="svcRestart"></button>
         <button type="button" class="ghost" id="svcReload" data-i18n="svcReload"></button>
@@ -1683,6 +1712,7 @@ const I18N = {
     svcReload: "Перечитать конфиг", svcAutostart: "Автозапуск вкл/выкл",
     svcRunning: "nikki работает", svcStopped: "nikki остановлен",
     svcBoot: "Автозапуск при загрузке", svcOn: "вкл", svcOff: "выкл",
+    mssLabel: "MSS-clamp (фикс зависаний загрузок)", mssHint: "Подгоняет TCP MSS под MTU маршрута. Помогает, если большие загрузки/страницы зависают через VPN (замечено на mihomo-alpha). Правило firewall, применяется мгновенно.",
     bkTitle: "Бэкап настроек", bkDownload: "Создать и скачать", bkRestore: "Восстановить из файла", bkAuto: "Авто-бэкап (день/неделя/месяц)",
     bkHint: "Сохраняет правила, ноды, подписки и mixin (без гео-баз, ~КБ). Восстановление заменяет текущие настройки; перед этим делается снимок для отката.",
     bkRestoreConfirm: "Восстановить из этого файла? Текущие настройки будут заменены (перед этим — авто-снимок для отката).", bkRestoring: "Восстанавливаю…", kb: "КБ",
@@ -1746,6 +1776,7 @@ const I18N = {
     svcReload: "Reload config", svcAutostart: "Toggle autostart",
     svcRunning: "nikki running", svcStopped: "nikki stopped",
     svcBoot: "Start on boot", svcOn: "on", svcOff: "off",
+    mssLabel: "MSS clamp (fix download stalls)", mssHint: "Clamps TCP MSS to the route MTU. Helps when large downloads/pages stall through the VPN (seen on mihomo-alpha). A firewall rule, applied instantly.",
     bkTitle: "Config backup", bkDownload: "Create & download", bkRestore: "Restore from file", bkAuto: "Auto-backup (daily/weekly/monthly)",
     bkHint: "Saves rules, nodes, subscriptions and mixin (no geo databases, ~KB). Restore replaces current settings; a snapshot is taken first for rollback.",
     bkRestoreConfirm: "Restore from this file? Current settings will be replaced (an auto-snapshot is taken first for rollback).", bkRestoring: "Restoring…", kb: "KB",
@@ -2267,6 +2298,7 @@ function renderSvc(s){
   $("#svcState").textContent = run ? t("svcRunning") : t("svcStopped");
   $("#svcRun").checked = run;
   $("#svcBootChk").checked = s.boot === 1;
+  $("#mssChk").checked = s.mss === 1;
 }
 let LASTSVC = null;
 function renderGuard(s){
@@ -2325,6 +2357,12 @@ async function svcDo(op, el){
 }
 $("#svcRun").addEventListener("change", e => svcDo(e.currentTarget.checked ? "start" : "stop", e.currentTarget));
 $("#svcBootChk").addEventListener("change", e => svcDo(e.currentTarget.checked ? "enable" : "disable", e.currentTarget));
+$("#mssChk").addEventListener("change", async e => {
+  e.currentTarget.disabled = true; setMsg($("#svcMsg"), t("applying"));
+  const res = await api("mssclamp", { on: e.currentTarget.checked ? 1 : 0 });
+  e.currentTarget.disabled = false;
+  setMsg($("#svcMsg"), res && res.ok ? t("done") : t("errP"), !res || res.ok);
+});
 $("#svcRestart").addEventListener("click", e => svcDo("restart", e.currentTarget));
 $("#svcReload").addEventListener("click", e => svcDo("reload", e.currentTarget));
 

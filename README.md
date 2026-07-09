@@ -41,7 +41,9 @@ a LuCI menu entry to open it.
   **Update nikki-unblock** (pulls the latest release `.apk`), **Update nikki** (`apk upgrade nikki` +
   mihomo), and **Update geo** (downloads GeoSite/GeoIP databases + enables GeoIP), and **Update all**. Updates run in
   the background (apk outlasts the CGI timeout) with a live log that keeps streaming even if you
-  navigate away.
+  navigate away. A **Config backup** block (download / restore / rotating auto-backup) and an optional
+  **MSS clamp** toggle (clamps TCP MSS to route MTU — fixes large-download stalls seen with some mihomo
+  builds) round out the tab.
 - **IP exclusions** — manage `nikki.proxy.reserved_ip` (traffic to those dests skips Mihomo — handy
   for your own VPN nodes; the default private ranges are protected).
 - **Auto-update** — optional cron that keeps enabled list-presets in sync with the manifest.
