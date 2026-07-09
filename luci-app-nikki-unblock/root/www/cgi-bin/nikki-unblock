@@ -452,7 +452,17 @@ updatestatus_json() {
 
 san_name() { printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]/-/g; s/-\{2,\}/-/g; s/^-//; s/-$//' | cut -c1-40; }
 urldec()   { printf '%b' "$(printf '%s' "$1" | sed 's/+/ /g; s/%/\\x/g')"; }
-b64dec()   { _d="$1"; case $((${#_d} % 4)) in 2) _d="${_d}==";; 3) _d="${_d}=";; esac; printf '%s' "$_d" | tr '_-' '/+' | base64 -d 2>/dev/null; }
+# base64 decode from stdin via awk — no `base64` command needed (some OpenWrt builds, e.g. the
+# NC-1812, ship busybox WITHOUT the base64 applet). Tolerant of URL-safe alphabet + missing padding.
+b64d() {
+	awk 'BEGIN{b="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";for(i=0;i<64;i++)T[substr(b,i+1,1)]=i}
+	{s=s $0}
+	END{gsub(/-/,"+",s);gsub(/_/,"\/",s);n=length(s);acc=0;bits=0;out="";
+	  for(i=1;i<=n;i++){c=substr(s,i,1);if(!(c in T))continue;acc=acc*64+T[c];bits+=6;
+	    if(bits>=8){bits-=8;byte=int(acc/(2^bits))%256;out=out sprintf("%c",byte);acc=acc%(2^bits)}}
+	  printf "%s",out}'
+}
+b64dec()   { printf '%s' "$1" | b64d; }
 
 mihomo_secret() { grep -E "^secret:" /etc/nikki/run/config.yaml 2>/dev/null | head -1 | sed "s/secret:[[:space:]]*//; s/[\"' ]//g"; }
 # percent-encode URL-breaking chars in a proxy name for the mihomo API path (busybox-safe, no `od`);
@@ -626,7 +636,7 @@ regen_mixin() {
 # Fetch a subscription URL -> share-links (base64 or plain text), one per line, deduped.
 sub_links() {
 	_b=$(curl -s --max-time 20 "$1" 2>/dev/null)
-	{ printf '%s' "$_b" | base64 -d 2>/dev/null; printf '\n%s\n' "$_b"; } \
+	{ printf '%s' "$_b" | b64d; printf '\n%s\n' "$_b"; } \
 		| grep -oiE '^(vless|vmess|trojan|ss|hysteria2|hy2|tuic)://[^[:space:]]+' | awk '!seen[$0]++'
 }
 sub_owned_ids() { for s in "$NODES_DIR"/*.src; do [ -f "$s" ] || continue; [ "$(cat "$s" 2>/dev/null)" = "$1" ] && basename "$s" .src; done; }
@@ -1112,7 +1122,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			#    (manageable/orderable; needed because clash-UA output is often empty, e.g. remnawave).
 			#  - real clash YAML with proxies: -> keep as an auto-updating proxy-provider (as before).
 			subbody=$(curl -s --max-time 20 "$fl" 2>/dev/null)
-			subdec=$(printf '%s' "$subbody" | base64 -d 2>/dev/null)
+			subdec=$(printf '%s' "$subbody" | b64d)
 			if printf '%s\n%s\n' "$subdec" "$subbody" | grep -qiE '^(vless|vmess|trojan|ss|hysteria2|hy2|tuic)://'; then
 				kind=multi; [ -z "$nm" ] && nm="sub"   # tracked link-subscription -> individual nodes (sub_sync)
 			elif printf '%s' "$subbody" | grep -q 'proxies:'; then
@@ -1712,7 +1722,7 @@ const I18N = {
     svcReload: "Перечитать конфиг", svcAutostart: "Автозапуск вкл/выкл",
     svcRunning: "nikki работает", svcStopped: "nikki остановлен",
     svcBoot: "Автозапуск при загрузке", svcOn: "вкл", svcOff: "выкл",
-    mssLabel: "MSS-clamp (фикс зависаний загрузок)", mssHint: "Подгоняет TCP MSS под MTU маршрута. Помогает, если большие загрузки/страницы зависают через VPN (замечено на mihomo-alpha). Правило firewall, применяется мгновенно.",
+    mssLabel: "Фикс зависаний загрузок (MSS-clamp)", mssHint: "Включи, если через VPN большие загрузки или сайты зависают / грузятся наполовину, а мелочь при этом работает. Чинит размер сетевых пакетов под туннель. Оставлять включённым безопасно.",
     bkTitle: "Бэкап настроек", bkDownload: "Создать и скачать", bkRestore: "Восстановить из файла", bkAuto: "Авто-бэкап (день/неделя/месяц)",
     bkHint: "Сохраняет правила, ноды, подписки и mixin (без гео-баз, ~КБ). Восстановление заменяет текущие настройки; перед этим делается снимок для отката.",
     bkRestoreConfirm: "Восстановить из этого файла? Текущие настройки будут заменены (перед этим — авто-снимок для отката).", bkRestoring: "Восстанавливаю…", kb: "КБ",
@@ -1776,7 +1786,7 @@ const I18N = {
     svcReload: "Reload config", svcAutostart: "Toggle autostart",
     svcRunning: "nikki running", svcStopped: "nikki stopped",
     svcBoot: "Start on boot", svcOn: "on", svcOff: "off",
-    mssLabel: "MSS clamp (fix download stalls)", mssHint: "Clamps TCP MSS to the route MTU. Helps when large downloads/pages stall through the VPN (seen on mihomo-alpha). A firewall rule, applied instantly.",
+    mssLabel: "Fix download stalls (MSS clamp)", mssHint: "Turn on if large downloads or sites stall / load only halfway through the VPN while small stuff works fine. Fixes network packet size for the tunnel. Safe to leave on.",
     bkTitle: "Config backup", bkDownload: "Create & download", bkRestore: "Restore from file", bkAuto: "Auto-backup (daily/weekly/monthly)",
     bkHint: "Saves rules, nodes, subscriptions and mixin (no geo databases, ~KB). Restore replaces current settings; a snapshot is taken first for rollback.",
     bkRestoreConfirm: "Restore from this file? Current settings will be replaced (an auto-snapshot is taken first for rollback).", bkRestoring: "Restoring…", kb: "KB",
