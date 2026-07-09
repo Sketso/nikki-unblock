@@ -1,0 +1,70 @@
+name: deploy pages
+
+# Publishes the GitHub Pages site (Pages Source = "GitHub Actions").
+# The site serves:
+#   /applist/  — the preset manifest + .lst lists the routers fetch (index.json + *.lst)
+#   /apk/      — an untrusted apk repository (packages.adb + the latest .apk) for
+#                `apk add`/LuCI Software/`apk upgrade` (added by feed.sh). Filled by the
+#                separate "build & release" run; assembled here from its artifact.
+#
+# Triggers: applist edits on main, a finished build (to refresh /apk/), or manual dispatch.
+on:
+  push:
+    branches: [main]
+    paths: ["applist/**", ".github/workflows/pages.yml", "index.html"]
+  workflow_run:
+    workflows: ["build & release"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# never run two Pages deploys at once; don't cancel an in-flight deploy
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble site (applist + apk repo)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          mkdir -p _site
+          cp -r applist _site/applist
+          cp -f index.html _site/index.html 2>/dev/null || true
+
+          # ---- /apk/ untrusted apk repository -------------------------------
+          # Pull the packages.adb index + .apk that the latest successful
+          # "build & release" run uploaded as the `apk-repo` artifact. If none
+          # exists yet (first run), skip — applist still deploys.
+          mkdir -p _site/apk
+          run_id=$(gh run list --workflow "build & release" --status success \
+                     --limit 1 --json databaseId --jq '.[0].databaseId' || true)
+          if [ -n "$run_id" ]; then
+            if gh run download "$run_id" -n apk-repo -D _site/apk 2>/dev/null; then
+              echo "apk repo published from run $run_id:"; ls -l _site/apk
+            else
+              echo "no apk-repo artifact on run $run_id yet — /apk/ left empty this deploy"
+            fi
+          else
+            echo "no successful build run yet — /apk/ left empty this deploy"
+          fi
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
