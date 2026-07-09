@@ -78,6 +78,9 @@ jobs:
             # safety: the private key must never reach _site
             find _site -name '*.pem' -path '*apk*' -exec grep -l "PRIVATE" {} \; | grep -q . && \
               { echo "FATAL: private key leaked into _site"; exit 1; } || true
+            # a browsable landing for /apk/ (Actions Pages serves no auto directory index → 404)
+            apkfile=$(cd _site/apk && ls luci-app-nikki-unblock-*.apk 2>/dev/null | head -1)
+            sed "s/@APKFILE@/${apkfile}/g" feed/apk-index.html > _site/apk/index.html
           else
             echo "no release .apk yet — /apk/ left empty this deploy"
           fi

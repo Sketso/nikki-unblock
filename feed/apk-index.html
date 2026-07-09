@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>nikki-unblock · apk repo</title>
+<style>
+  body{font:15px/1.6 system-ui,sans-serif;max-width:44rem;margin:3rem auto;padding:0 1rem}
+  code,pre{background:#8882;border-radius:6px}
+  code{padding:.1rem .35rem}
+  pre{padding:.7rem .9rem;overflow:auto}
+</style>
+<h1>nikki-unblock — apk repository</h1>
+<p>A small <b>signed</b> OpenWrt apk feed for
+<a href="https://github.com/sketso/nikki-unblock">nikki-unblock</a>. Easiest to add via the installer:</p>
+<pre>wget -O - https://github.com/sketso/nikki-unblock/raw/main/feed.sh | sh</pre>
+<p>…or manually:</p>
+<pre>wget -qO /etc/apk/keys/nikki-unblock.pem https://sketso.github.io/nikki-unblock/apk/nikki-unblock.pem
+echo https://sketso.github.io/nikki-unblock/apk/packages.adb &gt; /etc/apk/repositories.d/nikki-unblock.list
+apk update &amp;&amp; apk add luci-app-nikki-unblock</pre>
+<ul>
+  <li><a href="packages.adb">packages.adb</a> — signed package index</li>
+  <li><a href="nikki-unblock.pem">nikki-unblock.pem</a> — public signing key</li>
+  <li><a href="@APKFILE@">@APKFILE@</a> — the package</li>
+</ul>
+<p><a href="../">← nikki-unblock</a></p>
