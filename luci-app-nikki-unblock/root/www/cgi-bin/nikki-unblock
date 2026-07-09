@@ -570,8 +570,14 @@ sharelink_to_yaml() {
 
 # ---- exit-node ordering / mode helpers -------------------------------------
 node_mode() { m=$(uci -q get nikki-unblock.config.node_mode 2>/dev/null); case "$m" in urltest|fallback) echo "$m" ;; *) echo fallback ;; esac; }
-# leaf proxy names of the profile's base group (live from mihomo)
-profile_node_names() { curl -s -m 6 -H "Authorization: Bearer $(mihomo_secret)" "$MIHOMO_API/proxies/$(urlenc_all "$BASE_GROUP")" 2>/dev/null | jsonfilter -e '@.all[*]' 2>/dev/null; }
+# leaf proxy names of the profile's base group (live from mihomo). Skip mihomo built-ins and the
+# managed exit group itself, so a base_group that points at UNBLOCK/DIRECT (e.g. after removing the
+# profile's own nodes) doesn't list those as "profile nodes".
+profile_node_names() {
+	curl -s -m 6 -H "Authorization: Bearer $(mihomo_secret)" "$MIHOMO_API/proxies/$(urlenc_all "$BASE_GROUP")" 2>/dev/null \
+		| jsonfilter -e '@.all[*]' 2>/dev/null \
+		| grep -vxE "$EXIT_GROUP|DIRECT|REJECT|REJECT-DROP|PASS|GLOBAL|COMPATIBLE"
+}
 # names of our added nodes (from the store files)
 our_node_names() { for f in "$NODES_DIR"/*.yaml; do [ -f "$f" ] && grep -m1 'name:' "$f" | sed 's/.*name:[[:space:]]*//'; done; }
 node_disabled() { [ -f "$OFF_FILE" ] && grep -qxF "$1" "$OFF_FILE"; }
@@ -622,7 +628,7 @@ regen_mixin() {
 		if [ -n "$enabled" ]; then
 			printf '%s\n' "$enabled" | while IFS= read -r n; do printf '      - "%s"\n' "$n"; done
 		else
-			echo "      - $BASE_GROUP"   # every exit disabled -> keep the group valid via the profile
+			echo "      - DIRECT"   # every exit disabled -> fall back to direct (avoids a base_group loop)
 		fi
 		if [ "$haveprov" = 1 ]; then
 			echo "    use:"
