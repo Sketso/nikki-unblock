@@ -46,20 +46,26 @@ jobs:
           cp -f index.html _site/index.html 2>/dev/null || true
 
           # ---- /apk/ untrusted apk repository -------------------------------
-          # Pull the packages.adb index + .apk that the latest successful
-          # "build & release" run uploaded as the `apk-repo` artifact. If none
-          # exists yet (first run), skip — applist still deploys.
+          # Download the latest released .apk and build an ADB index (packages.adb)
+          # with apk-tools 3.x from Alpine edge (same index format the router's
+          # apk-tools 3.0.5 reads). Non-fatal: if it fails, applist still deploys.
           mkdir -p _site/apk
-          run_id=$(gh run list --workflow "build & release" --status success \
-                     --limit 1 --json databaseId --jq '.[0].databaseId' || true)
-          if [ -n "$run_id" ]; then
-            if gh run download "$run_id" -n apk-repo -D _site/apk 2>/dev/null; then
-              echo "apk repo published from run $run_id:"; ls -l _site/apk
-            else
-              echo "no apk-repo artifact on run $run_id yet — /apk/ left empty this deploy"
-            fi
+          if gh release download --repo "$GITHUB_REPOSITORY" \
+               -p 'luci-app-nikki-unblock.apk' -D _site/apk 2>/dev/null; then
+            # the router fetches packages by their canonical name <pkg>-<version>-r<rel>.apk,
+            # so rename the stable release asset back before indexing
+            ver=$(sed -n 's/^PKG_VERSION:=//p' luci-app-nikki-unblock/Makefile)
+            rel=$(sed -n 's/^PKG_RELEASE:=//p' luci-app-nikki-unblock/Makefile)
+            mv _site/apk/luci-app-nikki-unblock.apk \
+               "_site/apk/luci-app-nikki-unblock-${ver}-r${rel}.apk"
+            docker run --rm -v "$PWD/_site/apk:/x" alpine:edge sh -eu -c '
+              apk add --no-cache apk-tools >/dev/null
+              cd /x
+              apk mkndx --output packages.adb *.apk
+              echo "index built:"; ls -l
+            ' || echo "!! index build failed — /apk/ left without an index this deploy"
           else
-            echo "no successful build run yet — /apk/ left empty this deploy"
+            echo "no release .apk yet — /apk/ left empty this deploy"
           fi
 
       - uses: actions/upload-pages-artifact@v3
