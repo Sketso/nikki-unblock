@@ -88,6 +88,17 @@ apk add nikki luci-app-nikki           # (opkg add on OpenWrt <= 24.10)
 wget -O - https://github.com/sketso/nikki-unblock/raw/main/feed.sh | sh
 ```
 
+On **apk** (OpenWrt ≥ 25.12) `feed.sh` adds a small **signed package repository** hosted on this
+project's GitHub Pages (it installs the repo's public key into `/etc/apk/keys/` and registers
+`https://sketso.github.io/nikki-unblock/apk/`). So the package shows up in **LuCI → System → Software**
+and updates are just:
+
+```sh
+apk upgrade luci-app-nikki-unblock        # or the "Update nikki-unblock" button in the Manage tab
+```
+
+(On **opkg**, OpenWrt ≤ 24.10, `feed.sh` installs the `.ipk` straight from the latest release.)
+
 Open it in **LuCI → Services → "nikki · Unblock"**, or directly at **http://&lt;router-ip&gt;/nikki**.
 
 > ### ⚠ Set `base_group` if your proxy-group isn't `PROXY`
