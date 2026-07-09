@@ -1445,6 +1445,7 @@ cat <<'HTML'
   .seg button.on { background: #2563eb; color: #fff; }
   .nodelist li { display: flex; align-items: center; gap: .5rem; }
   .nodelist li.drag-over { border-top: 2px solid #2563eb; }
+  .nodelist li.dragging { opacity: .45; background: #2563eb22; }
   .nodelist li.off { opacity: .5; }
   .nodelist .drag { cursor: grab; opacity: .4; font-size: 1.1rem; line-height: 1; user-select: none; touch-action: none; }
   .nodelist .drag:active { cursor: grabbing; }
@@ -2341,20 +2342,26 @@ $("#migrateBtn").addEventListener("click", async e => {
 // drag-to-reorder exits (top = default / primary in Priority mode)
 (function(){
   const ul = $("#nodeList"); let dragEl = null;
-  ul.addEventListener("dragstart", e => { const li = e.target.closest("li"); if (!li) return; dragEl = li; try { e.dataTransfer.effectAllowed = "move"; } catch(_){} });
+  // element the dragged row should be inserted BEFORE for a given pointer Y (null = append at end)
+  const afterEl = y => {
+    let best = null, bestOff = -Infinity;
+    ul.querySelectorAll("li:not(.dragging)").forEach(c => {
+      const b = c.getBoundingClientRect(); const off = y - b.top - b.height / 2;
+      if (off < 0 && off > bestOff){ bestOff = off; best = c; }
+    });
+    return best;
+  };
+  ul.addEventListener("dragstart", e => { const li = e.target.closest("li"); if (!li) return; dragEl = li; li.classList.add("dragging"); try { e.dataTransfer.effectAllowed = "move"; } catch(_){} });
+  // live reflow: move the row in real time so the drop lands exactly where you see it (incl. the very top)
   ul.addEventListener("dragover", e => {
-    e.preventDefault(); const li = e.target.closest("li"); if (!li || li === dragEl) return;
-    ul.querySelectorAll("li.drag-over").forEach(x => x.classList.remove("drag-over")); li.classList.add("drag-over");
+    e.preventDefault(); if (!dragEl) return;
+    const a = afterEl(e.clientY);
+    if (a == null) ul.appendChild(dragEl); else ul.insertBefore(dragEl, a);
   });
-  ul.addEventListener("dragleave", e => { const li = e.target.closest("li"); if (li) li.classList.remove("drag-over"); });
-  ul.addEventListener("dragend", () => { ul.querySelectorAll("li.drag-over").forEach(x => x.classList.remove("drag-over")); dragEl = null; });
+  ul.addEventListener("dragend", () => { if (dragEl) dragEl.classList.remove("dragging"); dragEl = null; });
   ul.addEventListener("drop", async e => {
-    e.preventDefault(); const li = e.target.closest("li");
-    ul.querySelectorAll("li.drag-over").forEach(x => x.classList.remove("drag-over"));
-    if (!li || !dragEl || li === dragEl){ dragEl = null; return; }
-    const rect = li.getBoundingClientRect();
-    const after = (e.clientY - rect.top) > rect.height / 2;
-    ul.insertBefore(dragEl, after ? li.nextSibling : li); dragEl = null;
+    e.preventDefault(); if (!dragEl) return;
+    dragEl.classList.remove("dragging"); dragEl = null;
     const names = [...ul.querySelectorAll("li")].map(x => x.dataset.name);
     setMsg($("#nodeMsg"), t("saving")); showOverlay(t("saving"));
     const res = await api("nodeorder", { names: names.join("\n") });
