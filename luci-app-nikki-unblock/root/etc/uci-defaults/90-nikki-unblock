@@ -19,6 +19,8 @@ if ! uci -q get nikki-unblock.config >/dev/null 2>&1; then
 	uci -q set nikki-unblock.config.base_group='PROXY'
 	uci -q set nikki-unblock.config.exit_group='UNBLOCK'
 	uci -q set nikki-unblock.config.node_mode='fallback'
+	uci -q set nikki-unblock.config.subauto='1'
+	uci -q set nikki-unblock.config.subauto_interval='24h'
 	uci -q commit nikki-unblock
 fi
 

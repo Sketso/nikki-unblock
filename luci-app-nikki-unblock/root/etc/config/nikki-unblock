@@ -14,3 +14,6 @@ config nikki-unblock 'config'
 	option exit_group 'UNBLOCK'
 	# Exit-node selection: 'fallback' (priority order, top-first) or 'urltest' (auto lowest-latency).
 	option node_mode 'fallback'
+	# Auto-refresh tracked link-subscriptions on a schedule (on by default; cron created once a sub exists).
+	option subauto '1'
+	option subauto_interval '24h'
