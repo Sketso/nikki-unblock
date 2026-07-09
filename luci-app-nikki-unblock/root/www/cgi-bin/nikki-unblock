@@ -691,7 +691,7 @@ subrefresh_all() {
 		sid=$(basename "$c" .conf); url=$(grep -m1 '^url=' "$c" | cut -d= -f2-); nm=$(grep -m1 '^name=' "$c" | cut -d= -f2-)
 		sub_sync "$sid" "$url" "$nm" && _ch=1
 	done
-	[ "$_ch" = 1 ] && { regen_mixin; apply_nikki; }
+	[ "$_ch" = 1 ] && { protect_all_nodes; regen_mixin; apply_nikki; }
 	logger -t nikki-unblock "subsync: refreshed link-subscriptions"
 }
 subauto_set() {   # $1=on(0/1) $2=interval
@@ -708,6 +708,46 @@ subauto_json() {
 	json_header
 	iv=$(uci -q get nikki-unblock.config.subauto_interval 2>/dev/null); [ -z "$iv" ] && iv=24h
 	subauto_on && printf '{"enabled":true,"interval":"%s"}' "$iv" || printf '{"enabled":false,"interval":"%s"}' "$iv"
+}
+
+# ---- protect VPN node servers from a co-installed zapret2 (+ nikki loop bypass) -----------------
+# If zapret2 runs alongside, its DPI-desync can corrupt the router's OWN connection to a VPN node,
+# breaking the tunnel. So when nodes are added/refreshed we auto-add each node's server IP to
+# zapret2's exclude (nozapret set) and the hostname to its hostlist-exclude, plus nikki reserved_ip
+# (so mihomo never routes a node's IP back through the VPN — a loop). No-op if zapret2 isn't present.
+Z2_IPX="/opt/zapret2/ipset/zapret-ip-exclude.txt"
+Z2_HOSTX="/opt/zapret2/ipset/zapret-hosts-user-exclude.txt"
+zapret2_present() { [ -x /etc/init.d/zapret2 ] && [ -d /opt/zapret2 ]; }
+# resolve a host to IPv4(s); if it's already an IP, echo it as-is
+host_ips() {
+	case "$1" in
+		*[a-zA-Z]*) nslookup "$1" 2>/dev/null | sed '1,2d' | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | grep -vE '^127\.|^0\.' | awk '!s[$0]++' ;;
+		*) echo "$1" ;;
+	esac
+}
+res_has() { for e in $(uci -q get nikki.proxy.reserved_ip 2>/dev/null); do case "$e" in "$1/32"|"$1") return 0 ;; esac; done; return 1; }
+# stage exclusions for one server host; sets NIKKI_RES_CHANGED / Z2_CHANGED
+protect_server() {
+	_h="$1"; [ -z "$_h" ] && return 0
+	case "$_h" in *[a-zA-Z]*) if zapret2_present; then touch "$Z2_HOSTX"; grep -qxF "$_h" "$Z2_HOSTX" || { echo "$_h" >> "$Z2_HOSTX"; Z2_CHANGED=1; }; fi ;; esac
+	for _ip in $(host_ips "$_h"); do
+		[ -z "$_ip" ] && continue
+		res_has "$_ip" || { uci add_list "nikki.proxy.reserved_ip=$_ip/32"; NIKKI_RES_CHANGED=1; }
+		if zapret2_present; then touch "$Z2_IPX"; grep -qxF "$_ip" "$Z2_IPX" || { echo "$_ip" >> "$Z2_IPX"; Z2_CHANGED=1; }; fi
+	done
+}
+# protect every current node's server (idempotent). Caller reloads nikki; we reload zapret2 here.
+protect_all_nodes() {
+	NIKKI_RES_CHANGED=0; Z2_CHANGED=0
+	for f in "$NODES_DIR"/*.yaml; do
+		[ -f "$f" ] || continue
+		protect_server "$(grep -m1 'server:' "$f" | sed 's/.*server:[[:space:]]*//; s/[[:space:]]*$//')"
+	done
+	[ "$NIKKI_RES_CHANGED" = 1 ] && uci commit nikki
+	if [ "$Z2_CHANGED" = 1 ]; then
+		/etc/init.d/zapret2 restart_daemons >/dev/null 2>&1
+		[ -x /opt/zapret2/ipset/get_exclude.sh ] && /opt/zapret2/ipset/get_exclude.sh >/dev/null 2>&1
+	fi
 }
 
 # ---- backup / restore ------------------------------------------------------
@@ -812,7 +852,8 @@ nodes_json() {
 	done
 	# legacy = rules still routed at the raw profile group (candidates for the "migrate" button)
 	legacy=$(uci show nikki 2>/dev/null | grep -c "\.node='$BASE_GROUP'\$")
-	printf '{"mode":"%s","active":"%s","legacy":%s,"nodes":[' "$(node_mode)" "$(json_esc "$active")" "${legacy:-0}"
+	z2=0; zapret2_present && z2=1
+	printf '{"mode":"%s","active":"%s","legacy":%s,"zapret2":%d,"nodes":[' "$(node_mode)" "$(json_esc "$active")" "${legacy:-0}" "$z2"
 	first=1
 	ordered_exit_names | while IFS= read -r nm; do
 		[ -z "$nm" ] && continue
@@ -1176,6 +1217,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 				subauto_set 1 "$_siv"
 			fi
 		fi
+		protect_all_nodes   # shield the new node's server from zapret2 + add it to nikki's loop bypass
 		regen_mixin; apply_nikki; sleep 6
 		if ! pgrep -f /usr/bin/mihomo >/dev/null; then
 			# config broke nikki -> roll back and report
@@ -1264,6 +1306,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		url=$(grep -m1 '^url=' "$SUBS_DIR/$sid.conf" | cut -d= -f2-); snm=$(grep -m1 '^name=' "$SUBS_DIR/$sid.conf" | cut -d= -f2-)
 		BK="/tmp/nu-subbk.$$"; rm -rf "$BK"; mkdir -p "$BK"; cp "$NODES_DIR"/* "$BK/" 2>/dev/null
 		if sub_sync "$sid" "$url" "$snm"; then
+			protect_all_nodes   # protect any new node servers from zapret2 + nikki loop
 			regen_mixin; apply_nikki; sleep 6
 			if ! pgrep -f /usr/bin/mihomo >/dev/null; then
 				rm -f "$NODES_DIR"/*.yaml "$NODES_DIR"/*.src 2>/dev/null; cp "$BK"/* "$NODES_DIR/" 2>/dev/null
@@ -1590,6 +1633,7 @@ cat <<'HTML'
       <button type="button" class="ghost" id="pingAll" data-i18n="pingAll"></button>
     </div>
     <div class="hint" id="modeHint"></div>
+    <div class="hint" id="z2Hint" hidden></div>
     <ul id="nodeList" class="nodelist"></ul>
     <button type="button" class="ghost" id="migrateBtn" data-i18n="migrateRules" style="margin-top:.4rem;font-size:.8rem"></button>
 
@@ -1688,6 +1732,7 @@ const I18N = {
     modePriHint: "Сверху вниз: верхняя нода — основная, при сбое переходит на следующую. Перетаскивай ⠿ для порядка.",
     modeAutoHint: "Автовыбор самой быстрой ноды по пингу (перепроверка каждые 5 мин). Порядок игнорируется.",
     nodeActive: "активна", dragHint: "Перетащи для порядка", pingAll: "Пинг всех", subAdded: "добавлено нод: ", nodeFromSub: "подписка:",
+    z2Hint: "🛡 Обнаружен zapret2 — серверы добавленных нод автоматически вносятся в его исключения (и в обход nikki), чтобы DPI-обход не рвал ваш VPN.",
     provTitle: "Подписки", provNodes: "нод", provDelConfirm: "Удалить подписку целиком? Все её ноды пропадут (по отдельности их удалить нельзя).",
     subRefresh: "Обновить подписку", subRefreshing: "Обновляю подписку…", subAutoLabel: "Автообновление подписок",
     subAutoHint: "Периодически перекачивает подписки: добавляет новые ноды, обновляет ключи, убирает исчезнувшие (порядок и вкл/выкл сохраняются).",
@@ -1752,6 +1797,7 @@ const I18N = {
     modePriHint: "Top-down: the top node is primary, falls through to the next on failure. Drag ⠿ to reorder.",
     modeAutoHint: "Auto-picks the fastest node by ping (re-checked every 5 min). Order is ignored.",
     nodeActive: "active", dragHint: "Drag to reorder", pingAll: "Ping all", subAdded: "nodes added: ", nodeFromSub: "sub:",
+    z2Hint: "🛡 zapret2 detected — the servers of added nodes are auto-added to its exclusions (and to nikki's bypass) so DPI-bypass can't break your VPN.",
     provTitle: "Subscriptions", provNodes: "nodes", provDelConfirm: "Delete the whole subscription? All its nodes go away (they can't be removed individually).",
     subRefresh: "Refresh subscription", subRefreshing: "Refreshing subscription…", subAutoLabel: "Auto-refresh subscriptions",
     subAutoHint: "Periodically re-fetches subscriptions: adds new nodes, updates keys, removes departed ones (order and on/off are preserved).",
@@ -2160,6 +2206,7 @@ async function loadNodes(){
     ul.appendChild(li);
   });
   $("#migrateBtn").hidden = !(d && d.legacy > 0);
+  const z2 = $("#z2Hint"); z2.hidden = !(d && d.zapret2 === 1); if (!z2.hidden) z2.textContent = t("z2Hint");
   const ph = $("#provHead"), pl = $("#provList"); pl.innerHTML = ""; ph.hidden = PROVIDERS.length === 0;
   let hasSub = false;
   PROVIDERS.forEach(p => {

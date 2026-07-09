@@ -56,7 +56,10 @@ a LuCI menu entry to open it.
   schedule) re-syncs them — adding new nodes, updating rotated keys, removing departed ones — while
   keeping your order and enable/disable state. A **Ping all** button probes every exit at once. Each
   node is converted to a mihomo proxy, injected into nikki, and **auto-checked** (latency probe via the
-  mihomo API). A bad config is auto-reverted so it can't break nikki. The **Exits** list unifies your **profile
+  mihomo API). A bad config is auto-reverted so it can't break nikki. If **zapret2** runs alongside, the
+  servers of added/refreshed nodes are auto-added to its exclusions (`zapret-ip-exclude` +
+  `zapret-hosts-user-exclude`) and to nikki's `reserved_ip`, so DPI-desync can't corrupt the router's own
+  connection to your VPN nodes. The **Exits** list unifies your **profile
   nodes** (referenced by name) and your added nodes into one **drag-to-reorder** list, with:
   - a **Priority ↔ Auto** switch — *Priority* (`fallback`) uses the top node and falls through to the
     next on failure (drag to set the order); *Auto* (`url-test`) auto-picks the fastest by ping,
