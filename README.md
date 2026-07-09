@@ -23,22 +23,43 @@ You need a **working VPN in nikki** on your router first. If you don't have nikk
 
 ## Install
 
-Paste this **one line** into your router (over SSH, or your router's terminal) — this is the only
-command you'll ever need:
+Pick whichever is easier for you.
+
+### Option A — from the router's web panel (no command line)
+
+In LuCI go to **System → Software**, then either:
+
+- click **“Upload Package…”** and upload the package file from the
+  [**Releases page**](https://github.com/sketso/nikki-unblock/releases/latest)
+  (`luci-app-nikki-unblock.apk` on OpenWrt 25.12+, or the `.ipk` on older routers); **or**
+- in the **“Download and install package”** field, paste this link and click **OK**:
+
+  ```
+  https://github.com/sketso/nikki-unblock/releases/latest/download/luci-app-nikki-unblock.apk
+  ```
+
+The router will warn it's from an **“untrusted source”** — that's normal (it isn't in OpenWrt's official
+repo). Just confirm.
+
+### Option B — one command (also turns on one-click auto-updates)
 
 ```sh
 wget -O - https://github.com/sketso/nikki-unblock/raw/main/feed.sh | sh
 ```
 
-Then open it in your router's web panel: **LuCI → Services → “nikki · Unblock”**
-(or go to `http://YOUR-ROUTER-IP/nikki`).
+This adds a small **signed** update feed, so new versions later show up right in **LuCI → System →
+Software** and `apk upgrade` works.
 
-That's it. From now on it lives in your web panel, and **updates are one click** — no terminal again.
+---
+
+Either way, open it in your web panel: **LuCI → Services → “nikki · Unblock”**
+(or go to `http://YOUR-ROUTER-IP/nikki`).
 
 ## Updating
 
-- In the app: **Manage** tab → **Update nikki-unblock**.
-- Or in the router panel: **LuCI → System → Software** → find `luci-app-nikki-unblock` → Update.
+- In the app: **Manage** tab → **Update nikki-unblock** (works no matter how you installed).
+- Or in the router panel: **LuCI → System → Software** — if you used Option B it's listed there; with
+  Option A just re-do the upload / paste-link with the newer version.
 
 ## Something not working?
 
