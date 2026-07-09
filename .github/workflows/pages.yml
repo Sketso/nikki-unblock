@@ -39,6 +39,7 @@ jobs:
       - name: Assemble site (applist + apk repo)
         env:
           GH_TOKEN: ${{ github.token }}
+          APK_SIGN_KEY: ${{ secrets.APK_SIGN_KEY }}
         run: |
           set -e
           mkdir -p _site
@@ -50,6 +51,8 @@ jobs:
           # with apk-tools 3.x from Alpine edge (same index format the router's
           # apk-tools 3.0.5 reads). Non-fatal: if it fails, applist still deploys.
           mkdir -p _site/apk
+          # publish the PUBLIC signing key so feed.sh can install it into /etc/apk/keys/
+          cp feed/nikki-unblock.pem _site/apk/nikki-unblock.pem
           if gh release download --repo "$GITHUB_REPOSITORY" \
                -p 'luci-app-nikki-unblock.apk' -D _site/apk 2>/dev/null; then
             # the router fetches packages by their canonical name <pkg>-<version>-r<rel>.apk,
@@ -58,14 +61,23 @@ jobs:
             rel=$(sed -n 's/^PKG_RELEASE:=//p' luci-app-nikki-unblock/Makefile)
             mv _site/apk/luci-app-nikki-unblock.apk \
                "_site/apk/luci-app-nikki-unblock-${ver}-r${rel}.apk"
-            # --allow-untrusted: the .apk is signed with OpenWrt's build key (not in Alpine's
-            # trust store) — this is an untrusted repo by design (feed.sh installs likewise).
-            docker run --rm -v "$PWD/_site/apk:/x" alpine:edge sh -eu -c '
+            # Write the private signing key (from the repo secret) to a file OUTSIDE the published
+            # dir. Its basename is the key id the client looks up in /etc/apk/keys/ — so name it
+            # nikki-unblock.pem to match the public key feed.sh installs.
+            keydir="$RUNNER_TEMP/apk-sign"; mkdir -p "$keydir"
+            printf '%s' "$APK_SIGN_KEY" > "$keydir/nikki-unblock.pem"
+            # --allow-untrusted: read the OpenWrt-signed .apk (its build key isn't in Alpine's trust
+            # store); --sign-key: sign OUR index so the router trusts the repo (no apk-upgrade friction).
+            docker run --rm -v "$PWD/_site/apk:/x" -v "$keydir:/keys:ro" alpine:edge sh -eu -c '
               apk add --no-cache apk-tools >/dev/null
               cd /x
-              apk --allow-untrusted mkndx --output packages.adb *.apk
-              echo "index built:"; ls -l
+              apk --allow-untrusted mkndx --sign-key /keys/nikki-unblock.pem --output packages.adb *.apk
+              echo "index built + signed:"; ls -l
             ' || echo "!! index build failed — /apk/ left without an index this deploy"
+            rm -rf "$keydir"   # never publish the private key
+            # safety: the private key must never reach _site
+            find _site -name '*.pem' -path '*apk*' -exec grep -l "PRIVATE" {} \; | grep -q . && \
+              { echo "FATAL: private key leaked into _site"; exit 1; } || true
           else
             echo "no release .apk yet — /apk/ left empty this deploy"
           fi
