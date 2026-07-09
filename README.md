@@ -14,6 +14,8 @@ You set it up once, then everything is buttons in your router's web panel — no
 - **Add your own sites** — send any domain through the VPN, keep it direct, or block it.
 - **Add your own VPN servers** — paste a subscription link or a `vless://` / WireGuard config; reorder
   them and let it auto-pick the fastest. Import your friends' configs too.
+- **Keep some devices off the VPN** — exclude specific devices (pick them by name) so their traffic
+  goes straight out, not through the tunnel.
 - **One control page** — start/stop the VPN, update with one click, and back up your setup.
 
 ## Before you start

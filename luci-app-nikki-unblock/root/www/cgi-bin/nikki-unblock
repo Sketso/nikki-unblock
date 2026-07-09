@@ -1075,6 +1075,36 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		uci del_list "nikki.proxy.reserved_ip=$ip"; uci commit nikki; apply_nikki
 		json_header; printf '{"ok":true}'; exit 0
 
+	elif [ "$action" = "devexclude" ]; then
+		dip=$(clean_ip "$(get_param ip)" | sed 's#/.*##')   # single source IP, no CIDR
+		case "$dip" in *.*|*:*) ;; *) json_header; printf '{"ok":false,"error":"bad ip"}'; exit 0 ;; esac
+		i=0; dup=0
+		while uci -q get "nikki.@lan_access_control[$i]" >/dev/null 2>&1; do
+			[ "$(uci -q get "nikki.@lan_access_control[$i].ip")" = "$dip" ] && [ "$(uci -q get "nikki.@lan_access_control[$i].proxy")" = 0 ] && dup=1
+			i=$((i + 1))
+		done
+		if [ "$dup" = 0 ]; then
+			uci add nikki lan_access_control >/dev/null
+			uci set "nikki.@lan_access_control[-1].ip=$dip"
+			uci set "nikki.@lan_access_control[-1].proxy=0"
+			uci set "nikki.@lan_access_control[-1].dns=0"
+			uci set "nikki.@lan_access_control[-1].enabled=1"
+			uci commit nikki; apply_nikki
+		fi
+		json_header; printf '{"ok":true,"dup":%s}' "$([ "$dup" = 1 ] && echo true || echo false)"; exit 0
+
+	elif [ "$action" = "devinclude" ]; then
+		dip=$(clean_ip "$(get_param ip)" | sed 's#/.*##')
+		changed=0; i=0
+		while uci -q get "nikki.@lan_access_control[$i]" >/dev/null 2>&1; do
+			if [ "$(uci -q get "nikki.@lan_access_control[$i].ip")" = "$dip" ] && [ "$(uci -q get "nikki.@lan_access_control[$i].proxy")" = 0 ]; then
+				uci delete "nikki.@lan_access_control[$i]"; changed=1; i=0; continue   # indices shift → rescan
+			fi
+			i=$((i + 1))
+		done
+		[ "$changed" = 1 ] && { uci commit nikki; apply_nikki; }
+		json_header; printf '{"ok":true}'; exit 0
+
 	elif [ "$action" = "preset_sync" ]; then
 		id=$(get_param id | sed 's/[^a-z0-9_-]//g')
 		SYNC_ADDED=0; SYNC_REMOVED=0
@@ -1348,8 +1378,45 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 	json_header; printf '{"ok":false,"error":"unknown action"}'; exit 0
 fi
 
+# ---- LAN device exclusions (keep a device's traffic OFF the tunnel, by source IP) ----------
+# Uses nikki's `lan_access_control` (matches by IP only, no MAC): an entry with proxy=0 excludes
+# that device. Device names come from DHCP leases + static hosts so the UI can offer a picker.
+lan_devices() {   # prints "ip<TAB>mac<TAB>name" per known LAN device (static names win)
+	{
+		j=0
+		while uci -q get "dhcp.@host[$j]" >/dev/null 2>&1; do
+			hip=$(uci -q get "dhcp.@host[$j].ip"); hmac=$(uci -q get "dhcp.@host[$j].mac"); hnm=$(uci -q get "dhcp.@host[$j].name")
+			[ -n "$hip" ] && printf '%s\t%s\t%s\n' "$hip" "$hmac" "$hnm"
+			j=$((j + 1))
+		done
+		awk '{ h=$4; if (h=="*") h=""; printf "%s\t%s\t%s\n", $3, $2, h }' /tmp/dhcp.leases 2>/dev/null
+	} | awk -F'\t' '$1!="" && !seen[$1]++'
+}
+devices_json() {
+	json_header
+	_dt="/tmp/nu-dev.$$"; lan_devices > "$_dt" 2>/dev/null
+	exips=" "; exc=""; i=0
+	while uci -q get "nikki.@lan_access_control[$i]" >/dev/null 2>&1; do
+		dip=$(uci -q get "nikki.@lan_access_control[$i].ip"); dpx=$(uci -q get "nikki.@lan_access_control[$i].proxy")
+		if [ -n "$dip" ] && [ "$dpx" = 0 ]; then
+			exips="$exips$dip "
+			dnm=$(awk -F'\t' -v ip="$dip" '$1==ip{print $3; exit}' "$_dt")
+			exc="$exc${exc:+,}{\"ip\":\"$(json_esc "$dip")\",\"name\":\"$(json_esc "$dnm")\"}"
+		fi
+		i=$((i + 1))
+	done
+	known=""
+	while IFS=$(printf '\t') read -r kip kmac knm; do
+		case "$exips" in *" $kip "*) continue ;; esac
+		known="$known${known:+,}{\"ip\":\"$(json_esc "$kip")\",\"mac\":\"$(json_esc "$kmac")\",\"name\":\"$(json_esc "$knm")\"}"
+	done < "$_dt"
+	rm -f "$_dt"
+	printf '{"excluded":[%s],"known":[%s]}' "$exc" "$known"
+}
+
 [ "$API" = "list" ] && { list_json; exit 0; }
 [ "$API" = "iplist" ] && { iplist_json; exit 0; }
+[ "$API" = "devices" ] && { devices_json; exit 0; }
 [ "$API" = "presets" ] && {
 	json_header
 	# `fresh=1` forces a rebuild (manual refresh after editing the applist).
@@ -1545,6 +1612,7 @@ cat <<'HTML'
   <div class="tabs">
     <button class="tab active" data-view="domains" data-i18n="tabDomains"></button>
     <button class="tab" data-view="ips" data-i18n="tabIps"></button>
+    <button class="tab" data-view="devices" data-i18n="tabDevices"></button>
     <button class="tab" data-view="nodes" data-i18n="tabNodes"></button>
     <button class="tab" data-view="mgmt" data-i18n="tabMgmt"></button>
   </div>
@@ -1626,6 +1694,19 @@ cat <<'HTML'
     <div class="msg" id="ipMsg"></div>
     <h3><span data-i18n="exclusions"></span> <span class="count" id="ipCount"></span></h3>
     <ul id="ipList"></ul>
+  </section>
+
+  <!-- ================= DEVICES ================= -->
+  <section class="view" id="view-devices">
+    <div class="hint" data-i18n="devHint"></div>
+    <div class="add">
+      <select id="devPick"><option value="" data-i18n="devPickDefault"></option></select>
+      <input id="devIp" placeholder="192.168.1.50" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <button type="button" id="devBtn" data-i18n="add"></button>
+    </div>
+    <div class="msg" id="devMsg"></div>
+    <h3><span data-i18n="devExcluded"></span> <span class="count" id="devCount"></span></h3>
+    <ul id="devList"></ul>
   </section>
 
   <!-- ================= VPN NODES ================= -->
@@ -1739,7 +1820,9 @@ let RULES = [], PRESETS = [], LANG = "ru";
 const I18N = {
   ru: {
     h1: "nikki · маршрутизация",
-    tabDomains: "Домены в туннель", tabIps: "IP-исключения",
+    tabDomains: "Домены в туннель", tabIps: "IP-исключения", tabDevices: "Устройства",
+    devHint: "Устройства из этого списка ходят в интернет мимо VPN (напрямую). Выбери устройство из списка или впиши его IP. Исключение по IP — чтобы оно не «слетало», закрепи за устройством постоянный адрес (статический DHCP-лиз).",
+    devPickDefault: "— выбрать устройство —", devExcluded: "Мимо VPN (напрямую)",
     add: "Добавить", tType: "тип условия", nAction: "действие",
     tSuffix: "домен+поддомены", tDomain: "точный домен", tKeyword: "подстрока",
     nProxy: "→ VPN", nDirect: "→ напрямую", nReject: "→ блок", nProxyProfile: "→ VPN (профиль)",
@@ -1804,7 +1887,9 @@ const I18N = {
   },
   en: {
     h1: "nikki · routing",
-    tabDomains: "Domains via VPN", tabIps: "IP exclusions",
+    tabDomains: "Domains via VPN", tabIps: "IP exclusions", tabDevices: "Devices",
+    devHint: "Devices in this list reach the internet directly, bypassing the VPN. Pick a device or type its IP. Exclusion is by IP — give the device a fixed address (static DHCP lease) so it doesn't drift.",
+    devPickDefault: "— pick a device —", devExcluded: "Bypass VPN (direct)",
     add: "Add", tType: "match type", nAction: "action",
     tSuffix: "domain + subdomains", tDomain: "exact domain", tKeyword: "keyword",
     nProxy: "→ VPN", nDirect: "→ direct", nReject: "→ block", nProxyProfile: "→ VPN (profile)",
@@ -1908,6 +1993,7 @@ document.querySelectorAll(".tab").forEach(tb => tb.addEventListener("click", () 
   $("#view-" + tb.dataset.view).classList.add("active");
   if (tb.dataset.view === "nodes") loadNodes().then(autoPingNodes);
   else if (tb.dataset.view === "mgmt") loadSvc();
+  else if (tb.dataset.view === "devices") loadDevices();
 }));
 
 /* ---------- domains ---------- */
@@ -2169,6 +2255,45 @@ $("#ipList").addEventListener("click", async e => {
   const res = await api("ipdel", { ip: b.dataset.ip });
   if (res.ok){ setMsg($("#ipMsg"), t("done")); loadIps(); }
   else { setMsg($("#ipMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
+});
+
+/* ---------- devices excluded from the tunnel ---------- */
+let DEVICES = { excluded: [], known: [] };
+async function loadDevices(){
+  try { DEVICES = await (await fetch("?api=devices")).json(); } catch(e){ DEVICES = { excluded: [], known: [] }; }
+  renderDevices();
+}
+function renderDevices(){
+  const pick = $("#devPick");
+  pick.innerHTML = '<option value="">' + escH(t("devPickDefault")) + '</option>' +
+    (DEVICES.known || []).map(d => '<option value="' + escH(d.ip) + '">' +
+      escH((d.name ? d.name + " — " : "") + d.ip + (d.mac ? " · " + d.mac : "")) + '</option>').join("");
+  const ul = $("#devList"); ul.innerHTML = "";
+  const exc = DEVICES.excluded || [];
+  $("#devCount").textContent = "(" + exc.length + ")";
+  exc.forEach(d => {
+    const li = document.createElement("li");
+    li.innerHTML = '<span class="dom">' + escH(d.name || d.ip) + (d.name ? ' <span class="meta">' + escH(d.ip) + '</span>' : '') + '</span>' +
+      '<button class="ghost" data-devip="' + escH(d.ip) + '">✕</button>';
+    ul.appendChild(li);
+  });
+}
+$("#devPick").addEventListener("change", e => { if (e.target.value) $("#devIp").value = e.target.value; });
+$("#devBtn").addEventListener("click", async () => {
+  const ip = $("#devIp").value.trim(); if (!ip) return;
+  $("#devBtn").disabled = true; setMsg($("#devMsg"), t("applying")); showOverlay(t("applying"));
+  const res = await api("devexclude", { ip });
+  $("#devBtn").disabled = false; hideOverlay();
+  if (res.ok){ setMsg($("#devMsg"), res.dup ? t("dup") : t("done")); $("#devIp").value = ""; $("#devPick").value = ""; loadDevices(); }
+  else setMsg($("#devMsg"), t("errP") + (res.error || "?"), false);
+});
+$("#devList").addEventListener("click", async e => {
+  const b = e.target.closest("button"); if (!b) return;
+  b.disabled = true; setMsg($("#devMsg"), t("removing")); showOverlay(t("removing"));
+  const res = await api("devinclude", { ip: b.dataset.devip });
+  hideOverlay();
+  if (res.ok){ setMsg($("#devMsg"), t("done")); loadDevices(); }
+  else { setMsg($("#devMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
 });
 
 /* ---------- presets + autosync loaders ---------- */
@@ -2518,7 +2643,7 @@ $("#updAll").addEventListener("click", () => doUpdate("all"));
   // essentials first (presets is the slow fetch); drop the overlay once the Domains view is ready
   await Promise.allSettled([loadDomains(), loadPresets()]);
   hideOverlay();
-  loadIps(); loadAutosync(); loadNodes(); loadSvc(); loadVersions(); loadBackup();
+  loadIps(); loadDevices(); loadAutosync(); loadNodes(); loadSvc(); loadVersions(); loadBackup();
   // resume the log view if an update is already running (started from another tab/session)
   try { const s = await (await fetch("?api=updatestatus")).json(); if (s && s.running) pollUpdate(); } catch(e){}
 })();
