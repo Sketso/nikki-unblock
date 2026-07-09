@@ -5,8 +5,8 @@
 [ -f /www/cgi-bin/nikki-unblock ] && chmod 0755 /www/cgi-bin/nikki-unblock
 
 # node store for the VPN-nodes tab (root-only; holds keys)
-mkdir -p /etc/nikki-unblock/nodes /etc/nikki-unblock/providers /etc/nikki-unblock/subs
-chmod 700 /etc/nikki-unblock /etc/nikki-unblock/nodes /etc/nikki-unblock/providers /etc/nikki-unblock/subs 2>/dev/null
+mkdir -p /etc/nikki-unblock/nodes /etc/nikki-unblock/providers /etc/nikki-unblock/subs /etc/nikki-unblock/backups
+chmod 700 /etc/nikki-unblock /etc/nikki-unblock/nodes /etc/nikki-unblock/providers /etc/nikki-unblock/subs /etc/nikki-unblock/backups 2>/dev/null
 
 # Seed the config section if it is somehow missing (the shipped /etc/config/nikki-unblock covers this).
 if ! uci -q get nikki-unblock.config >/dev/null 2>&1; then

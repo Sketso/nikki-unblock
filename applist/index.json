@@ -15,6 +15,7 @@
   { "id": "github",   "name": "GitHub",               "geosite": "github" },
   { "id": "reddit",   "name": "Reddit",               "geosite": "reddit" },
   { "id": "torrents", "name": "Torrents (list)" },
-  { "id": "social",   "name": "Social (list)" },
+  { "id": "social",   "name": "Соцсети — все",         "list": true,
+    "geosites": ["twitter","facebook","tiktok"], "geoips": ["twitter","facebook"] },
   { "id": "ads",      "name": "Ads → block",          "geosite": "category-ads-all", "node": "REJECT" }
 ]
