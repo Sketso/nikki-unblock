@@ -58,10 +58,12 @@ jobs:
             rel=$(sed -n 's/^PKG_RELEASE:=//p' luci-app-nikki-unblock/Makefile)
             mv _site/apk/luci-app-nikki-unblock.apk \
                "_site/apk/luci-app-nikki-unblock-${ver}-r${rel}.apk"
+            # --allow-untrusted: the .apk is signed with OpenWrt's build key (not in Alpine's
+            # trust store) — this is an untrusted repo by design (feed.sh installs likewise).
             docker run --rm -v "$PWD/_site/apk:/x" alpine:edge sh -eu -c '
               apk add --no-cache apk-tools >/dev/null
               cd /x
-              apk mkndx --output packages.adb *.apk
+              apk --allow-untrusted mkndx --output packages.adb *.apk
               echo "index built:"; ls -l
             ' || echo "!! index build failed — /apk/ left without an index this deploy"
           else
