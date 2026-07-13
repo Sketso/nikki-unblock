@@ -788,9 +788,27 @@ z2status_json() {
 	printf '{"present":%d,"running":%d,"boot":%d,"autohostlist":%d,"user_count":%s,"auto_count":%s}' \
 		"$pr" "$rn" "$bt" "$ah" "$(z2_count "$Z2_USER")" "$(z2_count "$Z2_AUTO")"
 }
+# hostnames auto-added to the exclude list to protect VPN nodes (protect_server) — must stay
+z2_node_hosts() {
+	for f in "$NODES_DIR"/*.yaml; do
+		[ -f "$f" ] || continue
+		s=$(grep -m1 'server:' "$f" | sed 's/.*server:[[:space:]]*//; s/[[:space:]]*$//')
+		case "$s" in *[a-zA-Z]*) echo "$s" ;; esac
+	done
+}
 z2hosts_json() {
 	json_header
-	printf '{"user":[%s],"auto":[%s]}' "$(z2_list_json "$Z2_USER")" "$(z2_list_json "$Z2_AUTO")"
+	_nh=" $(z2_node_hosts | tr '\n' ' ')"
+	exc=""
+	if [ -f "$Z2_HOSTX" ]; then
+		while IFS= read -r line; do
+			d=$(printf '%s' "$line" | sed 's/\r$//; s/[ \t]//g'); [ -z "$d" ] && continue
+			case "$d" in \#*) continue ;; esac
+			sys=0; case "$_nh" in *" $d "*) sys=1 ;; esac   # VPN-node protection = don't let the user delete it
+			exc="$exc${exc:+,}{\"d\":\"$(json_esc "$d")\",\"sys\":$sys}"
+		done < "$Z2_HOSTX"
+	fi
+	printf '{"user":[%s],"auto":[%s],"exclude":[%s]}' "$(z2_list_json "$Z2_USER")" "$(z2_list_json "$Z2_AUTO")" "$exc"
 }
 
 # ---- backup / restore ------------------------------------------------------
@@ -1181,6 +1199,18 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		touch "$Z2_HOSTX"; grep -qxF "$d" "$Z2_HOSTX" 2>/dev/null || echo "$d" >> "$Z2_HOSTX"
 		[ -f "$Z2_AUTO" ] && { grep -vxF "$d" "$Z2_AUTO" > "$Z2_AUTO.tmp" 2>/dev/null; mv "$Z2_AUTO.tmp" "$Z2_AUTO"; }
 		/etc/init.d/zapret2 reload >/dev/null 2>&1
+		json_header; printf '{"ok":true}'; exit 0
+
+	elif [ "$action" = "z2unexclude" ]; then
+		# remove a domain from the exclude "banlist" — but never a VPN-node protection
+		d=$(printf '%s' "$(get_param domain)" | parse_domains | head -1)
+		if [ -n "$d" ] && z2_node_hosts | grep -qxF "$d"; then
+			json_header; printf '{"ok":false,"error":"protected"}'; exit 0
+		fi
+		if [ -n "$d" ] && [ -f "$Z2_HOSTX" ]; then
+			grep -vxF "$d" "$Z2_HOSTX" > "$Z2_HOSTX.tmp" 2>/dev/null; mv "$Z2_HOSTX.tmp" "$Z2_HOSTX"
+			/etc/init.d/zapret2 reload >/dev/null 2>&1
+		fi
 		json_header; printf '{"ok":true}'; exit 0
 
 	elif [ "$action" = "z2autoclear" ]; then
@@ -1887,6 +1917,11 @@ cat <<'HTML'
         <ul id="z2AutoList" hidden></ul>
         <div class="msg" id="z2AutoMsg"></div>
       </div>
+
+      <h3><span data-i18n="z2Excluded"></span> <span class="count" id="z2ExCount"></span></h3>
+      <div class="hint" data-i18n="z2ExHint"></div>
+      <ul id="z2ExList"></ul>
+      <div class="msg" id="z2ExMsg"></div>
     </div>
   </section>
 
@@ -1969,6 +2004,7 @@ const I18N = {
     z2AutoTitle: "Автообучение (autohostlist)", z2AutoLabel: "Zapret2 сам находит заблокированные домены",
     z2AutoHint: "Zapret2 отслеживает неудачные соединения и сам добавляет заблокированные домены в обход. Обычно достаточно этого; ручной список — для точечных случаев.",
     z2AutoView: "Показать список", z2AutoClear: "Очистить список", z2ClearConfirm: "Очистить весь список автообучения?", z2NoBypass: "Не пробивать этот домен",
+    z2Excluded: "Исключения (не пробивать)", z2ExHint: "Домены, которые zapret2 НИКОГДА не трогает (проверяются первыми). Сюда попадают твои «баны» из автолиста и авто-защита серверов VPN-нод (её удалить нельзя).",
     noEngines: "Ни nikki (VPN), ни zapret2 не установлены — управлять нечем. Поставь хотя бы один.",
     devHint: "Устройства из этого списка ходят в интернет мимо VPN (напрямую). Выбери устройство из списка или впиши его IP. Исключение по IP — чтобы оно не «слетало», закрепи за устройством постоянный адрес (статический DHCP-лиз).",
     devPickDefault: "— выбрать устройство —", devExcluded: "Мимо VPN (напрямую)",
@@ -2044,6 +2080,7 @@ const I18N = {
     z2AutoTitle: "Auto-learning (autohostlist)", z2AutoLabel: "Zapret2 finds blocked domains itself",
     z2AutoHint: "Zapret2 watches for failed connections and auto-adds blocked domains to the bypass. Usually enough on its own; the manual list is for specific cases.",
     z2AutoView: "Show list", z2AutoClear: "Clear list", z2ClearConfirm: "Clear the whole auto-learned list?", z2NoBypass: "Don't bypass this domain",
+    z2Excluded: "Exclusions (never bypass)", z2ExHint: "Domains zapret2 NEVER touches (checked first). This holds your \"bans\" from the auto-list plus the automatic protection of your VPN-node servers (which you can't remove).",
     noEngines: "Neither nikki (VPN) nor zapret2 is installed — nothing to manage. Install at least one.",
     devHint: "Devices in this list reach the internet directly, bypassing the VPN. Pick a device or type its IP. Exclusion is by IP — give the device a fixed address (static DHCP lease) so it doesn't drift.",
     devPickDefault: "— pick a device —", devExcluded: "Bypass VPN (direct)",
@@ -2493,6 +2530,12 @@ function renderZ2(){
     ul.appendChild(li); });
   $("#z2AutoCount").textContent = "(" + (Z2HOSTS.auto || []).length + ")";
   if (!$("#z2AutoList").hidden) renderZ2Auto();
+  const ex = Z2HOSTS.exclude || []; $("#z2ExCount").textContent = "(" + ex.length + ")";
+  const el = $("#z2ExList"); el.innerHTML = "";
+  ex.forEach(x => { const li = document.createElement("li");
+    li.innerHTML = '<span class="dom">' + escH(x.d) + '</span>' +
+      (x.sys ? '<span class="badge">' + t("system") + '</span>' : '<button class="ghost" data-z2unex="' + escH(x.d) + '">✕</button>');
+    el.appendChild(li); });
 }
 function renderZ2Auto(){
   const ul = $("#z2AutoList"); ul.innerHTML = "";
@@ -2553,6 +2596,14 @@ $("#z2AutoList").addEventListener("click", async e => {
   hideOverlay();
   if (res.ok){ setMsg($("#z2AutoMsg"), t("done")); loadZapret2(); }
   else { setMsg($("#z2AutoMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
+});
+$("#z2ExList").addEventListener("click", async e => {
+  const b = e.target.closest("button[data-z2unex]"); if (!b) return;
+  b.disabled = true; showOverlay(t("removing")); setMsg($("#z2ExMsg"), t("removing"));
+  const res = await api("z2unexclude", { domain: b.dataset.z2unex });
+  hideOverlay();
+  if (res.ok){ setMsg($("#z2ExMsg"), t("done")); loadZapret2(); }
+  else { setMsg($("#z2ExMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
 });
 
 /* ---------- presets + autosync loaders ---------- */
