@@ -237,7 +237,10 @@ presets_json() {
 config_json() {
 	json_header
 	lang=$(uci -q get nikki-unblock.config.lang 2>/dev/null); [ -z "$lang" ] && lang=ru
-	printf '{"lang":"%s","applist":"%s","exit_group":"%s"}' "$lang" "$APPLIST_URL" "$EXIT_GROUP"
+	nk=0; nikki_present && nk=1
+	z2=0; zapret2_present && z2=1
+	printf '{"lang":"%s","applist":"%s","exit_group":"%s","nikki":%d,"zapret2":%d}' \
+		"$lang" "$APPLIST_URL" "$EXIT_GROUP" "$nk" "$z2"
 }
 
 apply_nikki() { /etc/init.d/nikki reload >/dev/null 2>&1; }
@@ -717,7 +720,12 @@ subauto_json() {
 # (so mihomo never routes a node's IP back through the VPN — a loop). No-op if zapret2 isn't present.
 Z2_IPX="/opt/zapret2/ipset/zapret-ip-exclude.txt"
 Z2_HOSTX="/opt/zapret2/ipset/zapret-hosts-user-exclude.txt"
+Z2_USER="/opt/zapret2/ipset/zapret-hosts-user.txt"     # manual DPI-bypass domains (the "add a domain" file)
+Z2_AUTO="/opt/zapret2/ipset/zapret-hosts-auto.txt"     # auto-learned (autohostlist)
+Z2_CONFIG="/opt/zapret2/config"                        # shell-var config (MODE_FILTER, NFQWS2_OPT, …)
 zapret2_present() { [ -x /etc/init.d/zapret2 ] && [ -d /opt/zapret2 ]; }
+# Nipret is a combine: nikki (Mihomo VPN) and zapret2 (DPI-bypass) are independent; either may be absent.
+nikki_present() { [ -x /etc/init.d/nikki ] && [ -x /usr/bin/mihomo ]; }
 # resolve a host to IPv4(s); if it's already an IP, echo it as-is
 host_ips() {
 	case "$1" in
@@ -748,6 +756,39 @@ protect_all_nodes() {
 		/etc/init.d/zapret2 restart_daemons >/dev/null 2>&1
 		[ -x /opt/zapret2/ipset/get_exclude.sh ] && /opt/zapret2/ipset/get_exclude.sh >/dev/null 2>&1
 	fi
+}
+
+# ---- zapret2 management (feature #1) ----------------------------------------
+z2_running() { pgrep -f nfqws2 >/dev/null 2>&1; }
+z2_autohostlist() { grep -qE '^[[:space:]]*MODE_FILTER=["'\'']?autohostlist' "$Z2_CONFIG" 2>/dev/null; }
+# Adding a domain to the user hostlist: reload (SIGHUP) if the running daemon already references it,
+# else restart to wire --hostlist= into its args (the file didn't exist at launch). See list.sh.
+z2_apply_hosts() {
+	_p=$(pgrep -f nfqws2 2>/dev/null | head -1)
+	if [ -n "$_p" ] && tr '\000' '\n' < "/proc/$_p/cmdline" 2>/dev/null | grep -qF "$Z2_USER"; then
+		/etc/init.d/zapret2 reload >/dev/null 2>&1
+	else
+		/etc/init.d/zapret2 restart >/dev/null 2>&1
+	fi
+}
+z2_count() { [ -f "$1" ] && grep -cvE '^[[:space:]]*($|#)' "$1" 2>/dev/null || echo 0; }
+# comma-separated JSON strings of clean domain lines from a hostlist file
+z2_list_json() {
+	[ -f "$1" ] || return 0
+	awk '{ sub(/\r$/,""); gsub(/[ \t]/,""); if ($0=="" || substr($0,1,1)=="#") next; printf "%s\"%s\"", sep, tolower($0); sep="," }' "$1"
+}
+z2status_json() {
+	json_header
+	pr=0; zapret2_present && pr=1
+	rn=0; z2_running && rn=1
+	bt=0; /etc/init.d/zapret2 enabled 2>/dev/null && bt=1
+	ah=0; z2_autohostlist && ah=1
+	printf '{"present":%d,"running":%d,"boot":%d,"autohostlist":%d,"user_count":%s,"auto_count":%s}' \
+		"$pr" "$rn" "$bt" "$ah" "$(z2_count "$Z2_USER")" "$(z2_count "$Z2_AUTO")"
+}
+z2hosts_json() {
+	json_header
+	printf '{"user":[%s],"auto":[%s]}' "$(z2_list_json "$Z2_USER")" "$(z2_list_json "$Z2_AUTO")"
 }
 
 # ---- backup / restore ------------------------------------------------------
@@ -1105,6 +1146,52 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		[ "$changed" = 1 ] && { uci commit nikki; apply_nikki; }
 		json_header; printf '{"ok":true}'; exit 0
 
+	elif [ "$action" = "z2svc" ]; then
+		op=$(get_param op)
+		case "$op" in
+			start|stop|restart|reload|enable|disable) /etc/init.d/zapret2 "$op" >/dev/null 2>&1 ;;
+			*) json_header; printf '{"ok":false,"error":"bad op"}'; exit 0 ;;
+		esac
+		case "$op" in start|stop|restart|reload) sleep 2 ;; esac
+		rn=0; z2_running && rn=1; bt=0; /etc/init.d/zapret2 enabled 2>/dev/null && bt=1
+		json_header; printf '{"ok":true,"running":%d,"boot":%d}' "$rn" "$bt"; exit 0
+
+	elif [ "$action" = "z2hostadd" ]; then
+		d=$(printf '%s' "$(get_param domain)" | parse_domains | head -1)
+		[ -z "$d" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
+		touch "$Z2_USER"
+		if grep -qxF "$d" "$Z2_USER" 2>/dev/null; then json_header; printf '{"ok":true,"dup":true}'; exit 0; fi
+		echo "$d" >> "$Z2_USER"; z2_apply_hosts
+		json_header; printf '{"ok":true}'; exit 0
+
+	elif [ "$action" = "z2hostdel" ]; then
+		d=$(printf '%s' "$(get_param domain)" | parse_domains | head -1)
+		if [ -n "$d" ] && [ -f "$Z2_USER" ]; then
+			grep -vxF "$d" "$Z2_USER" > "$Z2_USER.tmp" 2>/dev/null; mv "$Z2_USER.tmp" "$Z2_USER"; z2_apply_hosts
+		fi
+		json_header; printf '{"ok":true}'; exit 0
+
+	elif [ "$action" = "z2exclude" ]; then
+		# "don't bypass" an auto-learned domain → add to zapret2's user-exclude list (already wired)
+		d=$(printf '%s' "$(get_param domain)" | parse_domains | head -1)
+		[ -z "$d" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
+		touch "$Z2_HOSTX"; grep -qxF "$d" "$Z2_HOSTX" 2>/dev/null || echo "$d" >> "$Z2_HOSTX"
+		/etc/init.d/zapret2 reload >/dev/null 2>&1
+		json_header; printf '{"ok":true}'; exit 0
+
+	elif [ "$action" = "z2autoclear" ]; then
+		: > "$Z2_AUTO" 2>/dev/null; /etc/init.d/zapret2 reload >/dev/null 2>&1
+		json_header; printf '{"ok":true}'; exit 0
+
+	elif [ "$action" = "z2autotoggle" ]; then
+		on=$(get_param on | sed 's/[^01]//g')
+		[ -f "$Z2_CONFIG" ] || { json_header; printf '{"ok":false,"error":"no config"}'; exit 0; }
+		cp "$Z2_CONFIG" "$Z2_CONFIG.nipret.bak" 2>/dev/null
+		if [ "$on" = 1 ]; then _mf=autohostlist; else _mf=hostlist; fi
+		sed -i "s/^\([[:space:]]*MODE_FILTER=\).*/\1$_mf/" "$Z2_CONFIG"
+		/etc/init.d/zapret2 restart >/dev/null 2>&1
+		json_header; printf '{"ok":true,"autohostlist":%s}' "$([ "$on" = 1 ] && echo 1 || echo 0)"; exit 0
+
 	elif [ "$action" = "preset_sync" ]; then
 		id=$(get_param id | sed 's/[^a-z0-9_-]//g')
 		SYNC_ADDED=0; SYNC_REMOVED=0
@@ -1417,6 +1504,8 @@ devices_json() {
 [ "$API" = "list" ] && { list_json; exit 0; }
 [ "$API" = "iplist" ] && { iplist_json; exit 0; }
 [ "$API" = "devices" ] && { devices_json; exit 0; }
+[ "$API" = "z2status" ] && { z2status_json; exit 0; }
+[ "$API" = "z2hosts" ] && { z2hosts_json; exit 0; }
 [ "$API" = "presets" ] && {
 	json_header
 	# `fresh=1` forces a rebuild (manual refresh after editing the applist).
@@ -1614,6 +1703,7 @@ cat <<'HTML'
     <button class="tab" data-view="ips" data-i18n="tabIps"></button>
     <button class="tab" data-view="devices" data-i18n="tabDevices"></button>
     <button class="tab" data-view="nodes" data-i18n="tabNodes"></button>
+    <button class="tab" data-view="zapret2" data-i18n="tabZapret2"></button>
     <button class="tab" data-view="mgmt" data-i18n="tabMgmt"></button>
   </div>
 
@@ -1749,6 +1839,53 @@ cat <<'HTML'
     <div class="msg" id="subMsg"></div>
   </section>
 
+  <!-- ================= ZAPRET2 (DPI bypass) ================= -->
+  <section class="view" id="view-zapret2">
+    <div class="hint" data-i18n="z2ManageHint"></div>
+    <div class="banner" id="z2NotInstalled" hidden data-i18n="z2NotInstalled"></div>
+    <div id="z2Panel">
+      <div class="svc">
+        <div class="swrow">
+          <span class="swlabel"><span class="dot" id="z2Dot"></span><span id="z2State">…</span></span>
+          <label class="sw"><input type="checkbox" id="z2Run"><span class="sl"></span></label>
+        </div>
+        <div class="swrow">
+          <span class="swlabel" data-i18n="svcBoot"></span>
+          <label class="sw"><input type="checkbox" id="z2Boot"><span class="sl"></span></label>
+        </div>
+        <div class="btns">
+          <button type="button" class="ghost" id="z2Restart" data-i18n="svcRestart"></button>
+          <button type="button" class="ghost" id="z2Reload" data-i18n="svcReload"></button>
+        </div>
+        <div class="msg" id="z2Msg"></div>
+      </div>
+
+      <h3><span data-i18n="z2Domains"></span> <span class="count" id="z2UserCount"></span></h3>
+      <div class="hint" data-i18n-html="z2AddHint"></div>
+      <form class="add" id="z2Form">
+        <input id="z2Domain" placeholder="youtube.com" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+        <button type="submit" id="z2Btn" data-i18n="add"></button>
+      </form>
+      <div class="msg" id="z2DomMsg"></div>
+      <ul id="z2UserList"></ul>
+
+      <div class="svc upd">
+        <h3 data-i18n="z2AutoTitle"></h3>
+        <div class="swrow">
+          <span class="swlabel" data-i18n="z2AutoLabel"></span>
+          <label class="sw"><input type="checkbox" id="z2AutoChk"><span class="sl"></span></label>
+        </div>
+        <div class="hint" data-i18n="z2AutoHint"></div>
+        <div class="btns">
+          <button type="button" class="ghost" id="z2AutoView"><span data-i18n="z2AutoView"></span> <span class="count" id="z2AutoCount"></span></button>
+          <button type="button" class="ghost" id="z2AutoClear" data-i18n="z2AutoClear"></button>
+        </div>
+        <ul id="z2AutoList" hidden></ul>
+        <div class="msg" id="z2AutoMsg"></div>
+      </div>
+    </div>
+  </section>
+
   <!-- ================= MANAGEMENT ================= -->
   <section class="view" id="view-mgmt">
     <div class="svc">
@@ -1820,7 +1957,15 @@ let RULES = [], PRESETS = [], LANG = "ru";
 const I18N = {
   ru: {
     h1: "nikki · маршрутизация",
-    tabDomains: "Домены в туннель", tabIps: "IP-исключения", tabDevices: "Устройства",
+    tabDomains: "Домены в туннель", tabIps: "IP-исключения", tabDevices: "Устройства", tabZapret2: "Обход DPI",
+    z2ManageHint: "Zapret2 обходит блокировки провайдера на уровне DPI (без VPN) — для сайтов, которые режут «изнутри» (YouTube и т.п.). Управляй сервисом и списком доменов для обхода.",
+    z2NotInstalled: "Zapret2 не установлен на этом роутере — управлять нечем. Раздел появится, когда он будет установлен.",
+    z2On: "zapret2 работает", z2Off: "zapret2 остановлен",
+    z2Domains: "Домены для обхода DPI", z2AddHint: "Домен, который zapret2 будет пробивать через DPI. Пиши как <code>youtube.com</code> — подходит и для поддоменов.",
+    z2AutoTitle: "Автообучение (autohostlist)", z2AutoLabel: "Zapret2 сам находит заблокированные домены",
+    z2AutoHint: "Zapret2 отслеживает неудачные соединения и сам добавляет заблокированные домены в обход. Обычно достаточно этого; ручной список — для точечных случаев.",
+    z2AutoView: "Показать список", z2AutoClear: "Очистить список", z2ClearConfirm: "Очистить весь список автообучения?", z2NoBypass: "Не пробивать этот домен",
+    noEngines: "Ни nikki (VPN), ни zapret2 не установлены — управлять нечем. Поставь хотя бы один.",
     devHint: "Устройства из этого списка ходят в интернет мимо VPN (напрямую). Выбери устройство из списка или впиши его IP. Исключение по IP — чтобы оно не «слетало», закрепи за устройством постоянный адрес (статический DHCP-лиз).",
     devPickDefault: "— выбрать устройство —", devExcluded: "Мимо VPN (напрямую)",
     add: "Добавить", tType: "тип условия", nAction: "действие",
@@ -1887,7 +2032,15 @@ const I18N = {
   },
   en: {
     h1: "nikki · routing",
-    tabDomains: "Domains via VPN", tabIps: "IP exclusions", tabDevices: "Devices",
+    tabDomains: "Domains via VPN", tabIps: "IP exclusions", tabDevices: "Devices", tabZapret2: "DPI bypass",
+    z2ManageHint: "Zapret2 defeats ISP DPI blocking (no VPN) — for sites throttled/blocked \"from inside\" (YouTube, etc.). Control the service and the list of domains to bypass.",
+    z2NotInstalled: "Zapret2 isn't installed on this router — nothing to manage. This section appears once it's installed.",
+    z2On: "zapret2 running", z2Off: "zapret2 stopped",
+    z2Domains: "Domains to DPI-bypass", z2AddHint: "A domain zapret2 will push through DPI. Type it like <code>youtube.com</code> — also covers subdomains.",
+    z2AutoTitle: "Auto-learning (autohostlist)", z2AutoLabel: "Zapret2 finds blocked domains itself",
+    z2AutoHint: "Zapret2 watches for failed connections and auto-adds blocked domains to the bypass. Usually enough on its own; the manual list is for specific cases.",
+    z2AutoView: "Show list", z2AutoClear: "Clear list", z2ClearConfirm: "Clear the whole auto-learned list?", z2NoBypass: "Don't bypass this domain",
+    noEngines: "Neither nikki (VPN) nor zapret2 is installed — nothing to manage. Install at least one.",
     devHint: "Devices in this list reach the internet directly, bypassing the VPN. Pick a device or type its IP. Exclusion is by IP — give the device a fixed address (static DHCP lease) so it doesn't drift.",
     devPickDefault: "— pick a device —", devExcluded: "Bypass VPN (direct)",
     add: "Add", tType: "match type", nAction: "action",
@@ -1994,6 +2147,7 @@ document.querySelectorAll(".tab").forEach(tb => tb.addEventListener("click", () 
   if (tb.dataset.view === "nodes") loadNodes().then(autoPingNodes);
   else if (tb.dataset.view === "mgmt") loadSvc();
   else if (tb.dataset.view === "devices") loadDevices();
+  else if (tb.dataset.view === "zapret2") loadZapret2();
 }));
 
 /* ---------- domains ---------- */
@@ -2294,6 +2448,107 @@ $("#devList").addEventListener("click", async e => {
   hideOverlay();
   if (res.ok){ setMsg($("#devMsg"), t("done")); loadDevices(); }
   else { setMsg($("#devMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
+});
+
+/* ---------- combine capability gating (nikki / zapret2 present?) ---------- */
+let CAPS = { nikki: true, zapret2: true };
+function applyCaps(){
+  // nikki drives Domains/IPs/Devices/Nodes + the nikki service block in Manage
+  ["domains","ips","devices","nodes"].forEach(v => {
+    const b = document.querySelector('.tab[data-view="' + v + '"]'); if (b) b.hidden = !CAPS.nikki;
+  });
+  const z2b = document.querySelector('.tab[data-view="zapret2"]'); if (z2b) z2b.hidden = !CAPS.zapret2;
+  const svc = document.querySelector('#view-mgmt .svc'); if (svc) svc.style.display = CAPS.nikki ? "" : "none";
+  // if the active tab got hidden, jump to the first visible one
+  const active = document.querySelector('.tab.active');
+  if (active && active.hidden){ const first = document.querySelector('.tab:not([hidden])'); if (first) first.click(); }
+  // neither engine installed → tell the user via the top banner
+  if (!CAPS.nikki && !CAPS.zapret2){ const g = $("#guard"); if (g){ g.textContent = t("noEngines"); g.hidden = false; } }
+}
+
+/* ---------- zapret2 (DPI bypass) management ---------- */
+let Z2 = { present: 0, running: 0, boot: 0, autohostlist: 0 };
+let Z2HOSTS = { user: [], auto: [] };
+async function loadZapret2(){
+  try { Z2 = await (await fetch("?api=z2status")).json(); } catch(e){ Z2 = { present: 0 }; }
+  $("#z2NotInstalled").hidden = Z2.present === 1;
+  $("#z2Panel").hidden = Z2.present !== 1;
+  if (Z2.present !== 1) return;
+  try { Z2HOSTS = await (await fetch("?api=z2hosts")).json(); } catch(e){ Z2HOSTS = { user: [], auto: [] }; }
+  renderZ2();
+}
+function renderZ2(){
+  const run = Z2.running === 1;
+  $("#z2Dot").className = "dot " + (run ? "up" : "down");
+  $("#z2State").textContent = run ? t("z2On") : t("z2Off");
+  $("#z2Run").checked = run; $("#z2Boot").checked = Z2.boot === 1; $("#z2AutoChk").checked = Z2.autohostlist === 1;
+  const ul = $("#z2UserList"); ul.innerHTML = "";
+  const u = Z2HOSTS.user || []; $("#z2UserCount").textContent = "(" + u.length + ")";
+  u.forEach(d => { const li = document.createElement("li");
+    li.innerHTML = '<span class="dom">' + escH(d) + '</span><button class="ghost" data-z2del="' + escH(d) + '">✕</button>';
+    ul.appendChild(li); });
+  $("#z2AutoCount").textContent = "(" + (Z2HOSTS.auto || []).length + ")";
+  if (!$("#z2AutoList").hidden) renderZ2Auto();
+}
+function renderZ2Auto(){
+  const ul = $("#z2AutoList"); ul.innerHTML = "";
+  (Z2HOSTS.auto || []).forEach(d => { const li = document.createElement("li");
+    li.innerHTML = '<span class="dom">' + escH(d) + '</span><button class="ghost" data-z2exclude="' + escH(d) + '" title="' + escH(t("z2NoBypass")) + '">✕</button>';
+    ul.appendChild(li); });
+}
+async function z2Do(op, el){
+  el.disabled = true; showOverlay(t("applying")); setMsg($("#z2Msg"), t("applying"));
+  let s; try { s = await api("z2svc", { op }); } catch(e){ s = {}; }
+  hideOverlay(); el.disabled = false;
+  if (s && s.ok) setMsg($("#z2Msg"), t("done")); else setMsg($("#z2Msg"), t("errP") + ((s && s.error) || "?"), false);
+  loadZapret2();
+}
+$("#z2Run").addEventListener("change", e => z2Do(e.currentTarget.checked ? "start" : "stop", e.currentTarget));
+$("#z2Boot").addEventListener("change", e => z2Do(e.currentTarget.checked ? "enable" : "disable", e.currentTarget));
+$("#z2Restart").addEventListener("click", e => z2Do("restart", e.currentTarget));
+$("#z2Reload").addEventListener("click", e => z2Do("reload", e.currentTarget));
+$("#z2Form").addEventListener("submit", async e => {
+  e.preventDefault(); const d = $("#z2Domain").value.trim(); if (!d) return;
+  $("#z2Btn").disabled = true; showOverlay(t("applying")); setMsg($("#z2DomMsg"), t("applying"));
+  const res = await api("z2hostadd", { domain: d });
+  hideOverlay(); $("#z2Btn").disabled = false;
+  if (res.ok){ setMsg($("#z2DomMsg"), res.dup ? t("dup") : t("done")); $("#z2Domain").value = ""; loadZapret2(); }
+  else setMsg($("#z2DomMsg"), t("errP") + (res.error || "?"), false);
+});
+$("#z2UserList").addEventListener("click", async e => {
+  const b = e.target.closest("button[data-z2del]"); if (!b) return;
+  b.disabled = true; showOverlay(t("removing")); setMsg($("#z2DomMsg"), t("removing"));
+  const res = await api("z2hostdel", { domain: b.dataset.z2del });
+  hideOverlay();
+  if (res.ok){ setMsg($("#z2DomMsg"), t("done")); loadZapret2(); }
+  else { setMsg($("#z2DomMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
+});
+$("#z2AutoChk").addEventListener("change", async e => {
+  const on = e.currentTarget.checked ? 1 : 0;
+  e.currentTarget.disabled = true; showOverlay(t("applying")); setMsg($("#z2AutoMsg"), t("applying"));
+  const res = await api("z2autotoggle", { on });
+  hideOverlay(); e.currentTarget.disabled = false;
+  if (res && res.ok) setMsg($("#z2AutoMsg"), t("done")); else setMsg($("#z2AutoMsg"), t("errP") + ((res && res.error) || "?"), false);
+  loadZapret2();
+});
+$("#z2AutoView").addEventListener("click", () => {
+  const ul = $("#z2AutoList"); if (ul.hidden){ renderZ2Auto(); ul.hidden = false; } else ul.hidden = true;
+});
+$("#z2AutoClear").addEventListener("click", async e => {
+  if (!confirm(t("z2ClearConfirm"))) return;
+  e.currentTarget.disabled = true; showOverlay(t("applying")); setMsg($("#z2AutoMsg"), t("applying"));
+  const res = await api("z2autoclear", {});
+  hideOverlay(); e.currentTarget.disabled = false;
+  if (res.ok){ setMsg($("#z2AutoMsg"), t("done")); loadZapret2(); }
+  else setMsg($("#z2AutoMsg"), t("errP") + (res.error || "?"), false);
+});
+$("#z2AutoList").addEventListener("click", async e => {
+  const b = e.target.closest("button[data-z2exclude]"); if (!b) return;
+  b.disabled = true; showOverlay(t("applying")); setMsg($("#z2AutoMsg"), t("applying"));
+  const res = await api("z2exclude", { domain: b.dataset.z2exclude });
+  hideOverlay();
+  if (res.ok){ setMsg($("#z2AutoMsg"), t("done")); loadZapret2(); }
+  else { setMsg($("#z2AutoMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
 });
 
 /* ---------- presets + autosync loaders ---------- */
@@ -2636,14 +2891,17 @@ $("#updAll").addEventListener("click", () => doUpdate("all"));
 (async () => {
   showOverlay(t("loading"));         // dim + spinner over the whole UI while it loads (~5 s cold)
   let def = "ru";
-  try { const c = await (await fetch("?api=config")).json(); def = c.lang || "ru"; EXITG = c.exit_group || "UNBLOCK"; } catch(e){}
+  try { const c = await (await fetch("?api=config")).json(); def = c.lang || "ru"; EXITG = c.exit_group || "UNBLOCK";
+        CAPS = { nikki: c.nikki !== 0, zapret2: c.zapret2 !== 0 }; } catch(e){}
   try { LANG = localStorage.nikkiLang || def; } catch(e){ LANG = def; }
   applyI18n();
+  applyCaps();                       // hide the tabs/controls for whichever engine isn't installed
   setOverlay(t("loading"));
   // essentials first (presets is the slow fetch); drop the overlay once the Domains view is ready
-  await Promise.allSettled([loadDomains(), loadPresets()]);
+  if (CAPS.nikki) await Promise.allSettled([loadDomains(), loadPresets()]);
   hideOverlay();
-  loadIps(); loadDevices(); loadAutosync(); loadNodes(); loadSvc(); loadVersions(); loadBackup();
+  if (CAPS.nikki){ loadIps(); loadDevices(); loadAutosync(); loadNodes(); loadSvc(); }
+  loadVersions(); loadBackup();
   // resume the log view if an update is already running (started from another tab/session)
   try { const s = await (await fetch("?api=updatestatus")).json(); if (s && s.running) pollUpdate(); } catch(e){}
 })();
