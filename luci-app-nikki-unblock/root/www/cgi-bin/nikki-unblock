@@ -1608,9 +1608,16 @@ cat <<'HTML'
   h3 { font-size: .9rem; margin: .1rem 0 .5rem; opacity: .8; }
   .banner { margin: 0 0 1rem; padding: .7rem .9rem; border-radius: 8px; font-size: .9rem; border: 1px solid #d9770699; background: #f59e0b22; }
   .banner code { background: #8882; padding: 0 .25rem; border-radius: 4px; }
-  .tabs { display: flex; gap: .4rem; margin-bottom: 1rem; border-bottom: 1px solid #8883; }
+  .tabs { display: flex; gap: .4rem; margin-bottom: 1rem; border-bottom: 1px solid #8883; flex-wrap: wrap; }
   .tab { background: none; color: inherit; padding: .5rem .9rem; border: 0; border-bottom: 2px solid transparent; cursor: pointer; font-size: 1rem; opacity: .6; }
   .tab.active { opacity: 1; border-bottom-color: #2563eb; font-weight: 600; }
+  .tab[hidden] { display: none; }
+  /* top-level engine tabs (VPN / DPI-bypass / common) */
+  .tabs-top { border-bottom: 0; margin-bottom: .5rem; gap: .5rem; }
+  .tab-top { background: #8882; color: inherit; padding: .5rem 1rem; border: 0; border-radius: 9px; cursor: pointer; font-size: 1.02rem; font-weight: 600; opacity: .7; }
+  .tab-top.active { opacity: 1; background: #2563eb; color: #fff; }
+  .tab-top[hidden] { display: none; }
+  .tabs-sub[hidden] { display: none; }
   .view { display: none; } .view.active { display: block; }
   .dom-layout { display: grid; grid-template-columns: 1fr; gap: 1.2rem; }
   @media (min-width: 720px) { .dom-layout { grid-template-columns: 1fr 250px; } }
@@ -1732,13 +1739,18 @@ cat <<'HTML'
   <h1><span data-i18n="h1"></span>
     <span class="lang"><a data-lang="ru">RU</a> · <a data-lang="en">EN</a></span></h1>
   <div class="banner" id="guard" hidden></div>
-  <div class="tabs">
-    <button class="tab active" data-view="domains" data-i18n="tabDomains"></button>
-    <button class="tab" data-view="ips" data-i18n="tabIps"></button>
-    <button class="tab" data-view="devices" data-i18n="tabDevices"></button>
-    <button class="tab" data-view="nodes" data-i18n="tabNodes"></button>
-    <button class="tab" data-view="zapret2" data-i18n="tabZapret2"></button>
-    <button class="tab" data-view="mgmt" data-i18n="tabMgmt"></button>
+  <div class="tabs tabs-top">
+    <button class="tab-top active" data-engine="nikki" data-i18n="engNikki"></button>
+    <button class="tab-top" data-engine="zapret2" data-i18n="engZapret2"></button>
+    <button class="tab-top" data-engine="common" data-i18n="engCommon"></button>
+  </div>
+  <div class="tabs tabs-sub">
+    <button class="tab active" data-view="domains" data-engine="nikki" data-i18n="tabDomains"></button>
+    <button class="tab" data-view="ips" data-engine="nikki" data-i18n="tabIps"></button>
+    <button class="tab" data-view="devices" data-engine="nikki" data-i18n="tabDevices"></button>
+    <button class="tab" data-view="nodes" data-engine="nikki" data-i18n="tabNodes"></button>
+    <button class="tab" data-view="zapret2" data-engine="zapret2" data-i18n="tabZapret2"></button>
+    <button class="tab" data-view="mgmt" data-engine="common" data-i18n="tabMgmt"></button>
   </div>
 
   <!-- ================= DOMAINS ================= -->
@@ -1996,6 +2008,7 @@ let RULES = [], PRESETS = [], LANG = "ru";
 const I18N = {
   ru: {
     h1: "Nipret · VPN + обход DPI",
+    engNikki: "VPN (Nikki)", engZapret2: "Обход DPI", engCommon: "⚙ Общее",
     tabDomains: "Домены в туннель", tabIps: "IP-исключения", tabDevices: "Устройства", tabZapret2: "Обход DPI",
     z2ManageHint: "Zapret2 обходит блокировки провайдера на уровне DPI (без VPN) — для сайтов, которые режут «изнутри» (YouTube и т.п.). Управляй сервисом и списком доменов для обхода.",
     z2NotInstalled: "Zapret2 не установлен на этом роутере — управлять нечем. Раздел появится, когда он будет установлен.",
@@ -2072,6 +2085,7 @@ const I18N = {
   },
   en: {
     h1: "Nipret · VPN + DPI-bypass",
+    engNikki: "VPN (Nikki)", engZapret2: "DPI bypass", engCommon: "⚙ General",
     tabDomains: "Domains via VPN", tabIps: "IP exclusions", tabDevices: "Devices", tabZapret2: "DPI bypass",
     z2ManageHint: "Zapret2 defeats ISP DPI blocking (no VPN) — for sites throttled/blocked \"from inside\" (YouTube, etc.). Control the service and the list of domains to bypass.",
     z2NotInstalled: "Zapret2 isn't installed on this router — nothing to manage. This section appears once it's installed.",
@@ -2190,6 +2204,18 @@ document.querySelectorAll(".tab").forEach(tb => tb.addEventListener("click", () 
   else if (tb.dataset.view === "devices") loadDevices();
   else if (tb.dataset.view === "zapret2") loadZapret2();
 }));
+/* top-level engine selector — shows only that engine's sub-tabs, opens the first */
+function selectEngine(eng){
+  document.querySelectorAll(".tab-top").forEach(b => b.classList.toggle("active", b.dataset.engine === eng));
+  let first = null, n = 0;
+  document.querySelectorAll(".tabs-sub .tab").forEach(b => {
+    const show = b.dataset.engine === eng; b.hidden = !show;
+    if (show){ n++; if (!first) first = b; }
+  });
+  $(".tabs-sub").hidden = n <= 1;   // single-view engine → hide the (one-button) sub-bar
+  if (first) first.click();
+}
+document.querySelectorAll(".tab-top").forEach(b => b.addEventListener("click", () => selectEngine(b.dataset.engine)));
 
 /* ---------- domains ---------- */
 function suffixMatchers(){
@@ -2494,16 +2520,13 @@ $("#devList").addEventListener("click", async e => {
 /* ---------- combine capability gating (nikki / zapret2 present?) ---------- */
 let CAPS = { nikki: true, zapret2: true };
 function applyCaps(){
-  // nikki drives Domains/IPs/Devices/Nodes + the nikki service block in Manage
-  ["domains","ips","devices","nodes"].forEach(v => {
-    const b = document.querySelector('.tab[data-view="' + v + '"]'); if (b) b.hidden = !CAPS.nikki;
-  });
-  const z2b = document.querySelector('.tab[data-view="zapret2"]'); if (z2b) z2b.hidden = !CAPS.zapret2;
+  // top-level engine tabs light up only for installed engines; "common" (Manage) is always there
+  const nt = document.querySelector('.tab-top[data-engine="nikki"]');   if (nt) nt.hidden = !CAPS.nikki;
+  const zt = document.querySelector('.tab-top[data-engine="zapret2"]'); if (zt) zt.hidden = !CAPS.zapret2;
   const svc = document.querySelector('#view-mgmt .svc'); if (svc) svc.style.display = CAPS.nikki ? "" : "none";
-  // if the active tab got hidden, jump to the first visible one
-  const active = document.querySelector('.tab.active');
-  if (active && active.hidden){ const first = document.querySelector('.tab:not([hidden])'); if (first) first.click(); }
-  // neither engine installed → tell the user via the top banner
+  // open the first available engine (prefer nikki, else zapret2, else common)
+  const firstEng = document.querySelector('.tab-top:not([hidden])');
+  selectEngine(firstEng ? firstEng.dataset.engine : "common");
   if (!CAPS.nikki && !CAPS.zapret2){ const g = $("#guard"); if (g){ g.textContent = t("noEngines"); g.hidden = false; } }
 }
 
