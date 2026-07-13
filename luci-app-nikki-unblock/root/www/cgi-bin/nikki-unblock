@@ -169,15 +169,25 @@ list_json() {
 	printf ']'
 }
 
+# the reserved_ip entries that are VPN-node server IPs (auto-added by protect_server) — as X/32
+node_ips() {
+	for f in "$NODES_DIR"/*.yaml; do
+		[ -f "$f" ] || continue
+		s=$(grep -m1 'server:' "$f" | sed 's/.*server:[[:space:]]*//; s/[[:space:]]*$//')
+		for ip in $(host_ips "$s"); do [ -n "$ip" ] && echo "$ip/32"; done
+	done
+}
 iplist_json() {
 	json_header
+	_ni=" $(node_ips | tr '\n' ' ')"
 	printf '['
 	first=1
 	for ip in $(uci -q get nikki.proxy.reserved_ip); do
 		prot=0; [ "$(ip_is_default "$ip")" = 1 ] && prot=1
+		node=0; case "$_ni" in *" $ip "*) node=1; prot=1 ;; esac   # VPN-node IP → protected (can't delete)
 		[ "$first" = 1 ] || printf ','
 		first=0
-		printf '{"ip":"%s","protected":%d}' "$ip" "$prot"
+		printf '{"ip":"%s","protected":%d,"node":%d}' "$ip" "$prot" "$node"
 	done
 	printf ']'
 }
@@ -1130,8 +1140,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 
 	elif [ "$action" = "ipdel" ]; then
 		ip=$(clean_ip "$(get_param ip)")
-		if [ "$(ip_is_default "$ip")" = 1 ]; then
-			json_header; printf '{"ok":false,"error":"protected"}'; exit 0
+		if [ "$(ip_is_default "$ip")" = 1 ] || node_ips | grep -qxF "$ip"; then
+			json_header; printf '{"ok":false,"error":"protected"}'; exit 0   # default range or a VPN-node IP
 		fi
 		uci del_list "nikki.proxy.reserved_ip=$ip"; uci commit nikki; apply_nikki
 		json_header; printf '{"ok":true}'; exit 0
@@ -2052,7 +2062,7 @@ const I18N = {
     autoUpdate: "Авто-апдейт", iv1h: "каждый час", iv6h: "каждые 6 часов", iv12h: "каждые 12 часов", iv24h: "раз в сутки", ivWeekly: "раз в неделю",
     autoHint: "Сам синхронизирует включённые наборы-списки: добавляет новые домены и убирает исчезнувшие. Лёгкая операция, по умолчанию ночью (гео-базы обновляет сам mihomo).",
     ipHint: "IP/подсети, трафик к которым идёт мимо mihomo напрямую (например, VPN-ноды). Голый IPv4 получит /32.",
-    exclusions: "Исключения", system: "системный",
+    exclusions: "Исключения", system: "системный", ipNode: "нода",
     phDomain: "example.com", phGeosite: "telegram, youtube, netflix…", phGeoip: "ru · telegram · google…", phIp: "1.2.3.0/24  ·  1.2.3.4",
     done: "Готово", errP: "Ошибка: ", dup: "Уже есть в списке", listsNA: "Списки недоступны",
     pmShow: "Показать состав", pmGeo: "Поддерживаемая категория доменов/IP — обновляется автоматически из базы. Ниже показаны только дополнительные IP-подсети и домены.",
@@ -2129,7 +2139,7 @@ const I18N = {
     autoUpdate: "Auto-update", iv1h: "hourly", iv6h: "every 6 hours", iv12h: "every 12 hours", iv24h: "daily", ivWeekly: "weekly",
     autoHint: "Keeps enabled list-presets in sync: adds new domains and removes vanished ones. Light; runs nightly by default (geo databases are updated by mihomo itself).",
     ipHint: "IPs/subnets whose traffic goes straight past mihomo (e.g. VPN nodes). A bare IPv4 gets /32.",
-    exclusions: "Exclusions", system: "system",
+    exclusions: "Exclusions", system: "system", ipNode: "node",
     phDomain: "example.com", phGeosite: "telegram, youtube, netflix…", phGeoip: "ru · telegram · google…", phIp: "1.2.3.0/24  ·  1.2.3.4",
     done: "Done", errP: "Error: ", dup: "Already in the list", listsNA: "Lists unavailable",
     pmShow: "Show contents", pmGeo: "A maintained domain/IP category — auto-updated from the DB. Only the extra IP subnets and domains are listed below.",
@@ -2454,7 +2464,7 @@ async function loadIps(){
   ips.forEach(x => {
     const li = document.createElement("li");
     li.innerHTML = '<span class="dom">' + x.ip + '</span>' +
-      (x.protected ? '<span class="badge">' + t("system") + '</span>' : '<button class="ghost" data-ip="' + x.ip + '">✕</button>');
+      (x.protected ? '<span class="badge">' + (x.node ? t("ipNode") : t("system")) + '</span>' : '<button class="ghost" data-ip="' + x.ip + '">✕</button>');
     ul.appendChild(li);
   });
 }
