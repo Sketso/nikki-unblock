@@ -21,7 +21,8 @@ You set it up once, then everything is buttons in your router's web panel — no
 - **Keep some devices off the VPN** — exclude specific devices (pick them by name) so their traffic
   goes straight out, not through the tunnel.
 - **Bypass DPI without a VPN (zapret2)** — for sites blocked "from inside" by your ISP (YouTube, etc.):
-  turn zapret2 on/off, add domains to bypass, or let it auto-learn blocked hosts.
+  turn zapret2 on/off and add domains to bypass with one-click **presets** (YouTube, Discord, Twitch,
+  Twitter/X) or your own. Presets are the recommended replacement for "auto-learn", which often picks up junk.
 - **One control page** — start/stop each engine, update with one click, and back up your setup.
 
 ## Two engines

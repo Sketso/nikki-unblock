@@ -733,6 +733,11 @@ Z2_HOSTX="/opt/zapret2/ipset/zapret-hosts-user-exclude.txt"
 Z2_USER="/opt/zapret2/ipset/zapret-hosts-user.txt"     # manual DPI-bypass domains (the "add a domain" file)
 Z2_AUTO="/opt/zapret2/ipset/zapret-hosts-auto.txt"     # auto-learned (autohostlist)
 Z2_CONFIG="/opt/zapret2/config"                        # shell-var config (MODE_FILTER, NFQWS2_OPT, …)
+# curated bypass presets (YouTube/Discord/…) — we OWN the "main" hostlist zapret-hosts.txt (wired by
+# find_hostlists, separate from the user's manual file) and rebuild it from the active presets. Each
+# preset's fetched domains are cached under Z2_PDIR so a rebuild never depends on the network.
+Z2_MAIN="/opt/zapret2/ipset/zapret-hosts.txt"          # preset-managed hostlist (union of active presets)
+Z2_PDIR="/opt/zapret2/ipset/.nipret-presets"           # per-preset cached domain lists (dot-dir → not a hostlist)
 zapret2_present() { [ -x /etc/init.d/zapret2 ] && [ -d /opt/zapret2 ]; }
 # Nipret is a combine: nikki (Mihomo VPN) and zapret2 (DPI-bypass) are independent; either may be absent.
 nikki_present() { [ -x /etc/init.d/nikki ] && [ -x /usr/bin/mihomo ]; }
@@ -780,6 +785,52 @@ z2_apply_hosts() {
 	else
 		/etc/init.d/zapret2 restart >/dev/null 2>&1
 	fi
+}
+# apply Z2_MAIN: reload if it's already wired into the running nfqws2; restart if it was just created or
+# removed (its --hostlist= arg set changes, which only takes effect on a full restart).
+z2_apply_main() {
+	_p=$(pgrep -f nfqws2 2>/dev/null | head -1)
+	if [ -f "$Z2_MAIN" ] && [ -n "$_p" ] && tr '\000' '\n' < "/proc/$_p/cmdline" 2>/dev/null | grep -qF "$Z2_MAIN"; then
+		/etc/init.d/zapret2 reload >/dev/null 2>&1
+	else
+		/etc/init.d/zapret2 restart >/dev/null 2>&1
+	fi
+}
+z2_active_presets() { uci -q get nikki-unblock.z2.preset 2>/dev/null; }   # space-separated ids
+# rebuild the preset hostlist = deduped union of the CACHED domains of every active preset (no network)
+z2_rebuild_main() {
+	mkdir -p "$Z2_PDIR"
+	_b="$Z2_PDIR/.build"; : > "$_b"
+	for _id in $(z2_active_presets); do
+		[ -f "$Z2_PDIR/$_id.lst" ] && cat "$Z2_PDIR/$_id.lst" >> "$_b"
+	done
+	if [ -s "$_b" ]; then
+		awk '{ sub(/\r$/,""); if (NF && substr($0,1,1)!="#" && !seen[$0]++) print }' "$_b" > "$Z2_MAIN"
+	else
+		rm -f "$Z2_MAIN"
+	fi
+	rm -f "$_b"
+	z2_apply_main
+}
+# [{id,name,active,domains[]}] — manifest at $APPLIST_URL/z2/index.json; active flag from UCI, domains
+# fetched server-side (routers reach the applist; the browser's origin can't). Empty domains if offline.
+z2presets_json() {
+	json_header
+	idx=$(curl -sf --max-time 10 "$APPLIST_URL/z2/index.json" 2>/dev/null)
+	act=" $(z2_active_presets) "
+	printf '['
+	first=1; i=0
+	while :; do
+		id=$(printf '%s' "$idx" | jsonfilter -e "@[$i].id" 2>/dev/null)
+		[ -z "$id" ] && break
+		name=$(printf '%s' "$idx" | jsonfilter -e "@[$i].name" 2>/dev/null); [ -z "$name" ] && name="$id"
+		on=0; case "$act" in *" $id "*) on=1 ;; esac
+		doms=$(applist_domains "z2/$id" | awk '{ printf "%s\"%s\"", sep, $0; sep="," }')
+		[ "$first" = 1 ] || printf ','; first=0
+		printf '{"id":"%s","name":"%s","active":%d,"domains":[%s]}' "$(json_esc "$id")" "$(json_esc "$name")" "$on" "$doms"
+		i=$((i + 1))
+	done
+	printf ']'
 }
 # count non-empty, non-comment lines. NB: `grep -c` exits 1 on zero matches yet prints "0", so a
 # naive `grep -c … || echo 0` emits "0\n0" and corrupts the JSON — capture into a var instead.
@@ -1201,6 +1252,30 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		fi
 		json_header; printf '{"ok":true}'; exit 0
 
+	elif [ "$action" = "z2preset_on" ]; then
+		# fetch the preset's domains, cache them, mark active, rebuild the preset hostlist
+		id=$(printf '%s' "$(get_param id)" | tr -cd 'a-z0-9_-')   # sanitised: no slashes/dots → no path escape
+		[ -z "$id" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
+		mkdir -p "$Z2_PDIR"
+		applist_domains "z2/$id" > "$Z2_PDIR/$id.lst.tmp" 2>/dev/null
+		if [ ! -s "$Z2_PDIR/$id.lst.tmp" ]; then
+			rm -f "$Z2_PDIR/$id.lst.tmp"; json_header; printf '{"ok":false,"error":"fetch"}'; exit 0
+		fi
+		mv "$Z2_PDIR/$id.lst.tmp" "$Z2_PDIR/$id.lst"
+		uci -q get nikki-unblock.z2 >/dev/null 2>&1 || uci set nikki-unblock.z2=z2
+		case " $(z2_active_presets) " in *" $id "*) : ;; *) uci add_list nikki-unblock.z2.preset="$id" ;; esac
+		uci commit nikki-unblock
+		z2_rebuild_main
+		json_header; printf '{"ok":true}'; exit 0
+
+	elif [ "$action" = "z2preset_off" ]; then
+		id=$(printf '%s' "$(get_param id)" | tr -cd 'a-z0-9_-')
+		[ -z "$id" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
+		uci -q del_list nikki-unblock.z2.preset="$id" 2>/dev/null; uci commit nikki-unblock
+		rm -f "$Z2_PDIR/$id.lst"
+		z2_rebuild_main
+		json_header; printf '{"ok":true}'; exit 0
+
 	elif [ "$action" = "z2exclude" ]; then
 		# "don't bypass" an auto-learned domain: ban it (user-exclude, checked first so it's never
 		# desynced) AND drop it from the auto list so it disappears and stays out.
@@ -1550,6 +1625,7 @@ devices_json() {
 [ "$API" = "devices" ] && { devices_json; exit 0; }
 [ "$API" = "z2status" ] && { z2status_json; exit 0; }
 [ "$API" = "z2hosts" ] && { z2hosts_json; exit 0; }
+[ "$API" = "z2presets" ] && { z2presets_json; exit 0; }
 [ "$API" = "presets" ] && {
 	json_header
 	# `fresh=1` forces a rebuild (manual refresh after editing the applist).
@@ -1617,6 +1693,7 @@ cat <<'HTML'
   .lang a.on { opacity: 1; font-weight: 600; text-decoration: underline; }
   h3 { font-size: .9rem; margin: .1rem 0 .5rem; opacity: .8; }
   .banner { margin: 0 0 1rem; padding: .7rem .9rem; border-radius: 8px; font-size: .9rem; border: 1px solid #d9770699; background: #f59e0b22; }
+  .banner.soft { border-color: #2563eb66; background: #2563eb1a; }   /* informational (not a warning) */
   .banner code { background: #8882; padding: 0 .25rem; border-radius: 4px; }
   .tabs { display: flex; gap: .4rem; margin-bottom: 1rem; border-bottom: 1px solid #8883; flex-wrap: wrap; }
   .tab { background: none; color: inherit; padding: .5rem .9rem; border: 0; border-bottom: 2px solid transparent; cursor: pointer; font-size: 1rem; opacity: .6; }
@@ -1903,7 +1980,12 @@ cat <<'HTML'
   <!-- ================= ZAPRET2 (DPI bypass) ================= -->
   <!-- ============ ZAPRET2 · BYPASS DOMAINS ============ -->
   <section class="view" id="view-z2domains">
-    <h3><span data-i18n="z2Domains"></span> <span class="count" id="z2UserCount"></span></h3>
+    <h3 data-i18n="z2PresetsTitle"></h3>
+    <div class="hint" data-i18n="z2PresetsHint"></div>
+    <div class="presets" id="z2presets"><span class="hint" data-i18n="loading"></span></div>
+    <div class="msg" id="z2PresetMsg"></div>
+
+    <h3 class="z2-sep"><span data-i18n="z2Domains"></span> <span class="count" id="z2UserCount"></span></h3>
     <div class="hint" data-i18n-html="z2AddHint"></div>
     <form class="add" id="z2Form">
       <input id="z2Domain" placeholder="youtube.com" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required>
@@ -1915,6 +1997,7 @@ cat <<'HTML'
 
   <!-- ============ ZAPRET2 · AUTO-LEARN ============ -->
   <section class="view" id="view-z2auto">
+    <div class="banner soft" data-i18n="z2AutoRecommend"></div>
     <div class="svc upd">
       <h3 data-i18n="z2AutoTitle"></h3>
       <div class="swrow">
@@ -2035,7 +2118,12 @@ const I18N = {
     engNikkiHint: "Nikki (Mihomo) заворачивает выбранные сайты в VPN/прокси — для того, что блокируют «снаружи» (гео-блок, блок по IP): ChatGPT, Instagram, Telegram и т.п. Управляй доменами, нодами и устройствами.",
     engZapret2Hint: "Zapret2 обходит блокировки провайдера на уровне DPI (без VPN) — для сайтов, которые режут «изнутри» (YouTube и т.п.). Управляй сервисом и списком доменов для обхода.",
     z2On: "zapret2 работает", z2Off: "zapret2 остановлен",
-    z2Domains: "Домены для обхода DPI", z2AddHint: "Домен, который zapret2 будет пробивать через DPI. Пиши как <code>youtube.com</code> — подходит и для поддоменов.",
+    z2Domains: "Свои домены", z2AddHint: "Домен, который zapret2 будет пробивать через DPI. Пиши как <code>youtube.com</code> — подходит и для поддоменов.",
+    z2PresetsTitle: "Разблокировать (пресеты)",
+    z2PresetsHint: "Готовые списки доменов для обхода DPI — YouTube, Discord и другие. Добавляются в отдельный список zapret2, не смешиваясь с твоими доменами ниже.",
+    z2NoPresets: "Пресеты недоступны — проверь интернет/DNS роутера.",
+    z2PresetNote: "Домены добавляются в отдельный список обхода zapret2 (по суффиксу — покрывают и поддомены), отдельно от твоих доменов.",
+    z2AutoRecommend: "Рекомендуется держать автообучение выключенным и добавлять сервисы пресетами на вкладке «Домены»: автообучение часто ошибочно заносит лишние домены (телеметрию, локальные сервисы).",
     z2AutoTitle: "Автообучение (autohostlist)", z2AutoLabel: "Zapret2 сам находит заблокированные домены",
     z2AutoHint: "Zapret2 отслеживает неудачные соединения и сам добавляет заблокированные домены в обход. Обычно достаточно этого; ручной список — для точечных случаев.",
     z2AutoView: "Показать список", z2AutoClear: "Очистить список", z2ClearConfirm: "Очистить весь список автообучения?", z2NoBypass: "Не пробивать этот домен",
@@ -2113,7 +2201,12 @@ const I18N = {
     engNikkiHint: "Nikki (Mihomo) routes chosen sites through a VPN/proxy — for services blocked \"from outside\" (geo-blocks, IP blocks): ChatGPT, Instagram, Telegram, etc. Manage domains, nodes and devices.",
     engZapret2Hint: "Zapret2 defeats ISP DPI blocking (no VPN) — for sites throttled/blocked \"from inside\" (YouTube, etc.). Control the service and the list of domains to bypass.",
     z2On: "zapret2 running", z2Off: "zapret2 stopped",
-    z2Domains: "Domains to DPI-bypass", z2AddHint: "A domain zapret2 will push through DPI. Type it like <code>youtube.com</code> — also covers subdomains.",
+    z2Domains: "Your own domains", z2AddHint: "A domain zapret2 will push through DPI. Type it like <code>youtube.com</code> — also covers subdomains.",
+    z2PresetsTitle: "Unblock (presets)",
+    z2PresetsHint: "Ready-made domain lists for DPI-bypass — YouTube, Discord and more. Added to a separate zapret2 list, kept apart from your own domains below.",
+    z2NoPresets: "Presets unavailable — check the router's internet/DNS.",
+    z2PresetNote: "Domains go into a separate zapret2 bypass list (matched by suffix — subdomains covered too), apart from your own domains.",
+    z2AutoRecommend: "Recommended: keep auto-learning off and add services via presets on the “Domains” tab — auto-learning often wrongly picks up junk (telemetry, local services).",
     z2AutoTitle: "Auto-learning (autohostlist)", z2AutoLabel: "Zapret2 finds blocked domains itself",
     z2AutoHint: "Zapret2 watches for failed connections and auto-adds blocked domains to the bypass. Usually enough on its own; the manual list is for specific cases.",
     z2AutoView: "Show list", z2AutoClear: "Clear list", z2ClearConfirm: "Clear the whole auto-learned list?", z2NoBypass: "Don't bypass this domain",
@@ -2559,12 +2652,56 @@ function applyCaps(){
 /* ---------- zapret2 (DPI bypass) management ---------- */
 let Z2 = { present: 0, running: 0, boot: 0, autohostlist: 0 };
 let Z2HOSTS = { user: [], auto: [] };
+let Z2PRESETS = [], z2presetsLoaded = false;
 async function loadZapret2(){
   // the whole zapret2 engine tab is gated off (applyCaps) when zapret2 is absent, so if we got here it's present
   try { Z2 = await (await fetch("?api=z2status")).json(); } catch(e){ Z2 = { present: CAPS.zapret2 ? 1 : 0 }; }
   if (Z2.present !== 1) return;
   try { Z2HOSTS = await (await fetch("?api=z2hosts")).json(); } catch(e){ Z2HOSTS = { user: [], auto: [] }; }
   renderZ2();
+  if (!z2presetsLoaded) loadZ2Presets();   // curated bypass presets — fetch once, then re-render from cache
+}
+/* ---- curated DPI-bypass presets (YouTube/Discord/…), applist-style like nikki's ---- */
+async function loadZ2Presets(){
+  try { Z2PRESETS = await (await fetch("?api=z2presets")).json(); z2presetsLoaded = true; }
+  catch(e){ Z2PRESETS = []; }
+  renderZ2Presets();
+}
+function renderZ2Presets(){
+  const box = $("#z2presets"); if (!box) return; box.innerHTML = "";
+  if (!Array.isArray(Z2PRESETS) || !Z2PRESETS.length){ box.innerHTML = '<span class="hint">' + t("z2NoPresets") + '</span>'; return; }
+  Z2PRESETS.forEach(p => box.appendChild(z2presetCard(p)));
+}
+function z2presetCard(p){
+  const card = document.createElement("div");
+  card.className = "pcard" + (p.active ? " on" : "");
+  card.innerHTML =
+    '<span class="pname">' + escH(p.name) + '</span>' +
+    '<button class="pinfo" title="' + escH(t("pmShow")) + '">?</button>' +
+    '<label class="sw"><input type="checkbox"' + (p.active ? " checked" : "") + '><span class="sl"></span></label>';
+  card.querySelector(".pinfo").addEventListener("click", () => z2showPresetInfo(p));
+  card.querySelector("input").addEventListener("change", async e => {
+    const chk = e.target; chk.disabled = true;
+    const wantOn = chk.checked;
+    showOverlay((wantOn ? t("enabling") : t("disabling")) + p.name + "…");
+    const res = await api(wantOn ? "z2preset_on" : "z2preset_off", { id: p.id });
+    hideOverlay();
+    if (res && res.ok){ p.active = wantOn ? 1 : 0; setMsg($("#z2PresetMsg"), t("done")); }
+    else { chk.checked = !wantOn; setMsg($("#z2PresetMsg"), t("errP") + ((res && res.error) || "?"), false); }
+    chk.disabled = false;
+    renderZ2Presets();
+    loadZapret2();   // a first enable / last disable restarts zapret2 — refresh running state + counts
+  });
+  return card;
+}
+function z2showPresetInfo(p){
+  $("#pmTitle").textContent = p.name;
+  const d = p.domains || [];
+  let h = '<div class="pmsub">' + t("tSuffix") + ' (' + d.length + ')</div>';
+  h += '<ul class="pmlist">' + d.map(x => '<li>' + escH(x) + '</li>').join("") + '</ul>';
+  h += '<div class="pmnote">' + t("z2PresetNote") + '</div>';
+  $("#pmBody").innerHTML = h;
+  $("#pmodal").hidden = false;
 }
 function renderZ2(){
   const run = Z2.running === 1;
