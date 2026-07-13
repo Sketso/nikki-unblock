@@ -1742,15 +1742,14 @@ cat <<'HTML'
   <div class="tabs tabs-top">
     <button class="tab-top active" data-engine="nikki" data-i18n="engNikki"></button>
     <button class="tab-top" data-engine="zapret2" data-i18n="engZapret2"></button>
-    <button class="tab-top" data-engine="common" data-i18n="engCommon"></button>
   </div>
   <div class="tabs tabs-sub">
     <button class="tab active" data-view="domains" data-engine="nikki" data-i18n="tabDomains"></button>
     <button class="tab" data-view="ips" data-engine="nikki" data-i18n="tabIps"></button>
     <button class="tab" data-view="devices" data-engine="nikki" data-i18n="tabDevices"></button>
     <button class="tab" data-view="nodes" data-engine="nikki" data-i18n="tabNodes"></button>
+    <button class="tab" data-view="mgmt" data-engine="nikki" data-i18n="tabMgmt"></button>
     <button class="tab" data-view="zapret2" data-engine="zapret2" data-i18n="tabZapret2"></button>
-    <button class="tab" data-view="mgmt" data-engine="common" data-i18n="tabMgmt"></button>
   </div>
 
   <!-- ================= DOMAINS ================= -->
@@ -2008,7 +2007,7 @@ let RULES = [], PRESETS = [], LANG = "ru";
 const I18N = {
   ru: {
     h1: "Nipret · VPN + обход DPI",
-    engNikki: "VPN (Nikki)", engZapret2: "Обход DPI", engCommon: "⚙ Общее",
+    engNikki: "VPN (Nikki)", engZapret2: "Обход DPI (Zapret2)",
     tabDomains: "Домены в туннель", tabIps: "IP-исключения", tabDevices: "Устройства", tabZapret2: "Обход DPI",
     z2ManageHint: "Zapret2 обходит блокировки провайдера на уровне DPI (без VPN) — для сайтов, которые режут «изнутри» (YouTube и т.п.). Управляй сервисом и списком доменов для обхода.",
     z2NotInstalled: "Zapret2 не установлен на этом роутере — управлять нечем. Раздел появится, когда он будет установлен.",
@@ -2085,7 +2084,7 @@ const I18N = {
   },
   en: {
     h1: "Nipret · VPN + DPI-bypass",
-    engNikki: "VPN (Nikki)", engZapret2: "DPI bypass", engCommon: "⚙ General",
+    engNikki: "VPN (Nikki)", engZapret2: "DPI bypass (Zapret2)",
     tabDomains: "Domains via VPN", tabIps: "IP exclusions", tabDevices: "Devices", tabZapret2: "DPI bypass",
     z2ManageHint: "Zapret2 defeats ISP DPI blocking (no VPN) — for sites throttled/blocked \"from inside\" (YouTube, etc.). Control the service and the list of domains to bypass.",
     z2NotInstalled: "Zapret2 isn't installed on this router — nothing to manage. This section appears once it's installed.",
