@@ -1174,10 +1174,12 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		json_header; printf '{"ok":true}'; exit 0
 
 	elif [ "$action" = "z2exclude" ]; then
-		# "don't bypass" an auto-learned domain → add to zapret2's user-exclude list (already wired)
+		# "don't bypass" an auto-learned domain: ban it (user-exclude, checked first so it's never
+		# desynced) AND drop it from the auto list so it disappears and stays out.
 		d=$(printf '%s' "$(get_param domain)" | parse_domains | head -1)
 		[ -z "$d" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
 		touch "$Z2_HOSTX"; grep -qxF "$d" "$Z2_HOSTX" 2>/dev/null || echo "$d" >> "$Z2_HOSTX"
+		[ -f "$Z2_AUTO" ] && { grep -vxF "$d" "$Z2_AUTO" > "$Z2_AUTO.tmp" 2>/dev/null; mv "$Z2_AUTO.tmp" "$Z2_AUTO"; }
 		/etc/init.d/zapret2 reload >/dev/null 2>&1
 		json_header; printf '{"ok":true}'; exit 0
 
