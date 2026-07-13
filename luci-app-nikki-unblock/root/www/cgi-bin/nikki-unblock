@@ -1551,7 +1551,7 @@ cat <<'HTML'
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>nikki-unblock</title>
+<title>Nipret</title>
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
@@ -1956,7 +1956,7 @@ let RULES = [], PRESETS = [], LANG = "ru";
 
 const I18N = {
   ru: {
-    h1: "nikki · маршрутизация",
+    h1: "Nipret · VPN + обход DPI",
     tabDomains: "Домены в туннель", tabIps: "IP-исключения", tabDevices: "Устройства", tabZapret2: "Обход DPI",
     z2ManageHint: "Zapret2 обходит блокировки провайдера на уровне DPI (без VPN) — для сайтов, которые режут «изнутри» (YouTube и т.п.). Управляй сервисом и списком доменов для обхода.",
     z2NotInstalled: "Zapret2 не установлен на этом роутере — управлять нечем. Раздел появится, когда он будет установлен.",
@@ -2031,7 +2031,7 @@ const I18N = {
     confirmDel: n => "Будет удалено доменов: " + n + ". Продолжить?"
   },
   en: {
-    h1: "nikki · routing",
+    h1: "Nipret · VPN + DPI-bypass",
     tabDomains: "Domains via VPN", tabIps: "IP exclusions", tabDevices: "Devices", tabZapret2: "DPI bypass",
     z2ManageHint: "Zapret2 defeats ISP DPI blocking (no VPN) — for sites throttled/blocked \"from inside\" (YouTube, etc.). Control the service and the list of domains to bypass.",
     z2NotInstalled: "Zapret2 isn't installed on this router — nothing to manage. This section appears once it's installed.",

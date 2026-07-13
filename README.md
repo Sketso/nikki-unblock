@@ -1,10 +1,14 @@
-# nikki-unblock
+# Nipret
 
 **English** · [Русский](README.ru.md)
 
-A simple web page for your OpenWrt router that **unblocks sites and apps through your VPN** — with
-one-click buttons for Telegram, YouTube, Netflix, ChatGPT and more. It runs on top of
-**[nikki](https://github.com/nikkinikki-org/OpenWrt-nikki)** (the Mihomo VPN for OpenWrt).
+A simple web page for your OpenWrt router that **unblocks sites and apps two ways** — through your
+**VPN** and through **DPI-bypass** — with one-click buttons for Telegram, YouTube, Netflix, ChatGPT and
+more. Nipret is a friendly front-end for **[nikki](https://github.com/nikkinikki-org/OpenWrt-nikki)**
+(the Mihomo VPN) and **[zapret2](https://github.com/bol-van/zapret)** (DPI-bypass). It manages whichever
+of the two you have installed.
+
+> *Nipret = **Ni**kki + za**pret**.* (The package/repo are still named `nikki-unblock` for compatibility.)
 
 You set it up once, then everything is buttons in your router's web panel — no command line for daily use.
 
@@ -16,12 +20,30 @@ You set it up once, then everything is buttons in your router's web panel — no
   them and let it auto-pick the fastest. Import your friends' configs too.
 - **Keep some devices off the VPN** — exclude specific devices (pick them by name) so their traffic
   goes straight out, not through the tunnel.
-- **One control page** — start/stop the VPN, update with one click, and back up your setup.
+- **Bypass DPI without a VPN (zapret2)** — for sites blocked "from inside" by your ISP (YouTube, etc.):
+  turn zapret2 on/off, add domains to bypass, or let it auto-learn blocked hosts.
+- **One control page** — start/stop each engine, update with one click, and back up your setup.
+
+## Two engines
+
+Nipret is a *combine* over two independent tools — install either or both:
+
+- **VPN (nikki / Mihomo)** — routes chosen sites through a proxy/VPN. Best for services blocked **from
+  the outside** (geo-blocks, IP blocks): ChatGPT, Instagram, Telegram, …
+- **DPI-bypass (zapret2)** — defeats your ISP's DPI at the packet level, no VPN. Best for services
+  throttled/blocked **from the inside**: YouTube, Discord, …
+
+Tabs and controls for an engine appear only if that engine is installed.
 
 ## Before you start
 
-You need a **working VPN in nikki** on your router first. If you don't have nikki yet, set it up here:
-**https://github.com/nikkinikki-org/OpenWrt-nikki** — add a VPN and make sure it connects. Then come back.
+Install at least one engine on your router first (both is fine):
+
+- for the **VPN** side — **[nikki](https://github.com/nikkinikki-org/OpenWrt-nikki)**: add a VPN and make
+  sure it connects;
+- for the **DPI-bypass** side — **[zapret2](https://github.com/bol-van/zapret)**.
+
+Then install Nipret — its tabs light up for whatever you have.
 
 ## Install
 

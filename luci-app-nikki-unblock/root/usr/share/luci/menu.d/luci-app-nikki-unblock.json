@@ -1,6 +1,6 @@
 {
 	"admin/services/nikki-unblock": {
-		"title": "nikki · Unblock",
+		"title": "Nipret",
 		"order": 41,
 		"action": {
 			"type": "view",

@@ -1,12 +1,12 @@
 include $(TOPDIR)/rules.mk
 
-PKG_VERSION:=1.21.0
+PKG_VERSION:=2.0.0
 PKG_RELEASE:=1
 PKG_MAINTAINER:=sketso
 PKG_LICENSE:=MIT
 
-LUCI_TITLE:=nikki-unblock — one-click unblock presets & routing rules over nikki
-LUCI_DEPENDS:=+luci-base +nikki +curl +jsonfilter
+LUCI_TITLE:=Nipret — unblock via VPN (nikki) + DPI-bypass (zapret2)
+LUCI_DEPENDS:=+luci-base +curl +jsonfilter
 LUCI_PKGARCH:=all
 
 include $(TOPDIR)/feeds/luci/luci.mk
