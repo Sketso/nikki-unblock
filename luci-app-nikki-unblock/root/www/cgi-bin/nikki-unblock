@@ -1628,6 +1628,8 @@ cat <<'HTML'
   .tab-top.active { opacity: 1; background: #2563eb; color: #fff; }
   .tab-top[hidden] { display: none; }
   .tabs-sub[hidden] { display: none; }
+  .engine-hint { margin: -.1rem 0 .7rem; opacity: .72; }   /* engine description: under the big buttons, above the sub-tabs */
+  .engine-hint:empty { display: none; }
   .view { display: none; } .view.active { display: block; }
   .dom-layout { display: grid; grid-template-columns: 1fr; gap: 1.2rem; }
   @media (min-width: 720px) { .dom-layout { grid-template-columns: 1fr 250px; } }
@@ -1753,13 +1755,17 @@ cat <<'HTML'
     <button class="tab-top active" data-engine="nikki" data-i18n="engNikki"></button>
     <button class="tab-top" data-engine="zapret2" data-i18n="engZapret2"></button>
   </div>
+  <div class="hint engine-hint" id="engineHint"></div>
   <div class="tabs tabs-sub">
     <button class="tab active" data-view="domains" data-engine="nikki" data-i18n="tabDomains"></button>
     <button class="tab" data-view="ips" data-engine="nikki" data-i18n="tabIps"></button>
     <button class="tab" data-view="devices" data-engine="nikki" data-i18n="tabDevices"></button>
     <button class="tab" data-view="nodes" data-engine="nikki" data-i18n="tabNodes"></button>
     <button class="tab" data-view="mgmt" data-engine="nikki" data-i18n="tabMgmt"></button>
-    <button class="tab" data-view="zapret2" data-engine="zapret2" data-i18n="tabZapret2"></button>
+    <button class="tab" data-view="z2domains" data-engine="zapret2" data-i18n="z2TabDomains"></button>
+    <button class="tab" data-view="z2auto" data-engine="zapret2" data-i18n="z2TabAuto"></button>
+    <button class="tab" data-view="z2exclude" data-engine="zapret2" data-i18n="z2TabExclude"></button>
+    <button class="tab" data-view="z2svc" data-engine="zapret2" data-i18n="z2TabSvc"></button>
   </div>
 
   <!-- ================= DOMAINS ================= -->
@@ -1895,54 +1901,60 @@ cat <<'HTML'
   </section>
 
   <!-- ================= ZAPRET2 (DPI bypass) ================= -->
-  <section class="view" id="view-zapret2">
-    <div class="hint" data-i18n="z2ManageHint"></div>
-    <div class="banner" id="z2NotInstalled" hidden data-i18n="z2NotInstalled"></div>
-    <div id="z2Panel">
-      <div class="svc">
-        <div class="swrow">
-          <span class="swlabel"><span class="dot" id="z2Dot"></span><span id="z2State">…</span></span>
-          <label class="sw"><input type="checkbox" id="z2Run"><span class="sl"></span></label>
-        </div>
-        <div class="swrow">
-          <span class="swlabel" data-i18n="svcBoot"></span>
-          <label class="sw"><input type="checkbox" id="z2Boot"><span class="sl"></span></label>
-        </div>
-        <div class="btns">
-          <button type="button" class="ghost" id="z2Restart" data-i18n="svcRestart"></button>
-          <button type="button" class="ghost" id="z2Reload" data-i18n="svcReload"></button>
-        </div>
-        <div class="msg" id="z2Msg"></div>
+  <!-- ============ ZAPRET2 · BYPASS DOMAINS ============ -->
+  <section class="view" id="view-z2domains">
+    <h3><span data-i18n="z2Domains"></span> <span class="count" id="z2UserCount"></span></h3>
+    <div class="hint" data-i18n-html="z2AddHint"></div>
+    <form class="add" id="z2Form">
+      <input id="z2Domain" placeholder="youtube.com" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+      <button type="submit" id="z2Btn" data-i18n="add"></button>
+    </form>
+    <div class="msg" id="z2DomMsg"></div>
+    <ul id="z2UserList"></ul>
+  </section>
+
+  <!-- ============ ZAPRET2 · AUTO-LEARN ============ -->
+  <section class="view" id="view-z2auto">
+    <div class="svc upd">
+      <h3 data-i18n="z2AutoTitle"></h3>
+      <div class="swrow">
+        <span class="swlabel" data-i18n="z2AutoLabel"></span>
+        <label class="sw"><input type="checkbox" id="z2AutoChk"><span class="sl"></span></label>
       </div>
-
-      <h3><span data-i18n="z2Domains"></span> <span class="count" id="z2UserCount"></span></h3>
-      <div class="hint" data-i18n-html="z2AddHint"></div>
-      <form class="add" id="z2Form">
-        <input id="z2Domain" placeholder="youtube.com" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required>
-        <button type="submit" id="z2Btn" data-i18n="add"></button>
-      </form>
-      <div class="msg" id="z2DomMsg"></div>
-      <ul id="z2UserList"></ul>
-
-      <div class="svc upd">
-        <h3 data-i18n="z2AutoTitle"></h3>
-        <div class="swrow">
-          <span class="swlabel" data-i18n="z2AutoLabel"></span>
-          <label class="sw"><input type="checkbox" id="z2AutoChk"><span class="sl"></span></label>
-        </div>
-        <div class="hint" data-i18n="z2AutoHint"></div>
-        <div class="btns">
-          <button type="button" class="ghost" id="z2AutoView"><span data-i18n="z2AutoView"></span> <span class="count" id="z2AutoCount"></span></button>
-          <button type="button" class="ghost" id="z2AutoClear" data-i18n="z2AutoClear"></button>
-        </div>
-        <ul id="z2AutoList" hidden></ul>
-        <div class="msg" id="z2AutoMsg"></div>
+      <div class="hint" data-i18n="z2AutoHint"></div>
+      <div class="btns">
+        <button type="button" class="ghost" id="z2AutoView"><span data-i18n="z2AutoView"></span> <span class="count" id="z2AutoCount"></span></button>
+        <button type="button" class="ghost" id="z2AutoClear" data-i18n="z2AutoClear"></button>
       </div>
+      <ul id="z2AutoList" hidden></ul>
+      <div class="msg" id="z2AutoMsg"></div>
+    </div>
+  </section>
 
-      <h3><span data-i18n="z2Excluded"></span> <span class="count" id="z2ExCount"></span></h3>
-      <div class="hint" data-i18n="z2ExHint"></div>
-      <ul id="z2ExList"></ul>
-      <div class="msg" id="z2ExMsg"></div>
+  <!-- ============ ZAPRET2 · EXCLUDE LIST ============ -->
+  <section class="view" id="view-z2exclude">
+    <h3><span data-i18n="z2Excluded"></span> <span class="count" id="z2ExCount"></span></h3>
+    <div class="hint" data-i18n="z2ExHint"></div>
+    <ul id="z2ExList"></ul>
+    <div class="msg" id="z2ExMsg"></div>
+  </section>
+
+  <!-- ============ ZAPRET2 · SERVICE ============ -->
+  <section class="view" id="view-z2svc">
+    <div class="svc">
+      <div class="swrow">
+        <span class="swlabel"><span class="dot" id="z2Dot"></span><span id="z2State">…</span></span>
+        <label class="sw"><input type="checkbox" id="z2Run"><span class="sl"></span></label>
+      </div>
+      <div class="swrow">
+        <span class="swlabel" data-i18n="svcBoot"></span>
+        <label class="sw"><input type="checkbox" id="z2Boot"><span class="sl"></span></label>
+      </div>
+      <div class="btns">
+        <button type="button" class="ghost" id="z2Restart" data-i18n="svcRestart"></button>
+        <button type="button" class="ghost" id="z2Reload" data-i18n="svcReload"></button>
+      </div>
+      <div class="msg" id="z2Msg"></div>
     </div>
   </section>
 
@@ -2018,9 +2030,10 @@ const I18N = {
   ru: {
     h1: "Nipret · VPN + обход DPI",
     engNikki: "VPN (Nikki)", engZapret2: "Обход DPI (Zapret2)",
-    tabDomains: "Домены в туннель", tabIps: "IP-исключения", tabDevices: "Устройства", tabZapret2: "Обход DPI",
-    z2ManageHint: "Zapret2 обходит блокировки провайдера на уровне DPI (без VPN) — для сайтов, которые режут «изнутри» (YouTube и т.п.). Управляй сервисом и списком доменов для обхода.",
-    z2NotInstalled: "Zapret2 не установлен на этом роутере — управлять нечем. Раздел появится, когда он будет установлен.",
+    tabDomains: "Домены в туннель", tabIps: "IP-исключения", tabDevices: "Устройства",
+    z2TabDomains: "Домены", z2TabAuto: "Автообучение", z2TabExclude: "Исключения", z2TabSvc: "Управление",
+    engNikkiHint: "Nikki (Mihomo) заворачивает выбранные сайты в VPN/прокси — для того, что блокируют «снаружи» (гео-блок, блок по IP): ChatGPT, Instagram, Telegram и т.п. Управляй доменами, нодами и устройствами.",
+    engZapret2Hint: "Zapret2 обходит блокировки провайдера на уровне DPI (без VPN) — для сайтов, которые режут «изнутри» (YouTube и т.п.). Управляй сервисом и списком доменов для обхода.",
     z2On: "zapret2 работает", z2Off: "zapret2 остановлен",
     z2Domains: "Домены для обхода DPI", z2AddHint: "Домен, который zapret2 будет пробивать через DPI. Пиши как <code>youtube.com</code> — подходит и для поддоменов.",
     z2AutoTitle: "Автообучение (autohostlist)", z2AutoLabel: "Zapret2 сам находит заблокированные домены",
@@ -2095,9 +2108,10 @@ const I18N = {
   en: {
     h1: "Nipret · VPN + DPI-bypass",
     engNikki: "VPN (Nikki)", engZapret2: "DPI bypass (Zapret2)",
-    tabDomains: "Domains via VPN", tabIps: "IP exclusions", tabDevices: "Devices", tabZapret2: "DPI bypass",
-    z2ManageHint: "Zapret2 defeats ISP DPI blocking (no VPN) — for sites throttled/blocked \"from inside\" (YouTube, etc.). Control the service and the list of domains to bypass.",
-    z2NotInstalled: "Zapret2 isn't installed on this router — nothing to manage. This section appears once it's installed.",
+    tabDomains: "Domains via VPN", tabIps: "IP exclusions", tabDevices: "Devices",
+    z2TabDomains: "Domains", z2TabAuto: "Auto-learn", z2TabExclude: "Exclusions", z2TabSvc: "Service",
+    engNikkiHint: "Nikki (Mihomo) routes chosen sites through a VPN/proxy — for services blocked \"from outside\" (geo-blocks, IP blocks): ChatGPT, Instagram, Telegram, etc. Manage domains, nodes and devices.",
+    engZapret2Hint: "Zapret2 defeats ISP DPI blocking (no VPN) — for sites throttled/blocked \"from inside\" (YouTube, etc.). Control the service and the list of domains to bypass.",
     z2On: "zapret2 running", z2Off: "zapret2 stopped",
     z2Domains: "Domains to DPI-bypass", z2AddHint: "A domain zapret2 will push through DPI. Type it like <code>youtube.com</code> — also covers subdomains.",
     z2AutoTitle: "Auto-learning (autohostlist)", z2AutoLabel: "Zapret2 finds blocked domains itself",
@@ -2211,11 +2225,14 @@ document.querySelectorAll(".tab").forEach(tb => tb.addEventListener("click", () 
   if (tb.dataset.view === "nodes") loadNodes().then(autoPingNodes);
   else if (tb.dataset.view === "mgmt") loadSvc();
   else if (tb.dataset.view === "devices") loadDevices();
-  else if (tb.dataset.view === "zapret2") loadZapret2();
+  else if (tb.dataset.view.indexOf("z2") === 0) loadZapret2();   // any zapret2 sub-view
 }));
 /* top-level engine selector — shows only that engine's sub-tabs, opens the first */
 function selectEngine(eng){
   document.querySelectorAll(".tab-top").forEach(b => b.classList.toggle("active", b.dataset.engine === eng));
+  const hint = $("#engineHint");   // engine description under the big buttons, above the sub-tabs
+  hint.dataset.i18n = eng === "zapret2" ? "engZapret2Hint" : "engNikkiHint";   // data-i18n → survives RU/EN switch
+  hint.textContent = t(hint.dataset.i18n);
   let first = null, n = 0;
   document.querySelectorAll(".tabs-sub .tab").forEach(b => {
     const show = b.dataset.engine === eng; b.hidden = !show;
@@ -2543,9 +2560,8 @@ function applyCaps(){
 let Z2 = { present: 0, running: 0, boot: 0, autohostlist: 0 };
 let Z2HOSTS = { user: [], auto: [] };
 async function loadZapret2(){
+  // the whole zapret2 engine tab is gated off (applyCaps) when zapret2 is absent, so if we got here it's present
   try { Z2 = await (await fetch("?api=z2status")).json(); } catch(e){ Z2 = { present: CAPS.zapret2 ? 1 : 0 }; }
-  $("#z2NotInstalled").hidden = Z2.present === 1;
-  $("#z2Panel").hidden = Z2.present !== 1;
   if (Z2.present !== 1) return;
   try { Z2HOSTS = await (await fetch("?api=z2hosts")).json(); } catch(e){ Z2HOSTS = { user: [], auto: [] }; }
   renderZ2();
