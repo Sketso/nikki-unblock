@@ -846,8 +846,9 @@ z2status_json() {
 	rn=0; z2_running && rn=1
 	bt=0; /etc/init.d/zapret2 enabled 2>/dev/null && bt=1
 	ah=0; z2_autohostlist && ah=1
-	printf '{"present":%d,"running":%d,"boot":%d,"autohostlist":%d,"user_count":%s,"auto_count":%s}' \
-		"$pr" "$rn" "$bt" "$ah" "$(z2_count "$Z2_USER")" "$(z2_count "$Z2_AUTO")"
+	sd=0; [ "$(uci -q get nikki-unblock.z2.setup_done 2>/dev/null)" = 1 ] && sd=1
+	printf '{"present":%d,"running":%d,"boot":%d,"autohostlist":%d,"user_count":%s,"auto_count":%s,"setup_done":%d}' \
+		"$pr" "$rn" "$bt" "$ah" "$(z2_count "$Z2_USER")" "$(z2_count "$Z2_AUTO")" "$sd"
 }
 # hostnames auto-added to the exclude list to protect VPN nodes (protect_server) — must stay
 z2_node_hosts() {
@@ -1306,6 +1307,63 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 	elif [ "$action" = "z2autoclear" ]; then
 		: > "$Z2_AUTO" 2>/dev/null; /etc/init.d/zapret2 reload >/dev/null 2>&1
 		json_header; printf '{"ok":true}'; exit 0
+
+	elif [ "$action" = "z2autoprune" ]; then
+		# drop auto-learned domains already covered (exact or by suffix) by the manual OR preset lists —
+		# e.g. once googlevideo.com is a manual/preset entry, all the learned rrX.googlevideo.com are redundant
+		before=$(z2_count "$Z2_AUTO")
+		cov=$(cat "$Z2_USER" "$Z2_MAIN" 2>/dev/null | sed 's/\r$//; s/[[:space:]]//g' | grep -vE '^($|#)' | tr 'A-Z' 'a-z' | sort -u)
+		if [ -n "$cov" ] && [ -f "$Z2_AUTO" ]; then
+			cp "$Z2_AUTO" "$Z2_AUTO.prune"
+			for s in $cov; do
+				re=$(printf '%s' "$s" | sed 's/\./\\./g')
+				grep -viE "(^|\.)$re\$" "$Z2_AUTO.prune" > "$Z2_AUTO.prune2" 2>/dev/null
+				mv "$Z2_AUTO.prune2" "$Z2_AUTO.prune"
+			done
+			mv "$Z2_AUTO.prune" "$Z2_AUTO"
+			/etc/init.d/zapret2 reload >/dev/null 2>&1
+		fi
+		after=$(z2_count "$Z2_AUTO")
+		json_header; printf '{"ok":true,"removed":%d,"kept":%s}' "$((before - after))" "$after"; exit 0
+
+	elif [ "$action" = "z2setup" ]; then
+		# first-run curated default: switch a FRESH zapret2 to static curated presets instead of the flaky
+		# autohostlist (it learns per-host, so every new googlevideo CDN fails on first contact). Guarded —
+		# runs once (setup_done flag) and only when the user hasn't configured zapret2 yet, so a real setup
+		# is never clobbered. On failure (e.g. applist unreachable) the flag stays UNSET → retried next time.
+		uci -q get nikki-unblock.z2 >/dev/null 2>&1 || uci set nikki-unblock.z2=z2
+		if [ "$(uci -q get nikki-unblock.z2.setup_done 2>/dev/null)" = 1 ] || ! zapret2_present; then
+			json_header; printf '{"ok":true,"applied":0}'; exit 0
+		fi
+		applied=0; fresh=0
+		# "fresh" = no manual domains, no presets AND a near-empty autolist. The autolist check matters:
+		# a user who has been running autohostlist has hundreds of learned domains — force-disabling it
+		# would drop their working sites. Those keep autohostlist; only genuinely-new installs get curated.
+		if [ "$(z2_count "$Z2_USER")" = 0 ] && [ -z "$(z2_active_presets)" ] && [ "$(z2_count "$Z2_AUTO")" -lt 20 ]; then
+			fresh=1
+			mkdir -p "$Z2_PDIR"
+			for id in youtube discord; do
+				applist_domains "z2/$id" > "$Z2_PDIR/$id.lst.tmp" 2>/dev/null
+				if [ -s "$Z2_PDIR/$id.lst.tmp" ]; then
+					mv "$Z2_PDIR/$id.lst.tmp" "$Z2_PDIR/$id.lst"
+					uci add_list nikki-unblock.z2.preset="$id"
+					applied=1
+				else rm -f "$Z2_PDIR/$id.lst.tmp"; fi
+			done
+			if [ "$applied" = 1 ]; then
+				uci commit nikki-unblock
+				# turn autohostlist OFF first so the single rebuild-restart applies both
+				if [ -f "$Z2_CONFIG" ] && z2_autohostlist; then
+					cp "$Z2_CONFIG" "$Z2_CONFIG.nipret.bak" 2>/dev/null
+					sed -i "s/^\([[:space:]]*MODE_FILTER=\).*/\1hostlist/" "$Z2_CONFIG"
+				fi
+				z2_rebuild_main   # writes the preset hostlist + restarts (applies new main + autohostlist-off)
+			fi
+		fi
+		# burn the once-flag only if we actually applied, or there was nothing to do (already configured) —
+		# a fresh install whose applist fetch failed keeps the flag UNSET so it retries next time.
+		if [ "$fresh" = 0 ] || [ "$applied" = 1 ]; then uci set nikki-unblock.z2.setup_done=1; uci commit nikki-unblock; fi
+		json_header; printf '{"ok":true,"applied":%d}' "$applied"; exit 0
 
 	elif [ "$action" = "z2autotoggle" ]; then
 		on=$(get_param on | sed 's/[^01]//g')
@@ -2012,8 +2070,10 @@ cat <<'HTML'
       <div class="hint" data-i18n="z2AutoHint"></div>
       <div class="btns">
         <button type="button" class="ghost" id="z2AutoView"><span data-i18n="z2AutoView"></span> <span class="count" id="z2AutoCount"></span></button>
+        <button type="button" class="ghost" id="z2AutoPrune" data-i18n="z2AutoPrune"></button>
         <button type="button" class="ghost" id="z2AutoClear" data-i18n="z2AutoClear"></button>
       </div>
+      <div class="hint" data-i18n="z2AutoPruneHint"></div>
       <ul id="z2AutoList" hidden></ul>
       <div class="msg" id="z2AutoMsg"></div>
     </div>
@@ -2129,9 +2189,12 @@ const I18N = {
     z2NoPresets: "Пресеты недоступны — проверь интернет/DNS роутера.",
     z2PresetNote: "Домены добавляются в отдельный список обхода zapret2 (по суффиксу — покрывают и поддомены), отдельно от твоих доменов.",
     z2AutoRecommend: "Рекомендуется держать автообучение выключенным и добавлять сервисы пресетами на вкладке «Домены»: автообучение часто ошибочно заносит лишние домены (телеметрию, локальные сервисы).",
+    z2SetupRunning: "Применяю рекомендуемую настройку…",
+    z2SetupApplied: "Готово: включены пресеты YouTube/Discord, автообучение выключено. Изменить можно на вкладках ниже.",
     z2AutoTitle: "Автообучение (autohostlist)", z2AutoLabel: "Zapret2 сам находит заблокированные домены",
     z2AutoHint: "Zapret2 отслеживает неудачные соединения и сам добавляет заблокированные домены в обход. Обычно достаточно этого; ручной список — для точечных случаев.",
     z2AutoView: "Показать список", z2AutoClear: "Очистить список", z2ClearConfirm: "Очистить весь список автообучения?", z2NoBypass: "Не пробивать этот домен",
+    z2AutoPrune: "Убрать покрытые", z2AutoPruneHint: "Удаляет из автолиста домены, уже покрытые твоими доменами и пресетами (по суффиксу) — чистит накопленный шум.", z2Pruned: "Убрано доменов: ",
     z2Excluded: "Исключения (не пробивать)", z2ExHint: "Домены, которые zapret2 НИКОГДА не трогает (проверяются первыми). Сюда попадают твои «баны» из автолиста и авто-защита серверов VPN-нод (её удалить нельзя).",
     noEngines: "Ни nikki (VPN), ни zapret2 не установлены — управлять нечем. Поставь хотя бы один.",
     devHint: "Устройства из этого списка ходят в интернет мимо VPN (напрямую). Выбери устройство из списка или впиши его IP. Исключение по IP — чтобы оно не «слетало», закрепи за устройством постоянный адрес (статический DHCP-лиз).",
@@ -2212,9 +2275,12 @@ const I18N = {
     z2NoPresets: "Presets unavailable — check the router's internet/DNS.",
     z2PresetNote: "Domains go into a separate zapret2 bypass list (matched by suffix — subdomains covered too), apart from your own domains.",
     z2AutoRecommend: "Recommended: keep auto-learning off and add services via presets on the “Domains” tab — auto-learning often wrongly picks up junk (telemetry, local services).",
+    z2SetupRunning: "Applying recommended setup…",
+    z2SetupApplied: "Done: YouTube/Discord presets on, auto-learn off. You can change it on the tabs below.",
     z2AutoTitle: "Auto-learning (autohostlist)", z2AutoLabel: "Zapret2 finds blocked domains itself",
     z2AutoHint: "Zapret2 watches for failed connections and auto-adds blocked domains to the bypass. Usually enough on its own; the manual list is for specific cases.",
     z2AutoView: "Show list", z2AutoClear: "Clear list", z2ClearConfirm: "Clear the whole auto-learned list?", z2NoBypass: "Don't bypass this domain",
+    z2AutoPrune: "Remove covered", z2AutoPruneHint: "Removes auto-learned domains already covered by your domains and presets (by suffix) — clears accumulated noise.", z2Pruned: "Removed: ",
     z2Excluded: "Exclusions (never bypass)", z2ExHint: "Domains zapret2 NEVER touches (checked first). This holds your \"bans\" from the auto-list plus the automatic protection of your VPN-node servers (which you can't remove).",
     noEngines: "Neither nikki (VPN) nor zapret2 is installed — nothing to manage. Install at least one.",
     devHint: "Devices in this list reach the internet directly, bypassing the VPN. Pick a device or type its IP. Exclusion is by IP — give the device a fixed address (static DHCP lease) so it doesn't drift.",
@@ -2657,11 +2723,20 @@ function applyCaps(){
 /* ---------- zapret2 (DPI bypass) management ---------- */
 let Z2 = { present: 0, running: 0, boot: 0, autohostlist: 0 };
 let Z2HOSTS = { user: [], auto: [] };
-let Z2PRESETS = [], z2presetsLoaded = false;
+let Z2PRESETS = [], z2presetsLoaded = false, z2setupChecked = false;
 async function loadZapret2(){
   // the whole zapret2 engine tab is gated off (applyCaps) when zapret2 is absent, so if we got here it's present
   try { Z2 = await (await fetch("?api=z2status")).json(); } catch(e){ Z2 = { present: CAPS.zapret2 ? 1 : 0 }; }
   if (Z2.present !== 1) return;
+  // first-run curated default (once): on a FRESH zapret2 enable core presets + turn auto-learn off
+  if (Z2.setup_done !== 1 && !z2setupChecked){
+    z2setupChecked = true;
+    showOverlay(t("z2SetupRunning"));
+    const r = await api("z2setup", {});
+    hideOverlay();
+    if (r && r.applied){ setMsg($("#z2PresetMsg"), t("z2SetupApplied")); z2presetsLoaded = false;
+      try { Z2 = await (await fetch("?api=z2status")).json(); } catch(e){} }
+  }
   try { Z2HOSTS = await (await fetch("?api=z2hosts")).json(); } catch(e){ Z2HOSTS = { user: [], auto: [] }; }
   renderZ2();
   if (!z2presetsLoaded) loadZ2Presets();   // curated bypass presets — fetch once, then re-render from cache
@@ -2778,6 +2853,13 @@ $("#z2AutoClear").addEventListener("click", async e => {
   hideOverlay(); e.currentTarget.disabled = false;
   if (res.ok){ setMsg($("#z2AutoMsg"), t("done")); loadZapret2(); }
   else setMsg($("#z2AutoMsg"), t("errP") + (res.error || "?"), false);
+});
+$("#z2AutoPrune").addEventListener("click", async e => {
+  e.currentTarget.disabled = true; showOverlay(t("applying")); setMsg($("#z2AutoMsg"), t("applying"));
+  const res = await api("z2autoprune", {});
+  hideOverlay(); e.currentTarget.disabled = false;
+  if (res && res.ok){ setMsg($("#z2AutoMsg"), t("z2Pruned") + res.removed); loadZapret2(); }
+  else setMsg($("#z2AutoMsg"), t("errP") + ((res && res.error) || "?"), false);
 });
 $("#z2AutoList").addEventListener("click", async e => {
   const b = e.target.closest("button[data-z2exclude]"); if (!b) return;
