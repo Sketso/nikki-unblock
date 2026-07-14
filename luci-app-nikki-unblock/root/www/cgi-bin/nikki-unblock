@@ -1894,6 +1894,7 @@ cat <<'HTML'
   <div class="tabs tabs-top">
     <button class="tab-top active" data-engine="nikki" data-i18n="engNikki"></button>
     <button class="tab-top" data-engine="zapret2" data-i18n="engZapret2"></button>
+    <button class="tab-top" data-engine="common" data-i18n="engCommon"></button>
   </div>
   <div class="hint engine-hint" id="engineHint"></div>
   <div class="tabs tabs-sub">
@@ -1906,6 +1907,7 @@ cat <<'HTML'
     <button class="tab" data-view="z2auto" data-engine="zapret2" data-i18n="z2TabAuto"></button>
     <button class="tab" data-view="z2exclude" data-engine="zapret2" data-i18n="z2TabExclude"></button>
     <button class="tab" data-view="z2svc" data-engine="zapret2" data-i18n="z2TabSvc"></button>
+    <button class="tab" data-view="common" data-engine="common" data-i18n="tabCommon"></button>
   </div>
 
   <!-- ================= DOMAINS ================= -->
@@ -2128,7 +2130,10 @@ cat <<'HTML'
       </div>
       <div class="msg" id="svcMsg"></div>
     </div>
+  </section>
 
+  <!-- ================= ОБЩЕЕ (обновления + бэкап, общее для всего сервиса) ================= -->
+  <section class="view" id="view-common">
     <div class="svc upd">
       <h3 data-i18n="updTitle"></h3>
       <div class="uprow"><span class="upname">nikki-unblock</span><span class="upver" id="verSelf">…</span></div>
@@ -2177,7 +2182,9 @@ let RULES = [], PRESETS = [], LANG = "ru";
 const I18N = {
   ru: {
     h1: "Nipret · VPN + обход DPI",
-    engNikki: "VPN (Nikki)", engZapret2: "Обход DPI (Zapret2)",
+    engNikki: "VPN (Nikki)", engZapret2: "Обход DPI (Zapret2)", engCommon: "Общее",
+    engCommonHint: "Обновления сервиса и движков + резервная копия настроек — общее для всего Nipret.",
+    tabCommon: "Общее",
     tabDomains: "Домены в туннель", tabIps: "IP-исключения", tabDevices: "Устройства",
     z2TabDomains: "Домены", z2TabAuto: "Автообучение", z2TabExclude: "Исключения", z2TabSvc: "Управление",
     engNikkiHint: "Nikki (Mihomo) заворачивает выбранные сайты в VPN/прокси — для того, что блокируют «снаружи» (гео-блок, блок по IP): ChatGPT, Instagram, Telegram и т.п. Управляй доменами, нодами и устройствами.",
@@ -2263,7 +2270,9 @@ const I18N = {
   },
   en: {
     h1: "Nipret · VPN + DPI-bypass",
-    engNikki: "VPN (Nikki)", engZapret2: "DPI bypass (Zapret2)",
+    engNikki: "VPN (Nikki)", engZapret2: "DPI bypass (Zapret2)", engCommon: "General",
+    engCommonHint: "Service & engine updates + config backup — shared across Nipret.",
+    tabCommon: "General",
     tabDomains: "Domains via VPN", tabIps: "IP exclusions", tabDevices: "Devices",
     z2TabDomains: "Domains", z2TabAuto: "Auto-learn", z2TabExclude: "Exclusions", z2TabSvc: "Service",
     engNikkiHint: "Nikki (Mihomo) routes chosen sites through a VPN/proxy — for services blocked \"from outside\" (geo-blocks, IP blocks): ChatGPT, Instagram, Telegram, etc. Manage domains, nodes and devices.",
@@ -2388,6 +2397,7 @@ document.querySelectorAll(".tab").forEach(tb => tb.addEventListener("click", () 
   $("#view-" + tb.dataset.view).classList.add("active");
   if (tb.dataset.view === "nodes") loadNodes().then(autoPingNodes);
   else if (tb.dataset.view === "mgmt") loadSvc();
+  else if (tb.dataset.view === "common") { loadVersions(); loadBackup(); }   // Общее: updates + backup
   else if (tb.dataset.view === "devices") loadDevices();
   else if (tb.dataset.view.indexOf("z2") === 0) loadZapret2();   // any zapret2 sub-view
 }));
@@ -2395,7 +2405,7 @@ document.querySelectorAll(".tab").forEach(tb => tb.addEventListener("click", () 
 function selectEngine(eng){
   document.querySelectorAll(".tab-top").forEach(b => b.classList.toggle("active", b.dataset.engine === eng));
   const hint = $("#engineHint");   // engine description under the big buttons, above the sub-tabs
-  hint.dataset.i18n = eng === "zapret2" ? "engZapret2Hint" : "engNikkiHint";   // data-i18n → survives RU/EN switch
+  hint.dataset.i18n = eng === "zapret2" ? "engZapret2Hint" : eng === "common" ? "engCommonHint" : "engNikkiHint";   // data-i18n → survives RU/EN switch
   hint.textContent = t(hint.dataset.i18n);
   let first = null, n = 0;
   document.querySelectorAll(".tabs-sub .tab").forEach(b => {
