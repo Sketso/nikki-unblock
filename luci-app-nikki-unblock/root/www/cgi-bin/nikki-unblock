@@ -1230,7 +1230,12 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 	elif [ "$action" = "z2svc" ]; then
 		op=$(get_param op)
 		case "$op" in
-			start|stop|restart|reload|enable|disable) /etc/init.d/zapret2 "$op" >/dev/null 2>&1 ;;
+			# On OpenWrt fw4 a bare `start` brings up nfqws2 but does NOT rebuild the desync nft rules
+			# (they come from the firewall include, applied on a full restart / fw reload) — so the
+			# service reads "running" yet nothing is bypassed. Use `restart` for the on-toggle so the
+			# firewall is actually (re)built.
+			start) /etc/init.d/zapret2 restart >/dev/null 2>&1 ;;
+			stop|restart|reload|enable|disable) /etc/init.d/zapret2 "$op" >/dev/null 2>&1 ;;
 			*) json_header; printf '{"ok":false,"error":"bad op"}'; exit 0 ;;
 		esac
 		case "$op" in start|stop|restart|reload) sleep 2 ;; esac
