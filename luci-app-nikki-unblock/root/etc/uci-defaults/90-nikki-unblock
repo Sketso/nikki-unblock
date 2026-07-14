@@ -39,6 +39,18 @@ if [ "$(uci -q get nikki-unblock.config._nodes_init 2>/dev/null)" != 1 ]; then
 	fi
 fi
 
+# zapret2 desync-rules watchdog (fw4 "start doesn't rebuild the firewall" self-heal). The script no-ops
+# when zapret2 is absent/disabled, so it's safe to schedule unconditionally (also covers zapret2 added
+# later). Idempotent: only add the cron line once.
+chmod 0755 /usr/bin/nikki-unblock-z2-watchdog 2>/dev/null
+if [ -f /etc/crontabs/root ] || touch /etc/crontabs/root; then
+	grep -q nikki-unblock-z2-watchdog /etc/crontabs/root 2>/dev/null || {
+		echo '*/5 * * * * /usr/bin/nikki-unblock-z2-watchdog' >> /etc/crontabs/root
+		/etc/init.d/cron enable >/dev/null 2>&1
+		/etc/init.d/cron restart >/dev/null 2>&1
+	}
+fi
+
 # Refresh the LuCI menu/index cache so the new entry shows up.
 rm -f /tmp/luci-indexcache* 2>/dev/null
 rm -rf /tmp/luci-modulecache 2>/dev/null
