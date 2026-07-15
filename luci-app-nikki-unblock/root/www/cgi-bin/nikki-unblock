@@ -44,6 +44,7 @@ BACKUP_DIR="/etc/nikki-unblock/backups"        # rotating auto-backups (daily/we
 BK_TAG="# nikki-unblock-backup"                # crontab marker for auto-backup
 UNDO_DIR="/etc/nikki-unblock/undo"             # ring of pre-change snapshots for "undo last change"
 UNDO_KEEP=8                                    # how many undo points to retain
+REDO_FILE="/etc/nikki-unblock/undo/.redo.tgz"  # pre-undo state so an undo can itself be undone (redo)
 MSS_FILE="/etc/nftables.d/10-mss-clamp.nft"    # optional MSS clamp (fixes mihomo large-download stalls)
 QUIC_FILE="/etc/nftables.d/20-nipret-block-quic.nft"   # optional Block-QUIC (browsers fall back to TCP)
 MIXIN_FILE="/etc/nikki/mixin.yaml"
@@ -1233,14 +1234,16 @@ snap_restore() {   # $1=snapfile -> restores whichever engines it holds (combine
 # ring ids (epoch-second filenames) newest-first — the ONE canonical order used everywhere, so the
 # UI list, "jump back N" and trimming all agree (mtime sort could disagree with the numeric names)
 _undo_ids() { for _p in "$UNDO_DIR"/*.tgz; do [ -f "$_p" ] && basename "$_p" .tgz; done 2>/dev/null | sort -rn; }
-# push a pre-change snapshot onto the ring (called before a whitelisted mutating action)
+# push a pre-change snapshot onto the ring (called before a whitelisted mutating action). A fresh
+# change also invalidates any pending redo (standard undo/redo behaviour).
 undo_push() {   # $1=action label
 	mkdir -p "$UNDO_DIR"
+	rm -f "$REDO_FILE"
 	snap_build "$UNDO_DIR/$(date +%s).tgz" "$1" >/dev/null 2>&1
 	for _id in $(_undo_ids | tail -n +$((UNDO_KEEP + 1))); do rm -f "$UNDO_DIR/$_id.tgz"; done
 }
 undolist_json() {
-	json_header; printf '['
+	json_header; printf '{"undo":['
 	_first=1
 	for _id in $(_undo_ids); do
 		_m=$(tar xzOf "$UNDO_DIR/$_id.tgz" ./snapmeta 2>/dev/null)
@@ -1248,7 +1251,12 @@ undolist_json() {
 		[ "$_first" = 1 ] || printf ','; _first=0
 		printf '{"id":"%s","label":"%s","time":"%s"}' "$_id" "$(json_esc "$_lbl")" "$(json_esc "$_tm")"
 	done
-	printf ']'
+	printf '],"redo":'
+	if [ -f "$REDO_FILE" ]; then
+		_rt=$(tar xzOf "$REDO_FILE" ./snapmeta 2>/dev/null | sed -n 's/^time=//p')
+		printf '{"time":"%s"}' "$(json_esc "$_rt")"
+	else printf 'null'; fi
+	printf '}'
 }
 backupauto_set() {   # $1=on(0/1)
 	uci set nikki-unblock.config.backupauto="$1" 2>/dev/null; uci commit nikki-unblock 2>/dev/null
@@ -1669,11 +1677,25 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		[ -n "$id" ] && [ -f "$UNDO_DIR/$id.tgz" ] || id=$(_undo_ids | head -1)
 		f="$UNDO_DIR/$id.tgz"
 		[ -n "$id" ] && [ -f "$f" ] || { json_header; printf '{"ok":false,"error":"nothing to undo"}'; exit 0; }
+		snap_build "$REDO_FILE" redo >/dev/null 2>&1   # capture current state so this undo can be redone
 		snap_restore "$f"; rc=$?
 		for _u in "$UNDO_DIR"/*.tgz; do
 			[ -f "$_u" ] || continue
 			[ "$(basename "$_u" .tgz)" -ge "$id" ] 2>/dev/null && rm -f "$_u"
 		done
+		json_header
+		case "$rc" in
+			0) printf '{"ok":true}' ;;
+			2) printf '{"ok":false,"error":"restore broke a service (reverted)"}' ;;
+			*) printf '{"ok":false,"error":"restore had problems (code %s)"}' "$rc" ;;
+		esac
+		exit 0
+
+	elif [ "$action" = "redo" ]; then
+		# re-apply the state captured just before the last undo ("undo the undo")
+		[ -f "$REDO_FILE" ] || { json_header; printf '{"ok":false,"error":"nothing to redo"}'; exit 0; }
+		snap_restore "$REDO_FILE"; rc=$?
+		rm -f "$REDO_FILE"
 		json_header
 		case "$rc" in
 			0) printf '{"ok":true}' ;;
@@ -2361,6 +2383,8 @@ cat <<'HTML'
   .um-sep { height: 1px; background: #8883; margin: .3rem .2rem; }
   .umi { display: flex; align-items: center; gap: .55rem; width: 100%; text-align: left; background: transparent; color: inherit; padding: .4rem .5rem; border-radius: 7px; font-size: .85rem; }
   .umi:hover { background: #8882; }
+  .umi-redo { background: #2563eb1a; }
+  .umi-redo .um-badge { color: #2563eb; opacity: 1; }
   .um-badge { flex: 0 0 1.6rem; text-align: center; font-weight: 700; opacity: .7; font-size: .8rem; }
   .um-txt { display: flex; flex-direction: column; min-width: 0; }
   .um-txt b { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -3000,7 +3024,7 @@ const I18N = {
     bkRestoreRow: "Восстановить", bkRestoreRotConfirm: "Восстановить настройки из этого бэкапа? Текущее состояние обоих движков будет заменено.",
     bk_daily: "За день", bk_weekly: "За неделю", bk_monthly: "За месяц",
     undoTitle: "Откат изменений", undoHint: "Перед каждым переключением (стратегия, QUIC, IPv6, автообучение, пресеты) сохраняется снимок обоих движков. Если что-то сломалось после изменения — верни как было.",
-    undoBtn: "↩ Вернуть как было", undoThis: "Откатить сюда", undoLast: "Вернуть последнее изменение", undoEmpty: "Пока нет изменений для отката", undoConfirm: "Откатить к состоянию до этого изменения? Настройки обоих движков вернутся к тому моменту.",
+    undoBtn: "↩ Вернуть как было", undoThis: "Откатить сюда", undoLast: "Вернуть последнее изменение", redoLast: "Вернуть отменённое", undoEmpty: "Пока нет изменений для отката", undoConfirm: "Откатить к состоянию до этого изменения? Настройки обоих движков вернутся к тому моменту.",
     act_z2strat: "стратегия zapret2", act_z2quic: "тумблер QUIC", act_z2ipv6: "тумблер IPv6", act_z2autotoggle: "автообучение zapret2",
     act_z2preset_on: "пресет zapret2 вкл", act_z2preset_off: "пресет zapret2 выкл", act_geosite_on: "гео-пресет вкл", act_geosite_off: "гео-пресет выкл",
     act_preset_sync: "пресет доменов вкл", act_preset_off: "пресет доменов выкл", act_mssclamp: "MSS-clamp", act_auto: "авто-бэкап",
@@ -3129,7 +3153,7 @@ const I18N = {
     bkRestoreRow: "Restore", bkRestoreRotConfirm: "Restore settings from this backup? The current state of both engines will be replaced.",
     bk_daily: "Daily", bk_weekly: "Weekly", bk_monthly: "Monthly",
     undoTitle: "Undo changes", undoHint: "Before each toggle (strategy, QUIC, IPv6, auto-learn, presets) a snapshot of both engines is saved. If something broke after a change — put it back.",
-    undoBtn: "↩ Undo last change", undoThis: "Revert to here", undoLast: "Undo last change", undoEmpty: "No changes to undo yet", undoConfirm: "Revert to the state before this change? Both engines' settings return to that point.",
+    undoBtn: "↩ Undo last change", undoThis: "Revert to here", undoLast: "Undo last change", redoLast: "Redo undone change", undoEmpty: "No changes to undo yet", undoConfirm: "Revert to the state before this change? Both engines' settings return to that point.",
     act_z2strat: "zapret2 strategy", act_z2quic: "QUIC toggle", act_z2ipv6: "IPv6 toggle", act_z2autotoggle: "zapret2 auto-learn",
     act_z2preset_on: "zapret2 preset on", act_z2preset_off: "zapret2 preset off", act_geosite_on: "geo preset on", act_geosite_off: "geo preset off",
     act_preset_sync: "domain preset on", act_preset_off: "domain preset off", act_mssclamp: "MSS clamp", act_auto: "auto-backup",
@@ -4098,7 +4122,7 @@ async function loadSvc(){
   try { LASTSVC = await (await fetch("?api=svcstatus")).json(); renderSvc(LASTSVC); renderGuard(LASTSVC); } catch(e){}
 }
 /* ---------- backup / restore ---------- */
-let BK_FILES = [], UNDO_RING = [];
+let BK_FILES = [], UNDO_RING = [], REDO = null;
 async function loadBackup(){
   try {
     const s = await (await fetch("?api=backupauto")).json();
@@ -4125,18 +4149,22 @@ function refreshAllAfterRestore(){
   loadDomains(); loadPresets(); if (CAPS.zapret2) loadZapret2(); loadSvc(); loadVersions(); loadBackup(); loadUndo();
 }
 async function loadUndo(){
-  try { UNDO_RING = await (await fetch("?api=undolist")).json(); if (!Array.isArray(UNDO_RING)) UNDO_RING = []; }
-  catch(e){ UNDO_RING = []; }
+  try { const d = await (await fetch("?api=undolist")).json();
+        UNDO_RING = (d && Array.isArray(d.undo)) ? d.undo : []; REDO = (d && d.redo) ? d.redo : null; }
+  catch(e){ UNDO_RING = []; REDO = null; }
   buildUndoMenu();
 }
 function buildUndoMenu(){
   const wrap = $("#undoWrap"), menu = $("#undoMenu");
   const hasUndo = UNDO_RING.length, hasBk = BK_FILES.length;
   wrap.hidden = false;   // the control is always present so users can find it
-  $("#undoTop").classList.toggle("dim", !(hasUndo || hasBk));
+  $("#undoTop").classList.toggle("dim", !(hasUndo || hasBk || REDO));
   $("#undoTop").title = hasUndo ? (t("undoLast") + " · " + (t("act_" + UNDO_RING[0].label) || UNDO_RING[0].label)) : t("undoTitle");
   let h = '<div class="um-head">' + escH(t("undoTitle")) + '</div>';
-  if (!hasUndo && !hasBk) h += '<div class="um-empty">' + escH(t("undoEmpty")) + '</div>';
+  if (REDO) h += '<button class="umi umi-redo" data-kind="redo">' +
+    '<span class="um-badge">↻</span><span class="um-txt"><b>' + escH(t("redoLast")) + '</b>' +
+    '<small>' + escH(REDO.time || "") + '</small></span></button>';
+  if (!hasUndo && !hasBk && !REDO) h += '<div class="um-empty">' + escH(t("undoEmpty")) + '</div>';
   UNDO_RING.slice(0, 5).forEach((u, i) => {
     const label = t("act_" + u.label) || u.label;
     h += '<button class="umi" data-kind="undo" data-id="' + escH(u.id) + '">' +
@@ -4161,6 +4189,13 @@ async function doUndo(id){
   if (!(res && res.ok)) alert(t("errP") + ((res && res.error) || "?"));
   refreshAllAfterRestore();
 }
+async function doRedo(){
+  showOverlay(t("applying"));
+  let res; try { res = await api("redo", {}); } catch(_){ res = {}; }
+  hideOverlay();
+  if (!(res && res.ok)) alert(t("errP") + ((res && res.error) || "?"));
+  refreshAllAfterRestore();
+}
 async function restoreBackup(which, msgEl){
   showOverlay(t("bkRestoring")); if (msgEl) setMsg(msgEl, t("bkRestoring"));
   let res; try { res = await api("bkrestore", { which }); } catch(_){ res = {}; }
@@ -4175,6 +4210,7 @@ $("#undoMenu").addEventListener("click", e => {
   const b = e.target.closest(".umi"); if (!b) return;
   $("#undoWrap").classList.remove("open");
   if (b.dataset.kind === "undo") doUndo(b.dataset.id);
+  else if (b.dataset.kind === "redo") doRedo();
   else if (b.dataset.kind === "bk"){ if (confirm(t("bkRestoreRotConfirm"))) restoreBackup(b.dataset.which, null); }
 });
 document.addEventListener("click", () => $("#undoWrap").classList.remove("open"));
