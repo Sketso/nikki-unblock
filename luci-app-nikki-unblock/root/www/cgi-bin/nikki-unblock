@@ -43,6 +43,7 @@ SUB_TAG="# nikki-unblock-subsync"              # crontab marker for subscription
 BACKUP_DIR="/etc/nikki-unblock/backups"        # rotating auto-backups (daily/weekly/monthly)
 BK_TAG="# nikki-unblock-backup"                # crontab marker for auto-backup
 MSS_FILE="/etc/nftables.d/10-mss-clamp.nft"    # optional MSS clamp (fixes mihomo large-download stalls)
+QUIC_FILE="/etc/nftables.d/20-nipret-block-quic.nft"   # optional Block-QUIC (browsers fall back to TCP)
 MIXIN_FILE="/etc/nikki/mixin.yaml"
 MIHOMO_API="http://127.0.0.1:9090"
 
@@ -847,8 +848,16 @@ z2status_json() {
 	bt=0; /etc/init.d/zapret2 enabled 2>/dev/null && bt=1
 	ah=0; z2_autohostlist && ah=1
 	sd=0; [ "$(uci -q get nikki-unblock.z2.setup_done 2>/dev/null)" = 1 ] && sd=1
-	printf '{"present":%d,"running":%d,"boot":%d,"autohostlist":%d,"user_count":%s,"auto_count":%s,"setup_done":%d}' \
-		"$pr" "$rn" "$bt" "$ah" "$(z2_count "$Z2_USER")" "$(z2_count "$Z2_AUTO")" "$sd"
+	qb=0; quicblock_on && qb=1
+	# desync health: on fw4 a bare `start` brings nfqws2 up WITHOUT nft rules ("running but not
+	# bypassing") — same check as the watchdog: the zapret2 postnat chain must queue to nfqws2
+	dq=0
+	if [ "$rn" = 1 ]; then
+		[ "$(nft list chain inet zapret2 postnat 2>/dev/null | grep -c queue)" -gt 0 ] \
+			&& pgrep -f nfqws2 >/dev/null 2>&1 && dq=1
+	fi
+	printf '{"present":%d,"running":%d,"boot":%d,"autohostlist":%d,"user_count":%s,"auto_count":%s,"setup_done":%d,"quic_block":%d,"desync_ok":%d}' \
+		"$pr" "$rn" "$bt" "$ah" "$(z2_count "$Z2_USER")" "$(z2_count "$Z2_AUTO")" "$sd" "$qb" "$dq"
 }
 # hostnames auto-added to the exclude list to protect VPN nodes (protect_server) — must stay
 z2_node_hosts() {
@@ -937,6 +946,22 @@ mssclamp_set() {   # $1 = on(0/1)
 		rm -f "$MSS_FILE"
 		# fw4 reload alone doesn't drop a hook-chain from a removed include — delete it explicitly
 		nft delete chain inet fw4 mss_clamp_all 2>/dev/null
+		fw4 reload >/dev/null 2>&1 || /etc/init.d/firewall reload >/dev/null 2>&1
+	fi
+}
+# ---- Block-QUIC (zapret2 companion) -----------------------------------------
+# Drop forwarded UDP/443 so browsers fall back to TCP, where the zapret2 desync works.
+# Same include pattern as the MSS clamp: fw4 wraps /etc/nftables.d snippets into table inet fw4.
+quicblock_on() { [ -f "$QUIC_FILE" ]; }
+quicblock_set() {   # $1 = on(0/1)
+	if [ "$1" = 1 ]; then
+		mkdir -p /etc/nftables.d
+		printf 'chain nipret_block_quic {\n    type filter hook forward priority -5; policy accept;\n    udp dport 443 drop\n}\n' > "$QUIC_FILE"
+		fw4 reload >/dev/null 2>&1 || /etc/init.d/firewall reload >/dev/null 2>&1
+	else
+		rm -f "$QUIC_FILE"
+		# fw4 reload alone doesn't drop a hook-chain from a removed include — delete it explicitly
+		nft delete chain inet fw4 nipret_block_quic 2>/dev/null
 		fw4 reload >/dev/null 2>&1 || /etc/init.d/firewall reload >/dev/null 2>&1
 	fi
 }
@@ -1252,6 +1277,12 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		case "$op" in start|stop|restart|reload) sleep 2 ;; esac
 		rn=0; z2_running && rn=1; bt=0; /etc/init.d/zapret2 enabled 2>/dev/null && bt=1
 		json_header; printf '{"ok":true,"running":%d,"boot":%d}' "$rn" "$bt"; exit 0
+
+	elif [ "$action" = "z2quic" ]; then
+		on=$(get_param on | tr -cd '01' | cut -c1)
+		quicblock_set "$on"
+		q=0; quicblock_on && q=1
+		json_header; printf '{"ok":true,"quic_block":%d}' "$q"; exit 0
 
 	elif [ "$action" = "z2hostadd" ]; then
 		d=$(printf '%s' "$(get_param domain)" | parse_domains | head -1)
@@ -1891,7 +1922,7 @@ cat <<'HTML'
   .svc { display: flex; flex-direction: column; gap: .8rem; max-width: 440px; }
   .svc .st { font-size: 1rem; font-weight: 600; }
   .svc .dot { display: inline-block; width: .62rem; height: .62rem; border-radius: 50%; margin-right: .45rem; vertical-align: middle; background: #8886; }
-  .svc .dot.up { background: #16a34a; } .svc .dot.down { background: #dc2626; }
+  .svc .dot.up { background: #16a34a; } .svc .dot.down { background: #dc2626; } .svc .dot.warn { background: #f59e0b; }
   .svc .btns { display: flex; gap: .5rem; flex-wrap: wrap; }
   /* iOS-style toggle switch */
   .sw { position: relative; display: inline-block; width: 40px; height: 24px; flex: 0 0 auto; }
@@ -2170,6 +2201,7 @@ cat <<'HTML'
 
   <!-- ============ ZAPRET2 · SERVICE ============ -->
   <section class="view" id="view-z2svc">
+    <div class="banner" id="z2Health" hidden data-i18n="z2HealthWarn"></div>
     <div class="svc">
       <div class="swrow">
         <span class="swlabel"><span class="dot" id="z2Dot"></span><span id="z2State">…</span></span>
@@ -2179,6 +2211,11 @@ cat <<'HTML'
         <span class="swlabel" data-i18n="svcBoot"></span>
         <label class="sw"><input type="checkbox" id="z2Boot"><span class="sl"></span></label>
       </div>
+      <div class="swrow">
+        <span class="swlabel" data-i18n="z2QuicLabel"></span>
+        <label class="sw"><input type="checkbox" id="z2Quic"><span class="sl"></span></label>
+      </div>
+      <div class="hint" data-i18n="z2QuicHint"></div>
       <div class="btns">
         <button type="button" class="ghost" id="z2Restart" data-i18n="svcRestart"></button>
         <button type="button" class="ghost" id="z2Reload" data-i18n="svcReload"></button>
@@ -2285,6 +2322,10 @@ const I18N = {
     z2ExNote: "Домен попадёт в исключения (не будет пробиваться), а покрытые им записи исчезнут из автосписка.",
     fltPh: "Фильтр… (можно * как маску)", fltAll: "видимые", fltDel: "Удалить выбранные", fltNoBypass: "Не пробивать выбранные",
     fltConfirm: "Применить к выбранным записям: ",
+    z2OnNoDesync: "работает, но обход не активен",
+    z2HealthWarn: "Служба запущена, но правила обхода не активны — трафик идёт мимо DPI-обхода. Нажми «Перезапустить», чтобы пересобрать правила.",
+    z2QuicLabel: "Резать QUIC (форсить TCP)",
+    z2QuicHint: "Блокирует UDP/443 из локальной сети — браузеры откатываются на TCP, где обход DPI работает надёжнее. Приложению YouTube на телефоне это не поможет: ему нужен рабочий QUIC-обход, а не блок.",
     z2Excluded: "Исключения (не пробивать)", z2ExHint: "Домены, которые zapret2 НИКОГДА не трогает (проверяются первыми). Сюда попадают твои «баны» из автолиста и авто-защита серверов VPN-нод (её удалить нельзя).",
     noEngines: "Ни nikki (VPN), ни zapret2 не установлены — управлять нечем. Поставь хотя бы один.",
     devHint: "Устройства из этого списка ходят в интернет мимо VPN (напрямую). Выбери устройство из списка или впиши его IP. Исключение по IP — чтобы оно не «слетало», закрепи за устройством постоянный адрес (статический DHCP-лиз).",
@@ -2377,6 +2418,10 @@ const I18N = {
     z2ExNote: "The domain goes to the exclusions (won't be desynced) and auto-learned entries it covers are removed.",
     fltPh: "Filter… (* works as a wildcard)", fltAll: "shown", fltDel: "Delete selected", fltNoBypass: "Don't bypass selected",
     fltConfirm: "Apply to the selected entries: ",
+    z2OnNoDesync: "running, but bypass inactive",
+    z2HealthWarn: "The service is running, but the desync rules are not active — traffic is passing without the DPI bypass. Hit Restart to rebuild the rules.",
+    z2QuicLabel: "Block QUIC (force TCP)",
+    z2QuicHint: "Drops LAN UDP/443 so browsers fall back to TCP, where the DPI bypass is more reliable. Won't help the mobile YouTube app — it needs a working QUIC desync, not a block.",
     z2Excluded: "Exclusions (never bypass)", z2ExHint: "Domains zapret2 NEVER touches (checked first). This holds your \"bans\" from the auto-list plus the automatic protection of your VPN-node servers (which you can't remove).",
     noEngines: "Neither nikki (VPN) nor zapret2 is installed — nothing to manage. Install at least one.",
     devHint: "Devices in this list reach the internet directly, bypassing the VPN. Pick a device or type its IP. Exclusion is by IP — give the device a fixed address (static DHCP lease) so it doesn't drift.",
@@ -2942,9 +2987,12 @@ function z2showPresetInfo(p){
 }
 function renderZ2(){
   const run = Z2.running === 1;
-  $("#z2Dot").className = "dot " + (run ? "up" : "down");
-  $("#z2State").textContent = run ? t("z2On") : t("z2Off");
+  const dOk = Z2.desync_ok === 1;
+  $("#z2Dot").className = "dot " + (run ? (dOk ? "up" : "warn") : "down");
+  $("#z2State").textContent = run ? (dOk ? t("z2On") : t("z2OnNoDesync")) : t("z2Off");
+  $("#z2Health").hidden = !(run && !dOk);
   $("#z2Run").checked = run; $("#z2Boot").checked = Z2.boot === 1; $("#z2AutoChk").checked = Z2.autohostlist === 1;
+  $("#z2Quic").checked = Z2.quic_block === 1;
   const ul = $("#z2UserList"); ul.innerHTML = "";
   const u = Z2HOSTS.user || []; $("#z2UserCount").textContent = "(" + u.length + ")";
   u.forEach(d => { const li = document.createElement("li");
@@ -2980,6 +3028,13 @@ async function z2Do(op, el){
 }
 $("#z2Run").addEventListener("change", e => z2Do(e.currentTarget.checked ? "start" : "stop", e.currentTarget));
 $("#z2Boot").addEventListener("change", e => z2Do(e.currentTarget.checked ? "enable" : "disable", e.currentTarget));
+$("#z2Quic").addEventListener("change", async e => {
+  const el = e.currentTarget; el.disabled = true; showOverlay(t("applying")); setMsg($("#z2Msg"), t("applying"));
+  let res; try { res = await api("z2quic", { on: el.checked ? 1 : 0 }); } catch(_){ res = {}; }
+  hideOverlay(); el.disabled = false;
+  if (res && res.ok) setMsg($("#z2Msg"), t("done")); else setMsg($("#z2Msg"), t("errP") + ((res && res.error) || "?"), false);
+  loadZapret2();
+});
 $("#z2Restart").addEventListener("click", e => z2Do("restart", e.currentTarget));
 $("#z2Reload").addEventListener("click", e => z2Do("reload", e.currentTarget));
 $("#z2Form").addEventListener("submit", async e => {
