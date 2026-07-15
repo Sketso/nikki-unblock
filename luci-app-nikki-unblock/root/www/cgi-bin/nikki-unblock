@@ -429,6 +429,31 @@ diag_json() {
 	printf '{"ok":true,"text":"%s"}' "$(json_log /tmp/nu-diag.txt)"
 	rm -f /tmp/nu-diag.txt
 }
+# available-update check: latest versions vs installed. Network calls (github + apk feeds) with short
+# timeouts; on a router without egress everything just comes back empty (UI shows "?", no highlight).
+# github.com/api.github.com are NOT RKN-blocked, so we query them directly for the newest releases.
+updcheck_json() {
+	json_header
+	gh_tag() {   # $1=owner/repo -> latest release tag (vX.Y.Z), empty on failure
+		curl -sf --max-time 12 -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$1/releases/latest" 2>/dev/null \
+			| grep -oE '"tag_name"[^"]*"[^"]*"' | grep -oE 'v?[0-9][0-9.]*' | head -1
+	}
+	# Nipret self: installed apk version (drop -rN) vs latest GitHub release tag (drop leading v)
+	scur=$(pkg_ver luci-app-nikki-unblock | sed 's/-r[0-9]*$//')
+	slat=$(gh_tag Sketso/nikki-unblock | sed 's/^v//')
+	# zapret2: nfqws2 version vs bol-van latest tag (both carry the v prefix)
+	z2p=0; z2cur=""; z2lat=""
+	if [ -x /etc/init.d/zapret2 ] && [ -d /opt/zapret2 ]; then
+		z2p=1; z2cur=$(z2_cur_ver); z2lat=$(gh_tag bol-van/zapret2)
+	fi
+	# nikki + mihomo: whatever the apk feeds offer as upgradable (uses the current index, no slow refresh)
+	_up=$(apk list --upgradable 2>/dev/null)
+	nud=0; printf '%s' "$_up" | grep -qE '(^|/| )(nikki|luci-app-nikki)-[0-9]' && nud=1
+	_mp=$(mihomo_pkg); mud=0
+	[ -n "$_mp" ] && printf '%s' "$_up" | grep -qE "(^|/| )$_mp-[0-9]" && mud=1
+	printf '{"self":{"cur":"%s","latest":"%s"},"zapret2":{"present":%d,"cur":"%s","latest":"%s"},"nikki":{"upd":%d},"mihomo":{"upd":%d}}' \
+		"$scur" "$slat" "$z2p" "$z2cur" "$z2lat" "$nud" "$mud"
+}
 upd_running() {   # 0 (true) if an update runner is alive
 	[ -f "$UPD_LOCK" ] || return 1
 	kill -0 "$(cat "$UPD_LOCK" 2>/dev/null)" 2>/dev/null
@@ -907,9 +932,17 @@ Z2_UPD_SNAP="/tmp/nu-z2-preupd.tgz"
 z2_run_update() {   # [$1=version $2=url] — if omitted, resolved from the Pages manifest
 	_ver="$1"; _url="$2"
 	if [ -z "$_url" ]; then
-		_man=$(curl -sf --max-time 25 "$APPLIST_URL/z2/version.json" 2>/dev/null)
-		_ver=$(printf '%s' "$_man" | grep -oE 'v[0-9][0-9.]*' | head -1)
-		_url=$(printf '%s' "$_man" | grep -oE '(https?|file)://[^" ]*\.(tar\.gz|tgz)' | head -1)
+		# always take the freshest release straight from bol-van (freshness keeps the bypass working);
+		# api.github.com is NOT RKN-blocked. If it's unreachable/rate-limited, fall back to our pinned manifest.
+		_api=$(curl -sf --max-time 20 -H "Accept: application/vnd.github+json" "https://api.github.com/repos/bol-van/zapret2/releases/latest" 2>/dev/null)
+		_ver=$(printf '%s' "$_api" | grep -oE '"tag_name"[^"]*"[^"]*"' | grep -oE 'v[0-9][0-9.]*' | head -1)
+		_url=$(printf '%s' "$_api" | grep -oE 'https://[^" ]*openwrt-embedded\.tar\.gz' | head -1)
+		if [ -z "$_url" ]; then
+			echo ">> github API unavailable — trying pinned manifest"
+			_man=$(curl -sf --max-time 20 "$APPLIST_URL/z2/version.json" 2>/dev/null)
+			_ver=$(printf '%s' "$_man" | grep -oE 'v[0-9][0-9.]*' | head -1)
+			_url=$(printf '%s' "$_man" | grep -oE '(https?|file)://[^" ]*\.(tar\.gz|tgz)' | head -1)
+		fi
 	fi
 	[ -z "$_url" ] && { echo "!! can't resolve the zapret2 update URL"; return 1; }
 	_cur=$(z2_cur_ver)
@@ -1992,6 +2025,7 @@ devices_json() {
 [ "$API" = "autosync" ] && { autosync_json; exit 0; }
 [ "$API" = "versions" ] && { versions_json; exit 0; }
 [ "$API" = "diag" ] && { diag_json; exit 0; }
+[ "$API" = "updcheck" ] && { updcheck_json; exit 0; }
 [ "$API" = "subauto" ] && { subauto_json; exit 0; }
 [ "$API" = "backupauto" ] && { backupauto_json; exit 0; }
 [ "$API" = "updatestatus" ] && { updatestatus_json; exit 0; }
@@ -2139,6 +2173,8 @@ cat <<'HTML'
   .uprow { display: flex; justify-content: space-between; align-items: baseline; gap: .6rem; font-size: .9rem; padding: .18rem 0; }
   .uprow .upname { opacity: .85; }
   .uprow .upver { font-family: ui-monospace, monospace; opacity: .7; font-size: .82rem; text-align: right; }
+  .uprow .upver.ok { color: #16a34a; opacity: .9; }
+  .uprow .upver.avail { color: #f59e0b; opacity: 1; font-weight: 600; }
   .uplog { background: #0000001f; border: 1px solid #8884; border-radius: 8px; padding: .5rem .6rem; font-family: ui-monospace, monospace; font-size: .76rem; line-height: 1.4; max-height: 13rem; overflow: auto; white-space: pre-wrap; word-break: break-word; margin: .6rem 0 0; }
   .swrow { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .6rem 0; border-bottom: 1px solid #8882; }
   .swrow .swlabel { font-size: .95rem; }
@@ -2620,6 +2656,7 @@ const I18N = {
     rpSend: "Создать issue на GitHub", rpNeedDesc: "Сначала опиши проблему", rpOpened: "Открыл черновик issue в новой вкладке — проверь и отправь",
     rpFullHint: "Лог не поместился в ссылку — скопируй текст выше и вставь в тело issue.",
     updTitle: "Обновление", updSelf: "Обновить nikki-unblock", updNikki: "Обновить nikki", updGeo: "Обновить geo", updZ2: "Обновить zapret2", updAll: "Обновить всё",
+    updNew: "Доступно обновление", updUpToDate: "Актуальная версия", updAvail: "обновление",
     geoOn: "включено", geoOff: "выключено", geoipNeed: "Сначала включи базу GeoIP: «Обновить geo» во вкладке «Управление».",
     updRunning: "Обновляю… (можно закрыть — продолжится в фоне)", updOkCode: "Готово", updBad: "Ошибка, код ",
     on_: "Включить ", off_: "Отключить ", upd_: "Обновить ",
@@ -2722,6 +2759,7 @@ const I18N = {
     rpSend: "Open GitHub issue", rpNeedDesc: "Describe the problem first", rpOpened: "Opened an issue draft in a new tab — review and submit",
     rpFullHint: "The log didn't fit in the link — copy the text above and paste it into the issue body.",
     updTitle: "Updates", updSelf: "Update nikki-unblock", updNikki: "Update nikki", updGeo: "Update geo", updZ2: "Update zapret2", updAll: "Update all",
+    updNew: "Update available", updUpToDate: "Up to date", updAvail: "update",
     geoOn: "enabled", geoOff: "disabled", geoipNeed: "Enable the GeoIP database first: «Update geo» in the Manage tab.",
     updRunning: "Updating… (you can leave — it continues in the background)", updOkCode: "Done", updBad: "Failed, code ",
     on_: "Enable ", off_: "Disable ", upd_: "Update ",
@@ -2772,7 +2810,7 @@ document.querySelectorAll(".tab").forEach(tb => tb.addEventListener("click", () 
   $("#view-" + tb.dataset.view).classList.add("active");
   if (tb.dataset.view === "nodes") loadNodes().then(autoPingNodes);
   else if (tb.dataset.view === "mgmt") loadSvc();
-  else if (tb.dataset.view === "common") { loadVersions(); loadBackup(); }   // Общее: updates + backup
+  else if (tb.dataset.view === "common") { loadVersions(); loadUpdCheck(); loadBackup(); }   // Общее: updates + backup
   else if (tb.dataset.view === "devices") loadDevices();
   else if (tb.dataset.view.indexOf("z2") === 0) loadZapret2();   // any zapret2 sub-view
 }));
@@ -3701,7 +3739,38 @@ async function loadVersions(){
     if (z2) $("#verZ2").textContent = v.z2_ver || "?";
     // presets may load before versions — refresh cards so the geoip facet reflects the real DB state
     if (wasGeo !== GEO_OK && PRESETS.length) renderPresets();
+    applyUpdMarks();   // re-apply latest-version highlighting if a check already ran
   } catch(e){}
+}
+/* auto-check for available updates (github releases + apk feeds); colour rows green/amber */
+let UPDCHK = null, updChecking = false;
+function applyUpdMarks(){
+  if (!UPDCHK) return;
+  const c = UPDCHK;
+  const mark = (el, cur, latest) => {
+    if (!el || !latest) return;
+    const upd = cur && latest !== cur;
+    el.classList.toggle("avail", !!upd); el.classList.toggle("ok", !upd);
+    el.title = upd ? t("updNew") : t("updUpToDate");
+    if (upd) el.textContent = cur + " → " + latest;
+  };
+  if (c.self) mark($("#verSelf"), c.self.cur, c.self.latest);
+  if (c.zapret2 && c.zapret2.present) mark($("#verZ2"), c.zapret2.cur, c.zapret2.latest);
+  const vn = $("#verNikki");
+  if (vn){   // combined nikki+mihomo row: text is reset by loadVersions first, so append once
+    const upd = (c.nikki && c.nikki.upd) || (c.mihomo && c.mihomo.upd);
+    vn.classList.toggle("avail", !!upd); vn.classList.toggle("ok", !upd);
+    vn.title = upd ? t("updNew") : t("updUpToDate");
+    if (upd) vn.textContent += " · " + t("updAvail");
+  }
+}
+async function loadUpdCheck(force){
+  if (updChecking) return;
+  if (UPDCHK && !force) { applyUpdMarks(); return; }
+  updChecking = true;
+  try { UPDCHK = await (await fetch("?api=updcheck")).json(); applyUpdMarks(); }
+  catch(e){}
+  finally { updChecking = false; }
 }
 function updBtns(dis){ ["#updSelf","#updNikki","#updGeo","#updZ2","#updAll"].forEach(id => { $(id).disabled = dis; }); }
 let updPolling = false;
@@ -3714,7 +3783,7 @@ async function pollUpdate(){
   const finish = (ok, code) => {
     updPolling = false; updBtns(false);
     setMsg($("#updMsg"), ok ? t("updOkCode") : (t("updBad") + code), ok);
-    loadVersions(); loadSvc();
+    loadVersions(); loadSvc(); loadUpdCheck(true);   // versions changed → re-check availability
   };
   const tick = async () => {
     let s = null;
@@ -3757,7 +3826,7 @@ $("#updAll").addEventListener("click", () => doUpdate("all"));
   if (CAPS.nikki) await Promise.allSettled([loadDomains(), loadPresets()]);
   hideOverlay();
   if (CAPS.nikki){ loadIps(); loadDevices(); loadAutosync(); loadNodes(); loadSvc(); }
-  loadVersions(); loadBackup();
+  loadVersions(); loadUpdCheck(); loadBackup();   // one availability check per session (cached)
   // resume the log view if an update is already running (started from another tab/session)
   try { const s = await (await fetch("?api=updatestatus")).json(); if (s && s.running) pollUpdate(); } catch(e){}
 })();
