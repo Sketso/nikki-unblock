@@ -42,6 +42,8 @@ SUBS_DIR="/etc/nikki-unblock/subs"             # tracked link-subscriptions: <su
 SUB_TAG="# nikki-unblock-subsync"              # crontab marker for subscription auto-refresh
 BACKUP_DIR="/etc/nikki-unblock/backups"        # rotating auto-backups (daily/weekly/monthly)
 BK_TAG="# nikki-unblock-backup"                # crontab marker for auto-backup
+UNDO_DIR="/etc/nikki-unblock/undo"             # ring of pre-change snapshots for "undo last change"
+UNDO_KEEP=8                                    # how many undo points to retain
 MSS_FILE="/etc/nftables.d/10-mss-clamp.nft"    # optional MSS clamp (fixes mihomo large-download stalls)
 QUIC_FILE="/etc/nftables.d/20-nipret-block-quic.nft"   # optional Block-QUIC (browsers fall back to TCP)
 MIXIN_FILE="/etc/nikki/mixin.yaml"
@@ -1158,10 +1160,93 @@ restore_backup() {
 }
 backup_auto_run() {
 	mkdir -p "$BACKUP_DIR"
-	build_backup "$BACKUP_DIR/daily.tar.gz" >/dev/null 2>&1
+	# combined snapshot (nikki + zapret2) so "restore yesterday" covers BOTH engines
+	snap_build "$BACKUP_DIR/daily.tar.gz" auto >/dev/null 2>&1
 	[ "$(date +%u)" = 1 ]  && cp "$BACKUP_DIR/daily.tar.gz" "$BACKUP_DIR/weekly.tar.gz" 2>/dev/null
 	[ "$(date +%d)" = 01 ] && cp "$BACKUP_DIR/daily.tar.gz" "$BACKUP_DIR/monthly.tar.gz" 2>/dev/null
 	logger -t nikki-unblock "auto-backup written"
+}
+# ---- combined snapshots + "undo last change" -------------------------------
+# A combined snapshot bundles a nikki backup (build_backup) AND a zapret2 backup (z2_build_backup)
+# plus a small meta label, so restoring it reverts BOTH engines at once. Used by the auto-backup and
+# by the undo ring. Reuses the already-tested per-engine backup/restore (each does its own health
+# rollback), so restoring is as safe as the manual restores.
+# file/uci state the per-engine backups DON'T cover: the QUIC-block & MSS nftables.d files and the
+# IPv6-relevant network/dhcp uci — so an undo/restore actually reverts those toggles too.
+_sys_backup_into() {   # $1=dir
+	mkdir -p "$1/sys/nftables.d"
+	[ -f "$QUIC_FILE" ] && cp "$QUIC_FILE" "$1/sys/nftables.d/" 2>/dev/null
+	[ -f "$MSS_FILE" ]  && cp "$MSS_FILE"  "$1/sys/nftables.d/" 2>/dev/null
+	{ printf 'wan6_disabled=%s\n' "$(uci -q get network.wan6.disabled)"
+	  printf 'lan_dhcpv6=%s\n'    "$(uci -q get dhcp.lan.dhcpv6)"
+	  printf 'lan_ra=%s\n'        "$(uci -q get dhcp.lan.ra)"
+	  printf 'lan_delegate=%s\n'  "$(uci -q get network.lan.delegate)"; } > "$1/sys/ipv6.env"
+}
+_sys_restore_from() {   # $1=dir
+	[ -d "$1/sys" ] || return 0
+	# QUIC/MSS: reconcile to the snapshot via the tested set fns (they handle chain delete + fw4 reload)
+	if [ -f "$1/sys/nftables.d/$(basename "$QUIC_FILE")" ]; then quicblock_on || quicblock_set 1; else quicblock_on && quicblock_set 0; fi
+	if [ -f "$1/sys/nftables.d/$(basename "$MSS_FILE")" ];  then mssclamp_on  || mssclamp_set 1;  else mssclamp_on  && mssclamp_set 0;  fi
+	# IPv6: restore the four network/dhcp values (targeted, not a full network export), reload if changed
+	if [ -f "$1/sys/ipv6.env" ]; then
+		. "$1/sys/ipv6.env" 2>/dev/null
+		_setor() { if [ -n "$2" ]; then uci set "$1=$2"; else uci -q delete "$1" 2>/dev/null; fi; }
+		_chg=0
+		[ "$(uci -q get network.wan6.disabled)" != "$wan6_disabled" ] && { uci -q get network.wan6 >/dev/null 2>&1 && _setor network.wan6.disabled "$wan6_disabled"; _chg=1; }
+		[ "$(uci -q get dhcp.lan.dhcpv6)" != "$lan_dhcpv6" ]     && { _setor dhcp.lan.dhcpv6 "$lan_dhcpv6"; _chg=1; }
+		[ "$(uci -q get dhcp.lan.ra)" != "$lan_ra" ]            && { _setor dhcp.lan.ra "$lan_ra"; _chg=1; }
+		[ "$(uci -q get network.lan.delegate)" != "$lan_delegate" ] && { _setor network.lan.delegate "$lan_delegate"; _chg=1; }
+		if [ "$_chg" = 1 ]; then uci -q commit network; uci -q commit dhcp; /etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/odhcpd restart >/dev/null 2>&1; fi
+	fi
+}
+snap_build() {   # $1=outfile  $2=label
+	_sd="/tmp/nu-snap.$$"; rm -rf "$_sd"; mkdir -p "$_sd"
+	build_backup "$_sd/nikki.tgz" >/dev/null 2>&1
+	zapret2_present && z2_build_backup "$_sd/z2.tgz" >/dev/null 2>&1
+	_sys_backup_into "$_sd"
+	printf 'label=%s\ntime=%s\nepoch=%s\n' "${2:-change}" "$(date '+%Y-%m-%d %H:%M')" "$(date +%s)" > "$_sd/snapmeta"
+	tar czf "$1" -C "$_sd" . 2>/dev/null
+	rm -rf "$_sd"; echo "$1"
+}
+snap_restore() {   # $1=snapfile -> restores whichever engines it holds (combined or legacy formats)
+	_sr="/tmp/nu-snapr.$$"; rm -rf "$_sr"; mkdir -p "$_sr"; tar xzf "$1" -C "$_sr" 2>/dev/null
+	_src=0
+	if [ -f "$_sr/nikki.tgz" ] || [ -f "$_sr/z2.tgz" ]; then          # combined format
+		if [ -f "$_sr/nikki.tgz" ]; then
+			_nd="/tmp/nu-snapn.$$"; rm -rf "$_nd"; mkdir -p "$_nd"; tar xzf "$_sr/nikki.tgz" -C "$_nd" 2>/dev/null
+			[ -f "$_nd/nikki.uci" ] && { restore_backup "$_nd"; _r=$?; [ "$_r" != 0 ] && _src=$_r; }
+			rm -rf "$_nd"
+		fi
+		if [ -f "$_sr/z2.tgz" ] && zapret2_present; then
+			_zd="/tmp/nu-snapz.$$"; rm -rf "$_zd"; mkdir -p "$_zd"; tar xzf "$_sr/z2.tgz" -C "$_zd" 2>/dev/null
+			[ -f "$_zd/z2-manifest.json" ] && { z2_restore_backup "$_zd"; _r=$?; [ "$_r" != 0 ] && _src=$_r; }
+			rm -rf "$_zd"
+		fi
+		_sys_restore_from "$_sr"   # QUIC/MSS/IPv6 toggles the per-engine backups don't cover
+	elif [ -f "$_sr/nikki.uci" ]; then                                # legacy nikki-only backup
+		restore_backup "$_sr"; _src=$?
+	elif [ -f "$_sr/z2-manifest.json" ]; then                         # legacy zapret2-only backup
+		z2_restore_backup "$_sr"; _src=$?
+	else _src=1; fi
+	rm -rf "$_sr"; return $_src
+}
+# push a pre-change snapshot onto the ring (called before a whitelisted mutating action)
+undo_push() {   # $1=action label
+	mkdir -p "$UNDO_DIR"
+	snap_build "$UNDO_DIR/$(date +%s).tgz" "$1" >/dev/null 2>&1
+	# keep only the newest $UNDO_KEEP
+	ls -1t "$UNDO_DIR"/*.tgz 2>/dev/null | tail -n +$((UNDO_KEEP + 1)) | while read -r _f; do rm -f "$_f"; done
+}
+undolist_json() {
+	json_header; printf '['
+	_first=1
+	for _f in $(ls -1t "$UNDO_DIR"/*.tgz 2>/dev/null); do
+		_m=$(tar xzOf "$_f" ./snapmeta 2>/dev/null)
+		_lbl=$(printf '%s' "$_m" | sed -n 's/^label=//p'); _tm=$(printf '%s' "$_m" | sed -n 's/^time=//p')
+		[ "$_first" = 1 ] || printf ','; _first=0
+		printf '{"id":"%s","label":"%s","time":"%s"}' "$(basename "$_f" .tgz)" "$(json_esc "$_lbl")" "$(json_esc "$_tm")"
+	done
+	printf ']'
 }
 backupauto_set() {   # $1=on(0/1)
 	uci set nikki-unblock.config.backupauto="$1" 2>/dev/null; uci commit nikki-unblock 2>/dev/null
@@ -1430,6 +1515,14 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 	DATA=$(head -c "${CONTENT_LENGTH:-0}")
 	action=$(get_param action)
 
+	# "Undo last change": snapshot BOTH engines before an impactful toggle so the user can revert a
+	# change that silently broke something (the per-action health rollback only catches a dead daemon).
+	# Kept to the high-impact switches — not per-domain edits, which would flood the ring.
+	case "$action" in
+		z2strat|z2quic|z2ipv6|z2autotoggle|z2preset_on|z2preset_off|geosite_on|geosite_off|preset_sync|preset_off|mssclamp)
+			undo_push "$action" ;;
+	esac
+
 	if [ "$action" = "add" ]; then
 		rtype=$(get_param type)
 		case "$rtype" in DOMAIN-SUFFIX|DOMAIN|DOMAIN-KEYWORD|GEOSITE|IP-CIDR|GEOIP) ;; *) rtype=DOMAIN-SUFFIX ;; esac
@@ -1564,6 +1657,36 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			0) printf '{"ok":true,"started":true}' ;;
 			1) printf '{"ok":false,"error":"busy"}' ;;
 			*) printf '{"ok":false,"error":"bad op"}' ;;
+		esac
+		exit 0
+
+	elif [ "$action" = "undo" ]; then
+		# restore the most recent (or a chosen) pre-change snapshot, then drop it so repeated undo peels back
+		id=$(get_param id | tr -cd '0-9')
+		if [ -n "$id" ] && [ -f "$UNDO_DIR/$id.tgz" ]; then f="$UNDO_DIR/$id.tgz"
+		else f=$(ls -1t "$UNDO_DIR"/*.tgz 2>/dev/null | head -1); fi
+		[ -n "$f" ] && [ -f "$f" ] || { json_header; printf '{"ok":false,"error":"nothing to undo"}'; exit 0; }
+		snap_restore "$f"; rc=$?
+		rm -f "$f"
+		json_header
+		case "$rc" in
+			0) printf '{"ok":true}' ;;
+			2) printf '{"ok":false,"error":"restore broke a service (reverted)"}' ;;
+			*) printf '{"ok":false,"error":"restore had problems (code %s)"}' "$rc" ;;
+		esac
+		exit 0
+
+	elif [ "$action" = "bkrestore" ]; then
+		# one-click restore of a rotating auto-backup (daily/weekly/monthly)
+		which=$(get_param which | tr -cd 'a-z')
+		case "$which" in daily|weekly|monthly) ;; *) json_header; printf '{"ok":false,"error":"bad name"}'; exit 0 ;; esac
+		[ -f "$BACKUP_DIR/$which.tar.gz" ] || { json_header; printf '{"ok":false,"error":"no such backup"}'; exit 0; }
+		snap_restore "$BACKUP_DIR/$which.tar.gz"; rc=$?
+		json_header
+		case "$rc" in
+			0) printf '{"ok":true}' ;;
+			2) printf '{"ok":false,"error":"restore broke a service (reverted)"}' ;;
+			*) printf '{"ok":false,"error":"restore had problems (code %s)"}' "$rc" ;;
 		esac
 		exit 0
 
@@ -2173,6 +2296,7 @@ devices_json() {
 [ "$API" = "updcheck" ] && { updcheck_json; exit 0; }
 [ "$API" = "subauto" ] && { subauto_json; exit 0; }
 [ "$API" = "backupauto" ] && { backupauto_json; exit 0; }
+[ "$API" = "undolist" ] && { undolist_json; exit 0; }
 [ "$API" = "updatestatus" ] && { updatestatus_json; exit 0; }
 [ "$API" = "config" ] && { config_json; exit 0; }
 [ "$API" = "nodes" ] && { nodes_json; exit 0; }
@@ -2684,6 +2808,16 @@ cat <<'HTML'
       <div class="msg" id="updMsg"></div>
     </div>
 
+    <div class="svc upd" id="undoBlock" hidden>
+      <h3 data-i18n="undoTitle"></h3>
+      <div class="hint" data-i18n="undoHint"></div>
+      <div class="btns">
+        <button type="button" id="undoBtn"></button>
+      </div>
+      <ul id="undoList" class="nodelist"></ul>
+      <div class="msg" id="undoMsg"></div>
+    </div>
+
     <div class="svc upd">
       <h3 data-i18n="bkTitle"></h3>
       <div class="btns">
@@ -2844,6 +2978,13 @@ const I18N = {
     bkTitle: "Бэкап настроек", bkDownload: "Создать и скачать", bkRestore: "Восстановить из файла", bkAuto: "Авто-бэкап (день/неделя/месяц)",
     bkHint: "Сохраняет правила, ноды, подписки и mixin (без гео-баз, ~КБ). Восстановление заменяет текущие настройки; перед этим делается снимок для отката.",
     bkRestoreConfirm: "Восстановить из этого файла? Текущие настройки будут заменены (перед этим — авто-снимок для отката).", bkRestoring: "Восстанавливаю…", kb: "КБ",
+    bkRestoreRow: "Восстановить", bkRestoreRotConfirm: "Восстановить настройки из этого бэкапа? Текущее состояние обоих движков будет заменено.",
+    bk_daily: "За день", bk_weekly: "За неделю", bk_monthly: "За месяц",
+    undoTitle: "Откат изменений", undoHint: "Перед каждым переключением (стратегия, QUIC, IPv6, автообучение, пресеты) сохраняется снимок обоих движков. Если что-то сломалось после изменения — верни как было.",
+    undoBtn: "↩ Вернуть как было", undoThis: "Откатить сюда", undoConfirm: "Откатить к состоянию до этого изменения? Настройки обоих движков вернутся к тому моменту.",
+    act_z2strat: "стратегия zapret2", act_z2quic: "тумблер QUIC", act_z2ipv6: "тумблер IPv6", act_z2autotoggle: "автообучение zapret2",
+    act_z2preset_on: "пресет zapret2 вкл", act_z2preset_off: "пресет zapret2 выкл", act_geosite_on: "гео-пресет вкл", act_geosite_off: "гео-пресет выкл",
+    act_preset_sync: "пресет доменов вкл", act_preset_off: "пресет доменов выкл", act_mssclamp: "MSS-clamp", act_auto: "авто-бэкап",
     z2bkTitle: "Бэкап Zapret2", z2bkHint: "Сохраняет конфиг zapret2 (стратегии, автообучение) и все хостлисты: свои домены, автосписок, исключения, пресеты. Восстановление заменяет их и перезапускает службу; если zapret2 не поднимется — автоматический откат.",
     z2bkRestoreConfirm: "Восстановить zapret2 из этого файла? Текущий конфиг и хостлисты будут заменены (перед этим — авто-снимок для отката).",
     rpTitle: "Обратная связь", rpHint: "Опиши проблему или пожелание. Откроется черновик issue на GitHub — проверь и нажми «Submit». Ничего не отправляется без твоего подтверждения.",
@@ -2966,6 +3107,13 @@ const I18N = {
     bkTitle: "Config backup", bkDownload: "Create & download", bkRestore: "Restore from file", bkAuto: "Auto-backup (daily/weekly/monthly)",
     bkHint: "Saves rules, nodes, subscriptions and mixin (no geo databases, ~KB). Restore replaces current settings; a snapshot is taken first for rollback.",
     bkRestoreConfirm: "Restore from this file? Current settings will be replaced (an auto-snapshot is taken first for rollback).", bkRestoring: "Restoring…", kb: "KB",
+    bkRestoreRow: "Restore", bkRestoreRotConfirm: "Restore settings from this backup? The current state of both engines will be replaced.",
+    bk_daily: "Daily", bk_weekly: "Weekly", bk_monthly: "Monthly",
+    undoTitle: "Undo changes", undoHint: "Before each toggle (strategy, QUIC, IPv6, auto-learn, presets) a snapshot of both engines is saved. If something broke after a change — put it back.",
+    undoBtn: "↩ Undo last change", undoThis: "Revert to here", undoConfirm: "Revert to the state before this change? Both engines' settings return to that point.",
+    act_z2strat: "zapret2 strategy", act_z2quic: "QUIC toggle", act_z2ipv6: "IPv6 toggle", act_z2autotoggle: "zapret2 auto-learn",
+    act_z2preset_on: "zapret2 preset on", act_z2preset_off: "zapret2 preset off", act_geosite_on: "geo preset on", act_geosite_off: "geo preset off",
+    act_preset_sync: "domain preset on", act_preset_off: "domain preset off", act_mssclamp: "MSS clamp", act_auto: "auto-backup",
     z2bkTitle: "Zapret2 backup", z2bkHint: "Saves the zapret2 config (strategies, auto-learn) and every hostlist: your domains, the auto list, exclusions, presets. Restore replaces them and restarts the service; if zapret2 fails to come up, it rolls back automatically.",
     z2bkRestoreConfirm: "Restore zapret2 from this file? The current config and hostlists will be replaced (an auto-snapshot is taken first for rollback).",
     rpTitle: "Feedback", rpHint: "Describe the problem or request. A GitHub issue draft opens — review it and hit Submit. Nothing is sent without your confirmation.",
@@ -3024,7 +3172,7 @@ document.querySelectorAll(".tab").forEach(tb => tb.addEventListener("click", () 
   $("#view-" + tb.dataset.view).classList.add("active");
   if (tb.dataset.view === "nodes") loadNodes().then(autoPingNodes);
   else if (tb.dataset.view === "mgmt") loadSvc();
-  else if (tb.dataset.view === "common") { loadVersions(); loadUpdCheck(); loadBackup(); }   // Общее: updates + backup
+  else if (tb.dataset.view === "common") { loadVersions(); loadUpdCheck(); loadBackup(); loadUndo(); }   // Общее: updates + backup
   else if (tb.dataset.view === "devices") loadDevices();
   else if (tb.dataset.view.indexOf("z2") === 0) loadZapret2();   // any zapret2 sub-view
 }));
@@ -3937,11 +4085,56 @@ async function loadBackup(){
     const ul = $("#bkList"); ul.innerHTML = "";
     (s.files || []).forEach(f => {
       const li = document.createElement("li");
-      li.innerHTML = '<span class="dom">' + escH(f.name) + '</span><span class="meta">' + f.kb + ' ' + t("kb") + ' · ' + escH(f.date || "") + '</span>';
+      li.innerHTML = '<span class="dom">' + escH(t("bk_" + f.name) || f.name) + '</span>' +
+        '<span class="meta">' + f.kb + ' ' + t("kb") + ' · ' + escH(f.date || "") + '</span>' +
+        '<button class="ghost" data-bkrestore="' + escH(f.name) + '">' + escH(t("bkRestoreRow")) + '</button>';
       ul.appendChild(li);
     });
   } catch(e){}
 }
+$("#bkList").addEventListener("click", async e => {
+  const b = e.target.closest("button[data-bkrestore]"); if (!b) return;
+  const which = b.dataset.bkrestore;
+  if (!confirm(t("bkRestoreRotConfirm"))) return;
+  b.disabled = true; showOverlay(t("bkRestoring")); setMsg($("#bkMsg"), t("bkRestoring"));
+  let res; try { res = await api("bkrestore", { which }); } catch(_){ res = {}; }
+  hideOverlay(); b.disabled = false;
+  if (res && res.ok){ setMsg($("#bkMsg"), t("done")); refreshAllAfterRestore(); }
+  else setMsg($("#bkMsg"), t("errP") + ((res && res.error) || "?"), false);
+});
+/* ---------- undo last change (both engines) ---------- */
+function refreshAllAfterRestore(){
+  loadDomains(); loadPresets(); if (CAPS.zapret2) loadZapret2(); loadSvc(); loadVersions(); loadBackup(); loadUndo();
+}
+async function loadUndo(){
+  try {
+    const list = await (await fetch("?api=undolist")).json();
+    const blk = $("#undoBlock"); blk.hidden = !(Array.isArray(list) && list.length);
+    if (blk.hidden) return;
+    const latest = list[0];
+    $("#undoBtn").textContent = t("undoBtn") + (latest ? " · " + (t("act_" + latest.label) || latest.label) : "");
+    const ul = $("#undoList"); ul.innerHTML = "";
+    list.forEach((u, i) => {
+      const li = document.createElement("li");
+      li.innerHTML = '<span class="dom">' + escH(t("act_" + u.label) || u.label) + '</span>' +
+        '<span class="meta">' + escH(u.time || "") + '</span>' +
+        (i === 0 ? "" : '<button class="ghost" data-undo="' + escH(u.id) + '">' + escH(t("undoThis")) + '</button>');
+      ul.appendChild(li);
+    });
+  } catch(e){}
+}
+async function doUndo(id){
+  if (!confirm(t("undoConfirm"))) return;
+  showOverlay(t("applying")); setMsg($("#undoMsg"), t("applying"));
+  let res; try { res = await api("undo", id ? { id } : {}); } catch(_){ res = {}; }
+  hideOverlay();
+  if (res && res.ok){ setMsg($("#undoMsg"), t("done")); refreshAllAfterRestore(); }
+  else setMsg($("#undoMsg"), t("errP") + ((res && res.error) || "?"), false);
+}
+$("#undoBtn").addEventListener("click", () => doUndo(null));
+$("#undoList").addEventListener("click", e => {
+  const b = e.target.closest("button[data-undo]"); if (b) doUndo(b.dataset.undo);
+});
 $("#bkDownload").addEventListener("click", () => { window.location = "?api=backup"; });
 $("#bkAutoOn").addEventListener("change", async e => {
   setMsg($("#bkMsg"), t("applying"));
@@ -4121,7 +4314,7 @@ $("#updAll").addEventListener("click", () => doUpdate("all"));
   if (CAPS.nikki) await Promise.allSettled([loadDomains(), loadPresets()]);
   hideOverlay();
   if (CAPS.nikki){ loadIps(); loadDevices(); loadAutosync(); loadNodes(); loadSvc(); }
-  loadVersions(); loadUpdCheck(); loadBackup();   // one availability check per session (cached)
+  loadVersions(); loadUpdCheck(); loadBackup(); loadUndo();   // one availability check per session (cached)
   // resume the log view if an update is already running (started from another tab/session)
   try { const s = await (await fetch("?api=updatestatus")).json(); if (s && s.running) pollUpdate(); } catch(e){}
 })();
