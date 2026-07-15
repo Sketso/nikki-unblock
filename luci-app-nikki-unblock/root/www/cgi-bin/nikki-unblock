@@ -1230,21 +1230,23 @@ snap_restore() {   # $1=snapfile -> restores whichever engines it holds (combine
 	else _src=1; fi
 	rm -rf "$_sr"; return $_src
 }
+# ring ids (epoch-second filenames) newest-first — the ONE canonical order used everywhere, so the
+# UI list, "jump back N" and trimming all agree (mtime sort could disagree with the numeric names)
+_undo_ids() { for _p in "$UNDO_DIR"/*.tgz; do [ -f "$_p" ] && basename "$_p" .tgz; done 2>/dev/null | sort -rn; }
 # push a pre-change snapshot onto the ring (called before a whitelisted mutating action)
 undo_push() {   # $1=action label
 	mkdir -p "$UNDO_DIR"
 	snap_build "$UNDO_DIR/$(date +%s).tgz" "$1" >/dev/null 2>&1
-	# keep only the newest $UNDO_KEEP
-	ls -1t "$UNDO_DIR"/*.tgz 2>/dev/null | tail -n +$((UNDO_KEEP + 1)) | while read -r _f; do rm -f "$_f"; done
+	for _id in $(_undo_ids | tail -n +$((UNDO_KEEP + 1))); do rm -f "$UNDO_DIR/$_id.tgz"; done
 }
 undolist_json() {
 	json_header; printf '['
 	_first=1
-	for _f in $(ls -1t "$UNDO_DIR"/*.tgz 2>/dev/null); do
-		_m=$(tar xzOf "$_f" ./snapmeta 2>/dev/null)
+	for _id in $(_undo_ids); do
+		_m=$(tar xzOf "$UNDO_DIR/$_id.tgz" ./snapmeta 2>/dev/null)
 		_lbl=$(printf '%s' "$_m" | sed -n 's/^label=//p'); _tm=$(printf '%s' "$_m" | sed -n 's/^time=//p')
 		[ "$_first" = 1 ] || printf ','; _first=0
-		printf '{"id":"%s","label":"%s","time":"%s"}' "$(basename "$_f" .tgz)" "$(json_esc "$_lbl")" "$(json_esc "$_tm")"
+		printf '{"id":"%s","label":"%s","time":"%s"}' "$_id" "$(json_esc "$_lbl")" "$(json_esc "$_tm")"
 	done
 	printf ']'
 }
@@ -1661,13 +1663,17 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		exit 0
 
 	elif [ "$action" = "undo" ]; then
-		# restore the most recent (or a chosen) pre-change snapshot, then drop it so repeated undo peels back
+		# restore a pre-change snapshot. Jumping back to point N means every CHANGE since then is undone,
+		# so drop the chosen snapshot AND all newer ones (filenames are epoch seconds → numerically newer).
 		id=$(get_param id | tr -cd '0-9')
-		if [ -n "$id" ] && [ -f "$UNDO_DIR/$id.tgz" ]; then f="$UNDO_DIR/$id.tgz"
-		else f=$(ls -1t "$UNDO_DIR"/*.tgz 2>/dev/null | head -1); fi
-		[ -n "$f" ] && [ -f "$f" ] || { json_header; printf '{"ok":false,"error":"nothing to undo"}'; exit 0; }
+		[ -n "$id" ] && [ -f "$UNDO_DIR/$id.tgz" ] || id=$(_undo_ids | head -1)
+		f="$UNDO_DIR/$id.tgz"
+		[ -n "$id" ] && [ -f "$f" ] || { json_header; printf '{"ok":false,"error":"nothing to undo"}'; exit 0; }
 		snap_restore "$f"; rc=$?
-		rm -f "$f"
+		for _u in "$UNDO_DIR"/*.tgz; do
+			[ -f "$_u" ] || continue
+			[ "$(basename "$_u" .tgz)" -ge "$id" ] 2>/dev/null && rm -f "$_u"
+		done
 		json_header
 		case "$rc" in
 			0) printf '{"ok":true}' ;;
@@ -2340,9 +2346,24 @@ cat <<'HTML'
   .ovtext { color: #e5e7eb; font-size: 1.15rem; font-weight: 600; text-align: center; line-height: 1.35; }
   body { font: 16px/1.5 system-ui, sans-serif; margin: 0; padding: 1.2rem; max-width: 900px; margin-inline: auto; }
   h1 { font-size: 1.3rem; margin: 0 0 .8rem; display: flex; align-items: baseline; gap: .6rem; }
-  .lang { margin-left: auto; font-size: .8rem; font-weight: normal; }
+  .hdr-tools { margin-left: auto; display: flex; align-items: center; gap: .8rem; }
+  .lang { font-size: .8rem; font-weight: normal; }
   .lang a { cursor: pointer; opacity: .5; text-decoration: none; color: inherit; }
   .lang a.on { opacity: 1; font-weight: 600; text-decoration: underline; }
+  .undo-wrap { position: relative; }
+  .undo-btn { padding: .3rem .6rem; font-size: 1rem; line-height: 1; background: #8883; color: inherit; border-radius: 8px; }
+  .undo-menu { display: none; position: absolute; right: 0; top: 100%; margin-top: .35rem; z-index: 50; min-width: 15rem; max-width: 22rem;
+    background: #f7f7f9; border: 1px solid #8883; border-radius: 10px; padding: .3rem; box-shadow: 0 8px 24px #0004; }
+  .undo-wrap:hover .undo-menu, .undo-wrap.open .undo-menu { display: block; }
+  .um-head { font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; opacity: .5; padding: .3rem .5rem .2rem; }
+  .um-sep { height: 1px; background: #8883; margin: .3rem .2rem; }
+  .umi { display: flex; align-items: center; gap: .55rem; width: 100%; text-align: left; background: transparent; color: inherit; padding: .4rem .5rem; border-radius: 7px; font-size: .85rem; }
+  .umi:hover { background: #8882; }
+  .um-badge { flex: 0 0 1.6rem; text-align: center; font-weight: 700; opacity: .7; font-size: .8rem; }
+  .um-txt { display: flex; flex-direction: column; min-width: 0; }
+  .um-txt b { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .um-txt small { opacity: .6; font-size: .72rem; }
+  @media (prefers-color-scheme: dark){ .undo-menu { background: #232a36; border-color: #ffffff22; } }
   h3 { font-size: .9rem; margin: .1rem 0 .5rem; opacity: .8; }
   .banner { margin: 0 0 1rem; padding: .7rem .9rem; border-radius: 8px; font-size: .9rem; border: 1px solid #d9770699; background: #f59e0b22; }
   .banner.soft { border-color: #2563eb66; background: #2563eb1a; }   /* informational (not a warning) */
@@ -2497,7 +2518,13 @@ cat <<'HTML'
     <div class="ovbox"><div class="spinner"></div><div class="ovtext" id="overlayText"></div></div>
   </div>
   <h1><span data-i18n="h1"></span>
-    <span class="lang"><a data-lang="ru">RU</a> · <a data-lang="en">EN</a></span></h1>
+    <span class="hdr-tools">
+      <span class="undo-wrap" id="undoWrap" hidden>
+        <button class="undo-btn" id="undoTop" aria-haspopup="true">↩</button>
+        <div class="undo-menu" id="undoMenu"></div>
+      </span>
+      <span class="lang"><a data-lang="ru">RU</a> · <a data-lang="en">EN</a></span>
+    </span></h1>
   <div class="banner" id="guard" hidden></div>
   <div class="tabs tabs-top">
     <button class="tab-top active" data-engine="nikki" data-i18n="engNikki"></button>
@@ -2808,16 +2835,6 @@ cat <<'HTML'
       <div class="msg" id="updMsg"></div>
     </div>
 
-    <div class="svc upd" id="undoBlock" hidden>
-      <h3 data-i18n="undoTitle"></h3>
-      <div class="hint" data-i18n="undoHint"></div>
-      <div class="btns">
-        <button type="button" id="undoBtn"></button>
-      </div>
-      <ul id="undoList" class="nodelist"></ul>
-      <div class="msg" id="undoMsg"></div>
-    </div>
-
     <div class="svc upd">
       <h3 data-i18n="bkTitle"></h3>
       <div class="btns">
@@ -2981,7 +2998,7 @@ const I18N = {
     bkRestoreRow: "Восстановить", bkRestoreRotConfirm: "Восстановить настройки из этого бэкапа? Текущее состояние обоих движков будет заменено.",
     bk_daily: "За день", bk_weekly: "За неделю", bk_monthly: "За месяц",
     undoTitle: "Откат изменений", undoHint: "Перед каждым переключением (стратегия, QUIC, IPv6, автообучение, пресеты) сохраняется снимок обоих движков. Если что-то сломалось после изменения — верни как было.",
-    undoBtn: "↩ Вернуть как было", undoThis: "Откатить сюда", undoConfirm: "Откатить к состоянию до этого изменения? Настройки обоих движков вернутся к тому моменту.",
+    undoBtn: "↩ Вернуть как было", undoThis: "Откатить сюда", undoLast: "Вернуть последнее изменение", undoConfirm: "Откатить к состоянию до этого изменения? Настройки обоих движков вернутся к тому моменту.",
     act_z2strat: "стратегия zapret2", act_z2quic: "тумблер QUIC", act_z2ipv6: "тумблер IPv6", act_z2autotoggle: "автообучение zapret2",
     act_z2preset_on: "пресет zapret2 вкл", act_z2preset_off: "пресет zapret2 выкл", act_geosite_on: "гео-пресет вкл", act_geosite_off: "гео-пресет выкл",
     act_preset_sync: "пресет доменов вкл", act_preset_off: "пресет доменов выкл", act_mssclamp: "MSS-clamp", act_auto: "авто-бэкап",
@@ -3110,7 +3127,7 @@ const I18N = {
     bkRestoreRow: "Restore", bkRestoreRotConfirm: "Restore settings from this backup? The current state of both engines will be replaced.",
     bk_daily: "Daily", bk_weekly: "Weekly", bk_monthly: "Monthly",
     undoTitle: "Undo changes", undoHint: "Before each toggle (strategy, QUIC, IPv6, auto-learn, presets) a snapshot of both engines is saved. If something broke after a change — put it back.",
-    undoBtn: "↩ Undo last change", undoThis: "Revert to here", undoConfirm: "Revert to the state before this change? Both engines' settings return to that point.",
+    undoBtn: "↩ Undo last change", undoThis: "Revert to here", undoLast: "Undo last change", undoConfirm: "Revert to the state before this change? Both engines' settings return to that point.",
     act_z2strat: "zapret2 strategy", act_z2quic: "QUIC toggle", act_z2ipv6: "IPv6 toggle", act_z2autotoggle: "zapret2 auto-learn",
     act_z2preset_on: "zapret2 preset on", act_z2preset_off: "zapret2 preset off", act_geosite_on: "geo preset on", act_geosite_off: "geo preset off",
     act_preset_sync: "domain preset on", act_preset_off: "domain preset off", act_mssclamp: "MSS clamp", act_auto: "auto-backup",
@@ -3387,7 +3404,7 @@ function presetCard(p){
     const res = await presetToggle(p, wantOn);
     if (res && res.ok) setMsg($("#presetMsg"), t("done"));
     else setMsg($("#presetMsg"), t("errP") + ((res && res.error) || "?"), false);
-    await loadDomains();
+    await loadDomains(); loadUndo();   // a geosite/preset toggle created an undo point
   });
   return card;
 }
@@ -3586,6 +3603,7 @@ async function loadZapret2(){
   try { Z2HOSTS = await (await fetch("?api=z2hosts")).json(); } catch(e){ Z2HOSTS = { user: [], auto: [] }; }
   renderZ2();
   if (!z2presetsLoaded) loadZ2Presets();   // curated bypass presets — fetch once, then re-render from cache
+  loadUndo();   // a toggle here may have created an undo point — refresh the header control
 }
 /* ---- curated DPI-bypass presets (YouTube/Discord/…), applist-style like nikki's ---- */
 async function loadZ2Presets(){
@@ -4078,63 +4096,85 @@ async function loadSvc(){
   try { LASTSVC = await (await fetch("?api=svcstatus")).json(); renderSvc(LASTSVC); renderGuard(LASTSVC); } catch(e){}
 }
 /* ---------- backup / restore ---------- */
+let BK_FILES = [], UNDO_RING = [];
 async function loadBackup(){
   try {
     const s = await (await fetch("?api=backupauto")).json();
     $("#bkAutoOn").checked = !!s.enabled;
+    BK_FILES = s.files || [];
     const ul = $("#bkList"); ul.innerHTML = "";
-    (s.files || []).forEach(f => {
+    BK_FILES.forEach(f => {
       const li = document.createElement("li");
       li.innerHTML = '<span class="dom">' + escH(t("bk_" + f.name) || f.name) + '</span>' +
         '<span class="meta">' + f.kb + ' ' + t("kb") + ' · ' + escH(f.date || "") + '</span>' +
         '<button class="ghost" data-bkrestore="' + escH(f.name) + '">' + escH(t("bkRestoreRow")) + '</button>';
       ul.appendChild(li);
     });
+    buildUndoMenu();
   } catch(e){}
 }
 $("#bkList").addEventListener("click", async e => {
   const b = e.target.closest("button[data-bkrestore]"); if (!b) return;
-  const which = b.dataset.bkrestore;
   if (!confirm(t("bkRestoreRotConfirm"))) return;
-  b.disabled = true; showOverlay(t("bkRestoring")); setMsg($("#bkMsg"), t("bkRestoring"));
-  let res; try { res = await api("bkrestore", { which }); } catch(_){ res = {}; }
-  hideOverlay(); b.disabled = false;
-  if (res && res.ok){ setMsg($("#bkMsg"), t("done")); refreshAllAfterRestore(); }
-  else setMsg($("#bkMsg"), t("errP") + ((res && res.error) || "?"), false);
+  restoreBackup(b.dataset.bkrestore, $("#bkMsg"));
 });
-/* ---------- undo last change (both engines) ---------- */
+/* ---------- undo / restore — global header control (both engines) ---------- */
 function refreshAllAfterRestore(){
   loadDomains(); loadPresets(); if (CAPS.zapret2) loadZapret2(); loadSvc(); loadVersions(); loadBackup(); loadUndo();
 }
 async function loadUndo(){
-  try {
-    const list = await (await fetch("?api=undolist")).json();
-    const blk = $("#undoBlock"); blk.hidden = !(Array.isArray(list) && list.length);
-    if (blk.hidden) return;
-    const latest = list[0];
-    $("#undoBtn").textContent = t("undoBtn") + (latest ? " · " + (t("act_" + latest.label) || latest.label) : "");
-    const ul = $("#undoList"); ul.innerHTML = "";
-    list.forEach((u, i) => {
-      const li = document.createElement("li");
-      li.innerHTML = '<span class="dom">' + escH(t("act_" + u.label) || u.label) + '</span>' +
-        '<span class="meta">' + escH(u.time || "") + '</span>' +
-        (i === 0 ? "" : '<button class="ghost" data-undo="' + escH(u.id) + '">' + escH(t("undoThis")) + '</button>');
-      ul.appendChild(li);
-    });
-  } catch(e){}
+  try { UNDO_RING = await (await fetch("?api=undolist")).json(); if (!Array.isArray(UNDO_RING)) UNDO_RING = []; }
+  catch(e){ UNDO_RING = []; }
+  buildUndoMenu();
+}
+function buildUndoMenu(){
+  const wrap = $("#undoWrap"), menu = $("#undoMenu");
+  const hasUndo = UNDO_RING.length, hasBk = BK_FILES.length;
+  wrap.hidden = !(hasUndo || hasBk);
+  if (wrap.hidden){ wrap.classList.remove("open"); return; }
+  $("#undoTop").title = hasUndo ? (t("undoLast") + " · " + (t("act_" + UNDO_RING[0].label) || UNDO_RING[0].label)) : t("undoTitle");
+  let h = '<div class="um-head">' + escH(t("undoTitle")) + '</div>';
+  UNDO_RING.slice(0, 5).forEach((u, i) => {
+    const label = t("act_" + u.label) || u.label;
+    h += '<button class="umi" data-kind="undo" data-id="' + escH(u.id) + '">' +
+         '<span class="um-badge">' + (i === 0 ? "↩" : "−" + (i + 1)) + '</span>' +
+         '<span class="um-txt"><b>' + escH(i === 0 ? t("undoLast") : label) + '</b>' +
+         '<small>' + escH((i === 0 ? label + " · " : "") + (u.time || "")) + '</small></span></button>';
+  });
+  if (hasUndo && hasBk) h += '<div class="um-sep"></div>';
+  BK_FILES.forEach(f => {
+    h += '<button class="umi" data-kind="bk" data-which="' + escH(f.name) + '">' +
+         '<span class="um-badge">⤺</span>' +
+         '<span class="um-txt"><b>' + escH(t("bk_" + f.name) || f.name) + '</b>' +
+         '<small>' + escH(f.date || "") + '</small></span></button>';
+  });
+  menu.innerHTML = h;
 }
 async function doUndo(id){
   if (!confirm(t("undoConfirm"))) return;
-  showOverlay(t("applying")); setMsg($("#undoMsg"), t("applying"));
+  showOverlay(t("applying"));
   let res; try { res = await api("undo", id ? { id } : {}); } catch(_){ res = {}; }
   hideOverlay();
-  if (res && res.ok){ setMsg($("#undoMsg"), t("done")); refreshAllAfterRestore(); }
-  else setMsg($("#undoMsg"), t("errP") + ((res && res.error) || "?"), false);
+  if (!(res && res.ok)) alert(t("errP") + ((res && res.error) || "?"));
+  refreshAllAfterRestore();
 }
-$("#undoBtn").addEventListener("click", () => doUndo(null));
-$("#undoList").addEventListener("click", e => {
-  const b = e.target.closest("button[data-undo]"); if (b) doUndo(b.dataset.undo);
+async function restoreBackup(which, msgEl){
+  showOverlay(t("bkRestoring")); if (msgEl) setMsg(msgEl, t("bkRestoring"));
+  let res; try { res = await api("bkrestore", { which }); } catch(_){ res = {}; }
+  hideOverlay();
+  if (res && res.ok){ if (msgEl) setMsg(msgEl, t("done")); }
+  else { if (msgEl) setMsg(msgEl, t("errP") + ((res && res.error) || "?"), false); else alert(t("errP") + ((res && res.error) || "?")); }
+  refreshAllAfterRestore();
+}
+// header button: toggle the menu (works on touch); desktop also opens on hover via CSS
+$("#undoTop").addEventListener("click", e => { e.stopPropagation(); $("#undoWrap").classList.toggle("open"); });
+$("#undoMenu").addEventListener("click", e => {
+  const b = e.target.closest(".umi"); if (!b) return;
+  $("#undoWrap").classList.remove("open");
+  if (b.dataset.kind === "undo") doUndo(b.dataset.id);
+  else if (b.dataset.kind === "bk"){ if (confirm(t("bkRestoreRotConfirm"))) restoreBackup(b.dataset.which, null); }
 });
+document.addEventListener("click", () => $("#undoWrap").classList.remove("open"));
 $("#bkDownload").addEventListener("click", () => { window.location = "?api=backup"; });
 $("#bkAutoOn").addEventListener("change", async e => {
   setMsg($("#bkMsg"), t("applying"));
