@@ -1528,9 +1528,11 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 	# "Undo last change": snapshot BOTH engines before an impactful toggle so the user can revert a
 	# change that silently broke something (the per-action health rollback only catches a dead daemon).
 	# Kept to the high-impact switches — not per-domain edits, which would flood the ring.
+	# nosnap=1 lets a multi-step UI action (e.g. a hybrid preset = geosite + list) skip the 2nd+ snapshot,
+	# so one user click produces ONE undo point (the first sub-action already captured the pre-click state)
 	case "$action" in
 		z2strat|z2quic|z2ipv6|z2autotoggle|z2preset_on|z2preset_off|geosite_on|geosite_off|preset_sync|preset_off|mssclamp)
-			undo_push "$action" ;;
+			[ "$(get_param nosnap)" = 1 ] || undo_push "$action" ;;
 	esac
 
 	if [ "$action" = "add" ]; then
@@ -2376,7 +2378,7 @@ cat <<'HTML'
   .undo-btn { padding: .3rem .6rem; font-size: 1rem; line-height: 1; background: #8883; color: inherit; border-radius: 8px; }
   .undo-menu { display: none; position: absolute; right: 0; top: 100%; margin-top: .35rem; z-index: 50; min-width: 15rem; max-width: 22rem;
     background: #f7f7f9; border: 1px solid #8883; border-radius: 10px; padding: .3rem; box-shadow: 0 8px 24px #0004; }
-  .undo-wrap:hover .undo-menu, .undo-wrap.open .undo-menu { display: block; }
+  .undo-wrap.open .undo-menu { display: block; }   /* click-only (hover-open caused a gap trap) */
   .undo-btn.dim { opacity: .45; }
   .um-empty { font-size: .82rem; opacity: .6; padding: .4rem .5rem .5rem; }
   .um-head { font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; opacity: .5; padding: .3rem .5rem .2rem; }
@@ -3377,15 +3379,18 @@ function presetState(p){
 }
 // enable/disable both facets (sequential — each triggers a nikki reload)
 async function presetToggle(p, wantOn){
-  let ok = true, error;
+  let ok = true, error, didGeo = false;
   if (p.geosite){
     const ips = (p.ipcidr || []).join(",");
     const r = wantOn ? await api("geosite_on", { cat: p.geosite, node: p.node || EXITG, ips, geoip: p.geoip || "" })
                      : await api("geosite_off", { cat: p.geosite, ips, geoip: p.geoip || "" });
     if (!r || !r.ok){ ok = false; error = r && r.error; }
+    didGeo = true;
   }
   if ((p.domains || []).length){
-    const r = wantOn ? await api("preset_sync", { id: p.id }) : await api("preset_off", { id: p.id });
+    // for a hybrid preset the geosite step already made the undo point → skip a 2nd one (nosnap)
+    const extra = didGeo ? { nosnap: 1 } : {};
+    const r = wantOn ? await api("preset_sync", { id: p.id, ...extra }) : await api("preset_off", { id: p.id, ...extra });
     if (!r || !r.ok){ ok = false; error = r && r.error; }
   }
   return { ok, error };
