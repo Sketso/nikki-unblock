@@ -1135,6 +1135,16 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		uci commit nikki; apply_nikki
 		json_header; printf '{"ok":true}'; exit 0
 
+	elif [ "$action" = "ruledelbulk" ]; then
+		# delete several rules in ONE commit; indexes must be processed descending —
+		# uci reindexes anonymous sections on delete, ascending order would shift targets
+		idxs=$(get_param idxs | tr -c '0-9' ' ' | tr ' ' '\n' | grep . | sort -rn | uniq)
+		[ -z "$idxs" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
+		n=0
+		for i in $idxs; do uci delete "nikki.@rule[$i]" 2>/dev/null && n=$((n + 1)); done
+		uci commit nikki; apply_nikki
+		json_header; printf '{"ok":true,"removed":%d}' "$n"; exit 0
+
 	elif [ "$action" = "toggle" ]; then
 		idx=$(get_param idx | sed 's/[^0-9]//g')
 		cur=$(uci -q get "nikki.@rule[$idx].enabled"); [ -z "$cur" ] && cur=1
@@ -1258,6 +1268,18 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		fi
 		json_header; printf '{"ok":true}'; exit 0
 
+	elif [ "$action" = "z2hostdelbulk" ]; then
+		ds=$(printf '%s' "$(get_param domains)" | parse_domains)
+		[ -z "$ds" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
+		if [ -f "$Z2_USER" ]; then
+			cp "$Z2_USER" "$Z2_USER.tmp"
+			for d in $ds; do
+				grep -vxF "$d" "$Z2_USER.tmp" > "$Z2_USER.tmp2" 2>/dev/null; mv "$Z2_USER.tmp2" "$Z2_USER.tmp"
+			done
+			mv "$Z2_USER.tmp" "$Z2_USER"; z2_apply_hosts
+		fi
+		json_header; printf '{"ok":true}'; exit 0
+
 	elif [ "$action" = "z2preset_on" ]; then
 		# fetch the preset's domains, cache them, mark active, rebuild the preset hostlist
 		id=$(printf '%s' "$(get_param id)" | tr -cd 'a-z0-9_-')   # sanitised: no slashes/dots → no path escape
@@ -1303,6 +1325,34 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		fi
 		if [ -n "$d" ] && [ -f "$Z2_HOSTX" ]; then
 			grep -vxF "$d" "$Z2_HOSTX" > "$Z2_HOSTX.tmp" 2>/dev/null; mv "$Z2_HOSTX.tmp" "$Z2_HOSTX"
+			/etc/init.d/zapret2 reload >/dev/null 2>&1
+		fi
+		json_header; printf '{"ok":true}'; exit 0
+
+	elif [ "$action" = "z2excludebulk" ]; then
+		# bulk "don't bypass": each domain goes to the user-exclude, covered auto entries dropped; ONE reload
+		ds=$(printf '%s' "$(get_param domains)" | parse_domains)
+		[ -z "$ds" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
+		touch "$Z2_HOSTX"
+		for d in $ds; do
+			grep -qxF "$d" "$Z2_HOSTX" 2>/dev/null || echo "$d" >> "$Z2_HOSTX"
+			re=$(printf '%s' "$d" | sed 's/[.*]/\\&/g')
+			[ -f "$Z2_AUTO" ] && { grep -viE "(^|\.)$re\$" "$Z2_AUTO" > "$Z2_AUTO.tmp" 2>/dev/null; mv "$Z2_AUTO.tmp" "$Z2_AUTO"; }
+		done
+		/etc/init.d/zapret2 reload >/dev/null 2>&1
+		json_header; printf '{"ok":true}'; exit 0
+
+	elif [ "$action" = "z2unexcludebulk" ]; then
+		ds=$(printf '%s' "$(get_param domains)" | parse_domains)
+		[ -z "$ds" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
+		if [ -f "$Z2_HOSTX" ]; then
+			prot=$(z2_node_hosts)
+			cp "$Z2_HOSTX" "$Z2_HOSTX.tmp"
+			for d in $ds; do
+				printf '%s\n' "$prot" | grep -qxF "$d" && continue   # never drop a VPN-node protection
+				grep -vxF "$d" "$Z2_HOSTX.tmp" > "$Z2_HOSTX.tmp2" 2>/dev/null; mv "$Z2_HOSTX.tmp2" "$Z2_HOSTX.tmp"
+			done
+			mv "$Z2_HOSTX.tmp" "$Z2_HOSTX"
 			/etc/init.d/zapret2 reload >/dev/null 2>&1
 		fi
 		json_header; printf '{"ok":true}'; exit 0
@@ -1885,6 +1935,10 @@ cat <<'HTML'
   .pmsub { font-size: .8rem; opacity: .7; margin: .6rem 0 .2rem; }
   .exopt { display: block; width: 100%; text-align: left; margin: .3rem 0; }
   .exopt small { opacity: .7; }
+  .fbar { display: flex; gap: .5rem; align-items: center; margin: .4rem 0; flex-wrap: wrap; }
+  .fbar .flt { flex: 1; min-width: 8rem; padding: .45rem .6rem; font-size: .9rem; border-radius: 8px; border: 1px solid #8884; background: #8881; color: inherit; }
+  .fbar .fall { display: flex; align-items: center; gap: .3rem; font-size: .8rem; opacity: .85; white-space: nowrap; cursor: pointer; }
+  li .pick { flex: 0 0 auto; }
   .pmlist { list-style: none; margin: 0; padding: 0; font-family: ui-monospace, monospace; font-size: .82rem; columns: 2; column-gap: 1.2rem; }
   .pmlist li { padding: .05rem 0; border: 0; display: list-item; break-inside: avoid; }
 </style>
@@ -1947,6 +2001,11 @@ cat <<'HTML'
           <span class="count" id="count"></span>
         </div>
 
+        <div class="fbar">
+          <input class="flt" id="fltList" data-i18n-ph="fltPh" autocomplete="off" autocapitalize="off" spellcheck="false">
+          <label class="fall"><input type="checkbox" id="fallList"><span data-i18n="fltAll"></span></label>
+          <button type="button" class="ghost" id="fdelList" data-i18n="fltDel" disabled></button>
+        </div>
         <ul id="list"></ul>
 
         <div id="bulkWrap" hidden>
@@ -2062,6 +2121,11 @@ cat <<'HTML'
       <button type="submit" id="z2Btn" data-i18n="add"></button>
     </form>
     <div class="msg" id="z2DomMsg"></div>
+    <div class="fbar">
+      <input class="flt" id="fltZ2U" data-i18n-ph="fltPh" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <label class="fall"><input type="checkbox" id="fallZ2U"><span data-i18n="fltAll"></span></label>
+      <button type="button" class="ghost" id="fdelZ2U" data-i18n="fltDel" disabled></button>
+    </div>
     <ul id="z2UserList"></ul>
   </section>
 
@@ -2081,6 +2145,11 @@ cat <<'HTML'
         <button type="button" class="ghost" id="z2AutoClear" data-i18n="z2AutoClear"></button>
       </div>
       <div class="hint" data-i18n="z2AutoPruneHint"></div>
+      <div class="fbar" id="z2AutoBar" hidden>
+        <input class="flt" id="fltZ2A" data-i18n-ph="fltPh" autocomplete="off" autocapitalize="off" spellcheck="false">
+        <label class="fall"><input type="checkbox" id="fallZ2A"><span data-i18n="fltAll"></span></label>
+        <button type="button" class="ghost" id="fdelZ2A" data-i18n="fltNoBypass" disabled></button>
+      </div>
       <ul id="z2AutoList" hidden></ul>
       <div class="msg" id="z2AutoMsg"></div>
     </div>
@@ -2090,6 +2159,11 @@ cat <<'HTML'
   <section class="view" id="view-z2exclude">
     <h3><span data-i18n="z2Excluded"></span> <span class="count" id="z2ExCount"></span></h3>
     <div class="hint" data-i18n="z2ExHint"></div>
+    <div class="fbar">
+      <input class="flt" id="fltZ2X" data-i18n-ph="fltPh" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <label class="fall"><input type="checkbox" id="fallZ2X"><span data-i18n="fltAll"></span></label>
+      <button type="button" class="ghost" id="fdelZ2X" data-i18n="fltDel" disabled></button>
+    </div>
     <ul id="z2ExList"></ul>
     <div class="msg" id="z2ExMsg"></div>
   </section>
@@ -2209,6 +2283,8 @@ const I18N = {
     z2AutoPrune: "Убрать покрытые", z2AutoPruneHint: "Удаляет из автолиста домены, уже покрытые твоими доменами и пресетами (по суффиксу) — чистит накопленный шум.", z2Pruned: "Убрано доменов: ",
     z2ExPick: "Что добавить в исключения?", z2ExAsIs: "только этот хост", z2ExAll: "весь домен — со всеми поддоменами",
     z2ExNote: "Домен попадёт в исключения (не будет пробиваться), а покрытые им записи исчезнут из автосписка.",
+    fltPh: "Фильтр… (можно * как маску)", fltAll: "видимые", fltDel: "Удалить выбранные", fltNoBypass: "Не пробивать выбранные",
+    fltConfirm: "Применить к выбранным записям: ",
     z2Excluded: "Исключения (не пробивать)", z2ExHint: "Домены, которые zapret2 НИКОГДА не трогает (проверяются первыми). Сюда попадают твои «баны» из автолиста и авто-защита серверов VPN-нод (её удалить нельзя).",
     noEngines: "Ни nikki (VPN), ни zapret2 не установлены — управлять нечем. Поставь хотя бы один.",
     devHint: "Устройства из этого списка ходят в интернет мимо VPN (напрямую). Выбери устройство из списка или впиши его IP. Исключение по IP — чтобы оно не «слетало», закрепи за устройством постоянный адрес (статический DHCP-лиз).",
@@ -2299,6 +2375,8 @@ const I18N = {
     z2AutoPrune: "Remove covered", z2AutoPruneHint: "Removes auto-learned domains already covered by your domains and presets (by suffix) — clears accumulated noise.", z2Pruned: "Removed: ",
     z2ExPick: "What to add to the exclusions?", z2ExAsIs: "this host only", z2ExAll: "whole domain — incl. all subdomains",
     z2ExNote: "The domain goes to the exclusions (won't be desynced) and auto-learned entries it covers are removed.",
+    fltPh: "Filter… (* works as a wildcard)", fltAll: "shown", fltDel: "Delete selected", fltNoBypass: "Don't bypass selected",
+    fltConfirm: "Apply to the selected entries: ",
     z2Excluded: "Exclusions (never bypass)", z2ExHint: "Domains zapret2 NEVER touches (checked first). This holds your \"bans\" from the auto-list plus the automatic protection of your VPN-node servers (which you can't remove).",
     noEngines: "Neither nikki (VPN) nor zapret2 is installed — nothing to manage. Install at least one.",
     devHint: "Devices in this list reach the internet directly, bypassing the VPN. Pick a device or type its IP. Exclusion is by IP — give the device a fixed address (static DHCP lease) so it doesn't drift.",
@@ -2458,6 +2536,64 @@ function presetOwned(r){
   }
   return false;
 }
+/* ---------- list filter + bulk selection (shared by the nikki and zapret2 domain lists) ----------
+   Each list gets a .fbar toolbar: a mask filter (substring, or * wildcard), a "select shown"
+   master checkbox and one bulk action. Selection counts only VISIBLE checked rows — filtering
+   away a row unchecks it, so the bulk action always matches what's on screen. */
+function fltMatch(d, q){
+  if (!q) return true;
+  d = d.toLowerCase();
+  if (q.indexOf("*") >= 0){
+    const re = new RegExp("^" + q.split("*").map(s => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$");
+    return re.test(d);
+  }
+  return d.indexOf(q) >= 0;
+}
+function fltApply(bar){
+  const q = $(bar.q).value.trim().toLowerCase();
+  $(bar.ul).querySelectorAll("li").forEach(li => {
+    const dom = li.querySelector(".dom"); if (!dom) return;
+    const hide = !fltMatch(dom.textContent, q);
+    li.hidden = hide;
+    if (hide){ const c = li.querySelector(".pick"); if (c) c.checked = false; }
+  });
+  fltCount(bar);
+}
+function fltCount(bar){
+  const n = $(bar.ul).querySelectorAll("li:not([hidden]) .pick:checked").length;
+  const b = $(bar.btn); b.disabled = !n;
+  b.textContent = t(bar.btnKey) + (n ? " (" + n + ")" : "");
+}
+function fltRerender(bar){ $(bar.all).checked = false; fltApply(bar); }
+function fltInit(bar){
+  $(bar.q).addEventListener("input", () => fltApply(bar));
+  $(bar.all).addEventListener("change", e => {
+    $(bar.ul).querySelectorAll("li:not([hidden]) .pick").forEach(c => { c.checked = e.currentTarget.checked; });
+    fltCount(bar);
+  });
+  $(bar.ul).addEventListener("change", e => { if (e.target.classList.contains("pick")) fltCount(bar); });
+  $(bar.btn).addEventListener("click", () => {
+    const keys = [...$(bar.ul).querySelectorAll("li:not([hidden]) .pick:checked")].map(c => c.dataset.key);
+    if (keys.length) bar.run(keys);
+  });
+}
+async function fltBulk(action, params, msgEl, reload){
+  showOverlay(t("applying")); setMsg(msgEl, t("applying"));
+  let res; try { res = await api(action, params); } catch(e){ res = {}; }
+  hideOverlay();
+  if (res && res.ok) setMsg(msgEl, t("done")); else setMsg(msgEl, t("errP") + ((res && res.error) || "?"), false);
+  reload();
+}
+const BAR_LIST = { q: "#fltList", all: "#fallList", btn: "#fdelList", ul: "#list", btnKey: "fltDel",
+  run: keys => { if (confirm(t("fltConfirm") + keys.length)) fltBulk("ruledelbulk", { idxs: keys.join(" ") }, $("#msg"), loadDomains); } };
+const BAR_Z2U = { q: "#fltZ2U", all: "#fallZ2U", btn: "#fdelZ2U", ul: "#z2UserList", btnKey: "fltDel",
+  run: keys => { if (confirm(t("fltConfirm") + keys.length)) fltBulk("z2hostdelbulk", { domains: keys.join(",") }, $("#z2DomMsg"), loadZapret2); } };
+const BAR_Z2A = { q: "#fltZ2A", all: "#fallZ2A", btn: "#fdelZ2A", ul: "#z2AutoList", btnKey: "fltNoBypass",
+  run: keys => { if (confirm(t("fltConfirm") + keys.length)) fltBulk("z2excludebulk", { domains: keys.join(",") }, $("#z2AutoMsg"), loadZapret2); } };
+const BAR_Z2X = { q: "#fltZ2X", all: "#fallZ2X", btn: "#fdelZ2X", ul: "#z2ExList", btnKey: "fltDel",
+  run: keys => { if (confirm(t("fltConfirm") + keys.length)) fltBulk("z2unexcludebulk", { domains: keys.join(",") }, $("#z2ExMsg"), loadZapret2); } };
+[BAR_LIST, BAR_Z2U, BAR_Z2A, BAR_Z2X].forEach(fltInit);
+
 function renderList(){
   const ul = $("#list"); ul.innerHTML = "";
   const manual = RULES.filter(x => !presetOwned(x));
@@ -2466,6 +2602,7 @@ function renderList(){
     const li = document.createElement("li");
     if (x.enabled === "0") li.className = "off";
     li.innerHTML =
+      '<input type="checkbox" class="pick" data-key="' + x.idx + '">' +
       '<span class="dom">' + escH(x.matcher) + '</span>' +
       '<select class="edit" data-field="type">' + typeOpts() + '</select>' +
       '<select class="edit" data-field="node">' + nodeOpts(x.node) + '</select>' +
@@ -2477,6 +2614,7 @@ function renderList(){
     ul.appendChild(li);
   });
   $("#count").textContent = "(" + manual.length + ")";
+  fltRerender(BAR_LIST);
 }
 function taggedSet(id){
   return new Set(RULES.filter(r => (" " + (r.src || "") + " ").indexOf(" " + id + " ") >= 0).map(r => r.matcher));
@@ -2810,22 +2948,28 @@ function renderZ2(){
   const ul = $("#z2UserList"); ul.innerHTML = "";
   const u = Z2HOSTS.user || []; $("#z2UserCount").textContent = "(" + u.length + ")";
   u.forEach(d => { const li = document.createElement("li");
-    li.innerHTML = '<span class="dom">' + escH(d) + '</span><button class="ghost" data-z2del="' + escH(d) + '">✕</button>';
+    li.innerHTML = '<input type="checkbox" class="pick" data-key="' + escH(d) + '">' +
+      '<span class="dom">' + escH(d) + '</span><button class="ghost" data-z2del="' + escH(d) + '">✕</button>';
     ul.appendChild(li); });
+  fltRerender(BAR_Z2U);
   $("#z2AutoCount").textContent = "(" + (Z2HOSTS.auto || []).length + ")";
   if (!$("#z2AutoList").hidden) renderZ2Auto();
   const ex = Z2HOSTS.exclude || []; $("#z2ExCount").textContent = "(" + ex.length + ")";
   const el = $("#z2ExList"); el.innerHTML = "";
   ex.forEach(x => { const li = document.createElement("li");
-    li.innerHTML = '<span class="dom">' + escH(x.d) + '</span>' +
+    li.innerHTML = (x.sys ? "" : '<input type="checkbox" class="pick" data-key="' + escH(x.d) + '">') +
+      '<span class="dom">' + escH(x.d) + '</span>' +
       (x.sys ? '<span class="badge">' + t("system") + '</span>' : '<button class="ghost" data-z2unex="' + escH(x.d) + '">✕</button>');
     el.appendChild(li); });
+  fltRerender(BAR_Z2X);
 }
 function renderZ2Auto(){
   const ul = $("#z2AutoList"); ul.innerHTML = "";
   (Z2HOSTS.auto || []).forEach(d => { const li = document.createElement("li");
-    li.innerHTML = '<span class="dom">' + escH(d) + '</span><button class="ghost" data-z2exclude="' + escH(d) + '" title="' + escH(t("z2NoBypass")) + '">✕</button>';
+    li.innerHTML = '<input type="checkbox" class="pick" data-key="' + escH(d) + '">' +
+      '<span class="dom">' + escH(d) + '</span><button class="ghost" data-z2exclude="' + escH(d) + '" title="' + escH(t("z2NoBypass")) + '">✕</button>';
     ul.appendChild(li); });
+  fltRerender(BAR_Z2A);
 }
 async function z2Do(op, el){
   el.disabled = true; showOverlay(t("applying")); setMsg($("#z2Msg"), t("applying"));
@@ -2863,7 +3007,9 @@ $("#z2AutoChk").addEventListener("change", async e => {
   loadZapret2();
 });
 $("#z2AutoView").addEventListener("click", () => {
-  const ul = $("#z2AutoList"); if (ul.hidden){ renderZ2Auto(); ul.hidden = false; } else ul.hidden = true;
+  const ul = $("#z2AutoList"), bar = $("#z2AutoBar");
+  if (ul.hidden){ renderZ2Auto(); ul.hidden = false; bar.hidden = false; }
+  else { ul.hidden = true; bar.hidden = true; }
 });
 $("#z2AutoClear").addEventListener("click", async e => {
   if (!confirm(t("z2ClearConfirm"))) return;
