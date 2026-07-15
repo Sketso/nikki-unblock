@@ -1288,7 +1288,10 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		d=$(printf '%s' "$(get_param domain)" | parse_domains | head -1)
 		[ -z "$d" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
 		touch "$Z2_HOSTX"; grep -qxF "$d" "$Z2_HOSTX" 2>/dev/null || echo "$d" >> "$Z2_HOSTX"
-		[ -f "$Z2_AUTO" ] && { grep -vxF "$d" "$Z2_AUTO" > "$Z2_AUTO.tmp" 2>/dev/null; mv "$Z2_AUTO.tmp" "$Z2_AUTO"; }
+		# zapret matches hostlists by suffix, so the exclude covers subdomains too — clean the
+		# auto list the same way (excluding googlevideo.com drops every rrX…googlevideo.com)
+		re=$(printf '%s' "$d" | sed 's/[.*]/\\&/g')
+		[ -f "$Z2_AUTO" ] && { grep -viE "(^|\.)$re\$" "$Z2_AUTO" > "$Z2_AUTO.tmp" 2>/dev/null; mv "$Z2_AUTO.tmp" "$Z2_AUTO"; }
 		/etc/init.d/zapret2 reload >/dev/null 2>&1
 		json_header; printf '{"ok":true}'; exit 0
 
@@ -1880,6 +1883,8 @@ cat <<'HTML'
   .pmrow { font-size: .9rem; margin-bottom: .3rem; }
   .pmnote { font-size: .82rem; opacity: .7; margin: .3rem 0 .5rem; }
   .pmsub { font-size: .8rem; opacity: .7; margin: .6rem 0 .2rem; }
+  .exopt { display: block; width: 100%; text-align: left; margin: .3rem 0; }
+  .exopt small { opacity: .7; }
   .pmlist { list-style: none; margin: 0; padding: 0; font-family: ui-monospace, monospace; font-size: .82rem; columns: 2; column-gap: 1.2rem; }
   .pmlist li { padding: .05rem 0; border: 0; display: list-item; break-inside: avoid; }
 </style>
@@ -2202,6 +2207,8 @@ const I18N = {
     z2AutoHint: "Zapret2 отслеживает неудачные соединения и сам добавляет заблокированные домены в обход. Обычно достаточно этого; ручной список — для точечных случаев.",
     z2AutoView: "Показать список", z2AutoClear: "Очистить список", z2ClearConfirm: "Очистить весь список автообучения?", z2NoBypass: "Не пробивать этот домен",
     z2AutoPrune: "Убрать покрытые", z2AutoPruneHint: "Удаляет из автолиста домены, уже покрытые твоими доменами и пресетами (по суффиксу) — чистит накопленный шум.", z2Pruned: "Убрано доменов: ",
+    z2ExPick: "Что добавить в исключения?", z2ExAsIs: "только этот хост", z2ExAll: "весь домен — со всеми поддоменами",
+    z2ExNote: "Домен попадёт в исключения (не будет пробиваться), а покрытые им записи исчезнут из автосписка.",
     z2Excluded: "Исключения (не пробивать)", z2ExHint: "Домены, которые zapret2 НИКОГДА не трогает (проверяются первыми). Сюда попадают твои «баны» из автолиста и авто-защита серверов VPN-нод (её удалить нельзя).",
     noEngines: "Ни nikki (VPN), ни zapret2 не установлены — управлять нечем. Поставь хотя бы один.",
     devHint: "Устройства из этого списка ходят в интернет мимо VPN (напрямую). Выбери устройство из списка или впиши его IP. Исключение по IP — чтобы оно не «слетало», закрепи за устройством постоянный адрес (статический DHCP-лиз).",
@@ -2290,6 +2297,8 @@ const I18N = {
     z2AutoHint: "Zapret2 watches for failed connections and auto-adds blocked domains to the bypass. Usually enough on its own; the manual list is for specific cases.",
     z2AutoView: "Show list", z2AutoClear: "Clear list", z2ClearConfirm: "Clear the whole auto-learned list?", z2NoBypass: "Don't bypass this domain",
     z2AutoPrune: "Remove covered", z2AutoPruneHint: "Removes auto-learned domains already covered by your domains and presets (by suffix) — clears accumulated noise.", z2Pruned: "Removed: ",
+    z2ExPick: "What to add to the exclusions?", z2ExAsIs: "this host only", z2ExAll: "whole domain — incl. all subdomains",
+    z2ExNote: "The domain goes to the exclusions (won't be desynced) and auto-learned entries it covers are removed.",
     z2Excluded: "Exclusions (never bypass)", z2ExHint: "Domains zapret2 NEVER touches (checked first). This holds your \"bans\" from the auto-list plus the automatic protection of your VPN-node servers (which you can't remove).",
     noEngines: "Neither nikki (VPN) nor zapret2 is installed — nothing to manage. Install at least one.",
     devHint: "Devices in this list reach the internet directly, bypassing the VPN. Pick a device or type its IP. Exclusion is by IP — give the device a fixed address (static DHCP lease) so it doesn't drift.",
@@ -2871,13 +2880,35 @@ $("#z2AutoPrune").addEventListener("click", async e => {
   if (res && res.ok){ setMsg($("#z2AutoMsg"), t("z2Pruned") + res.removed); loadZapret2(); }
   else setMsg($("#z2AutoMsg"), t("errP") + ((res && res.error) || "?"), false);
 });
-$("#z2AutoList").addEventListener("click", async e => {
-  const b = e.target.closest("button[data-z2exclude]"); if (!b) return;
-  b.disabled = true; showOverlay(t("applying")); setMsg($("#z2AutoMsg"), t("applying"));
-  const res = await api("z2exclude", { domain: b.dataset.z2exclude });
+function z2suffixChain(d){
+  // "rr1.sn-abc.googlevideo.com" → [itself, "sn-abc.googlevideo.com", "googlevideo.com"] (never the bare TLD)
+  const p = d.split(".");
+  const out = [d];
+  for (let i = 1; i <= p.length - 2; i++) out.push(p.slice(i).join("."));
+  return out;
+}
+async function z2doExclude(d){
+  showOverlay(t("applying")); setMsg($("#z2AutoMsg"), t("applying"));
+  const res = await api("z2exclude", { domain: d });
   hideOverlay();
   if (res.ok){ setMsg($("#z2AutoMsg"), t("done")); loadZapret2(); }
-  else { setMsg($("#z2AutoMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
+  else setMsg($("#z2AutoMsg"), t("errP") + (res.error || "?"), false);
+}
+$("#z2AutoList").addEventListener("click", e => {
+  const b = e.target.closest("button[data-z2exclude]"); if (!b) return;
+  const d = b.dataset.z2exclude, opts = z2suffixChain(d);
+  if (opts.length < 2){ z2doExclude(d); return; }
+  $("#pmTitle").textContent = t("z2NoBypass");
+  let h = '<div class="pmsub">' + t("z2ExPick") + '</div>';
+  opts.forEach((o, i) => {
+    h += '<button class="ghost exopt" data-exd="' + escH(o) + '"><code>' + escH(o) + '</code><br><small>' +
+         t(i === 0 ? "z2ExAsIs" : "z2ExAll") + '</small></button>';
+  });
+  h += '<div class="pmnote">' + t("z2ExNote") + '</div>';
+  $("#pmBody").innerHTML = h;
+  $("#pmBody").querySelectorAll("button[data-exd]").forEach(btn =>
+    btn.addEventListener("click", () => { $("#pmodal").hidden = true; z2doExclude(btn.dataset.exd); }));
+  $("#pmodal").hidden = false;
 });
 $("#z2ExList").addEventListener("click", async e => {
   const b = e.target.closest("button[data-z2unex]"); if (!b) return;
