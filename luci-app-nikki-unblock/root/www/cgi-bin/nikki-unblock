@@ -492,7 +492,7 @@ update_start() {   # $1=op(self|nikki|geo|z2|all) ; 0=started 1=busy 2=bad op
 		esac
 		case "$_op" in self|all)
 			printf 'echo ">> nikki-unblock: fetching latest release .apk"\n'
-			printf 'if wget -q -O /tmp/nu-new.apk "%s"; then apk add --allow-untrusted /tmp/nu-new.apk || rc=$?; else rc=1; echo "!! download failed"; fi\n' "$SELF_APK"
+			printf 'if curl -sfL --max-time 120 -o /tmp/nu-new.apk "%s"; then apk add --allow-untrusted /tmp/nu-new.apk || rc=$?; else rc=1; echo "!! download failed"; fi\n' "$SELF_APK"
 			printf 'rm -f /tmp/nu-new.apk\n' ;;
 		esac
 		printf 'echo "__DONE__:$rc"\nrm -f "%s"\n' "$UPD_LOCK"
@@ -2355,6 +2355,8 @@ cat <<'HTML'
   .undo-menu { display: none; position: absolute; right: 0; top: 100%; margin-top: .35rem; z-index: 50; min-width: 15rem; max-width: 22rem;
     background: #f7f7f9; border: 1px solid #8883; border-radius: 10px; padding: .3rem; box-shadow: 0 8px 24px #0004; }
   .undo-wrap:hover .undo-menu, .undo-wrap.open .undo-menu { display: block; }
+  .undo-btn.dim { opacity: .45; }
+  .um-empty { font-size: .82rem; opacity: .6; padding: .4rem .5rem .5rem; }
   .um-head { font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; opacity: .5; padding: .3rem .5rem .2rem; }
   .um-sep { height: 1px; background: #8883; margin: .3rem .2rem; }
   .umi { display: flex; align-items: center; gap: .55rem; width: 100%; text-align: left; background: transparent; color: inherit; padding: .4rem .5rem; border-radius: 7px; font-size: .85rem; }
@@ -2998,7 +3000,7 @@ const I18N = {
     bkRestoreRow: "Восстановить", bkRestoreRotConfirm: "Восстановить настройки из этого бэкапа? Текущее состояние обоих движков будет заменено.",
     bk_daily: "За день", bk_weekly: "За неделю", bk_monthly: "За месяц",
     undoTitle: "Откат изменений", undoHint: "Перед каждым переключением (стратегия, QUIC, IPv6, автообучение, пресеты) сохраняется снимок обоих движков. Если что-то сломалось после изменения — верни как было.",
-    undoBtn: "↩ Вернуть как было", undoThis: "Откатить сюда", undoLast: "Вернуть последнее изменение", undoConfirm: "Откатить к состоянию до этого изменения? Настройки обоих движков вернутся к тому моменту.",
+    undoBtn: "↩ Вернуть как было", undoThis: "Откатить сюда", undoLast: "Вернуть последнее изменение", undoEmpty: "Пока нет изменений для отката", undoConfirm: "Откатить к состоянию до этого изменения? Настройки обоих движков вернутся к тому моменту.",
     act_z2strat: "стратегия zapret2", act_z2quic: "тумблер QUIC", act_z2ipv6: "тумблер IPv6", act_z2autotoggle: "автообучение zapret2",
     act_z2preset_on: "пресет zapret2 вкл", act_z2preset_off: "пресет zapret2 выкл", act_geosite_on: "гео-пресет вкл", act_geosite_off: "гео-пресет выкл",
     act_preset_sync: "пресет доменов вкл", act_preset_off: "пресет доменов выкл", act_mssclamp: "MSS-clamp", act_auto: "авто-бэкап",
@@ -3127,7 +3129,7 @@ const I18N = {
     bkRestoreRow: "Restore", bkRestoreRotConfirm: "Restore settings from this backup? The current state of both engines will be replaced.",
     bk_daily: "Daily", bk_weekly: "Weekly", bk_monthly: "Monthly",
     undoTitle: "Undo changes", undoHint: "Before each toggle (strategy, QUIC, IPv6, auto-learn, presets) a snapshot of both engines is saved. If something broke after a change — put it back.",
-    undoBtn: "↩ Undo last change", undoThis: "Revert to here", undoLast: "Undo last change", undoConfirm: "Revert to the state before this change? Both engines' settings return to that point.",
+    undoBtn: "↩ Undo last change", undoThis: "Revert to here", undoLast: "Undo last change", undoEmpty: "No changes to undo yet", undoConfirm: "Revert to the state before this change? Both engines' settings return to that point.",
     act_z2strat: "zapret2 strategy", act_z2quic: "QUIC toggle", act_z2ipv6: "IPv6 toggle", act_z2autotoggle: "zapret2 auto-learn",
     act_z2preset_on: "zapret2 preset on", act_z2preset_off: "zapret2 preset off", act_geosite_on: "geo preset on", act_geosite_off: "geo preset off",
     act_preset_sync: "domain preset on", act_preset_off: "domain preset off", act_mssclamp: "MSS clamp", act_auto: "auto-backup",
@@ -4130,10 +4132,11 @@ async function loadUndo(){
 function buildUndoMenu(){
   const wrap = $("#undoWrap"), menu = $("#undoMenu");
   const hasUndo = UNDO_RING.length, hasBk = BK_FILES.length;
-  wrap.hidden = !(hasUndo || hasBk);
-  if (wrap.hidden){ wrap.classList.remove("open"); return; }
+  wrap.hidden = false;   // the control is always present so users can find it
+  $("#undoTop").classList.toggle("dim", !(hasUndo || hasBk));
   $("#undoTop").title = hasUndo ? (t("undoLast") + " · " + (t("act_" + UNDO_RING[0].label) || UNDO_RING[0].label)) : t("undoTitle");
   let h = '<div class="um-head">' + escH(t("undoTitle")) + '</div>';
+  if (!hasUndo && !hasBk) h += '<div class="um-empty">' + escH(t("undoEmpty")) + '</div>';
   UNDO_RING.slice(0, 5).forEach((u, i) => {
     const label = t("act_" + u.label) || u.label;
     h += '<button class="umi" data-kind="undo" data-id="' + escH(u.id) + '">' +
