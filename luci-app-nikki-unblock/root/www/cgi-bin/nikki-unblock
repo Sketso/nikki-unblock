@@ -909,6 +909,69 @@ z2_desync_ok() {
 z2_cur_ver() {
 	/opt/zapret2/nfq2/nfqws2 --version 2>/dev/null | grep -oE 'v[0-9][0-9.]*' | head -1
 }
+# ---- curated DPI-bypass strategies (NFQWS2_OPT) -----------------------------
+# A few proven strategy sets the user can pick from the Service tab. Applying one rewrites the
+# multiline NFQWS2_OPT block in /opt/zapret2/config (backup + restart + health-check + rollback,
+# like the updater). <HOSTLIST>/<HOSTLIST_NOAUTO> are zapret2's own placeholders (kept literal);
+# <GVBLOB> is our placeholder for the googlevideo QUIC fake, resolved to whatever blob ships (the
+# exact filename is version-specific), falling back to the always-present fake_default_quic.
+z2_gv_blob() {
+	_b=$(ls /opt/zapret2/files/fake/ 2>/dev/null | grep -iE 'quic_initial.*googlevideo.*\.bin$' | head -1)
+	[ -n "$_b" ] && echo "${_b%.bin}" || echo "fake_default_quic"
+}
+z2_strat_ids() { echo "default youtube aggressive light"; }
+z2_strat_name() {   # human label per id (RU/EN handled in the UI; this is the fallback)
+	case "$1" in
+		default)    echo "Сбалансированная (по умолчанию)" ;;
+		youtube)    echo "YouTube: QUIC-блоб googlevideo" ;;
+		aggressive) echo "Агрессивная (TLS multidisorder + badsum)" ;;
+		light)      echo "Лёгкая (для слабых роутеров)" ;;
+	esac
+}
+z2_strat_body() {   # $1=id -> the NFQWS2_OPT body (profile lines); empty for unknown id
+	_gv=$(z2_gv_blob)
+	case "$1" in
+		default)
+			printf '%s\n' \
+'--filter-tcp=80 --filter-l7=http <HOSTLIST> --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5 --lua-desync=multisplit:pos=method+2 --new' \
+'--filter-tcp=443 --filter-l7=tls <HOSTLIST> --payload=tls_client_hello --lua-desync=multidisorder:pos=1,midsld --new' \
+'--filter-udp=443 --filter-l7=quic <HOSTLIST_NOAUTO> --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=6' ;;
+		youtube)
+			printf '%s\n' \
+'--filter-tcp=80 --filter-l7=http <HOSTLIST> --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5 --lua-desync=multisplit:pos=method+2 --new' \
+'--filter-tcp=443 --filter-l7=tls <HOSTLIST> --payload=tls_client_hello --lua-desync=multidisorder:pos=1,midsld --new' \
+"--filter-udp=443 --filter-l7=quic <HOSTLIST_NOAUTO> --payload=quic_initial --lua-desync=fake:blob=${_gv}:repeats=8" ;;
+		aggressive)
+			printf '%s\n' \
+'--filter-tcp=80 --filter-l7=http <HOSTLIST> --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5 --lua-desync=multisplit:pos=method+2 --new' \
+'--filter-tcp=443 --filter-l7=tls <HOSTLIST> --payload=tls_client_hello --lua-desync=multidisorder:pos=1,sniext+1,host+1,midsld-2,midsld,midsld+2,endhost-1 --lua-desync=fake:blob=fake_default_tls:badsum:repeats=4 --new' \
+"--filter-udp=443 --filter-l7=quic <HOSTLIST_NOAUTO> --payload=quic_initial --lua-desync=fake:blob=${_gv}:repeats=8" ;;
+		light)
+			printf '%s\n' \
+'--filter-tcp=80 --filter-l7=http <HOSTLIST> --payload=http_req --lua-desync=multisplit:pos=method+2 --new' \
+'--filter-tcp=443 --filter-l7=tls <HOSTLIST> --payload=tls_client_hello --lua-desync=multisplit:pos=1,midsld --new' \
+'--filter-udp=443 --filter-l7=quic <HOSTLIST_NOAUTO> --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=2:cutoff=3' ;;
+	esac
+}
+# which curated strategy is live (compare the config's NFQWS2_OPT body, whitespace-normalised, to each)
+z2_cur_strat() {
+	_norm() { tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//'; }
+	_cur=$(awk '/^NFQWS2_OPT="[[:space:]]*$/{s=1;next} s&&/^"[[:space:]]*$/{exit} s{print}' "$Z2_CONFIG" 2>/dev/null | _norm)
+	for _id in $(z2_strat_ids); do
+		[ "$(z2_strat_body "$_id" | _norm)" = "$_cur" ] && { echo "$_id"; return; }
+	done
+	echo custom
+}
+# rewrite the multiline NFQWS2_OPT="…" block with $1 (a body on stdin-free arg)
+z2_write_opt() {   # stdin = new body lines
+	_body=$(cat)
+	awk -v b="$_body" '
+		state==0 && /^NFQWS2_OPT="[[:space:]]*$/ { print; printf "%s\n", b; state=1; next }
+		state==1 && /^"[[:space:]]*$/ { print; state=2; next }
+		state==1 { next }
+		{ print }
+	' "$Z2_CONFIG" > "$Z2_CONFIG.new" && mv "$Z2_CONFIG.new" "$Z2_CONFIG"
+}
 z2status_json() {
 	json_header
 	pr=0; zapret2_present && pr=1
@@ -918,8 +981,10 @@ z2status_json() {
 	sd=0; [ "$(uci -q get nikki-unblock.z2.setup_done 2>/dev/null)" = 1 ] && sd=1
 	qb=0; quicblock_on && qb=1
 	dq=0; [ "$rn" = 1 ] && z2_desync_ok && dq=1
-	printf '{"present":%d,"running":%d,"boot":%d,"autohostlist":%d,"user_count":%s,"auto_count":%s,"setup_done":%d,"quic_block":%d,"desync_ok":%d}' \
-		"$pr" "$rn" "$bt" "$ah" "$(z2_count "$Z2_USER")" "$(z2_count "$Z2_AUTO")" "$sd" "$qb" "$dq"
+	st=$(z2_cur_strat)
+	v6=0; ipv6_off && v6=1
+	printf '{"present":%d,"running":%d,"boot":%d,"autohostlist":%d,"user_count":%s,"auto_count":%s,"setup_done":%d,"quic_block":%d,"desync_ok":%d,"strategy":"%s","ipv6_off":%d}' \
+		"$pr" "$rn" "$bt" "$ah" "$(z2_count "$Z2_USER")" "$(z2_count "$Z2_AUTO")" "$sd" "$qb" "$dq" "$st" "$v6"
 }
 # ---- zapret2 self-update (binary/strategy swap; not a package) ---------------
 # zapret2 is installed from bol-van's tarball, not apk — so updating = swap the daemon + lua
@@ -1009,6 +1074,26 @@ z2_run_update() {   # [$1=version $2=url] — if omitted, resolved from the Page
 	fi
 	echo "!! no snapshot to roll back from — zapret2 may need manual repair"
 	return 1
+}
+# one-click YouTube bypass diagnostics. Deliberately checks STATE + config coverage, not "does the
+# video play" — curl/browser lie about QUIC (Alt-Svc cache, connection coalescing). Each finding maps
+# to an existing one-tap fix in the UI.
+ytdiag_json() {
+	json_header
+	pr=0; zapret2_present && pr=1
+	rn=0; z2_running && rn=1
+	dq=0; [ "$rn" = 1 ] && z2_desync_ok && dq=1
+	ah=0; z2_autohostlist && ah=1
+	# googlevideo explicitly in a hostlist?
+	gv=0; { cat "$Z2_USER" "$Z2_MAIN" "$Z2_AUTO" 2>/dev/null; } | grep -qi googlevideo && gv=1
+	case " $(z2_active_presets) " in *" youtube "*) gv=1 ;; esac
+	gvcov=$gv; [ "$ah" = 1 ] && gvcov=1   # autohostlist will learn it on first access
+	# QUIC handled = udp/443 intercepted AND a quic desync profile present
+	qh=0; grep -qE '^NFQWS2_PORTS_UDP=.*443' "$Z2_CONFIG" 2>/dev/null && grep -q 'filter-l7=quic' "$Z2_CONFIG" 2>/dev/null && qh=1
+	qb=0; quicblock_on && qb=1
+	v6=0; ipv6_off && v6=1
+	printf '{"present":%d,"running":%d,"desync_ok":%d,"autohostlist":%d,"gv_listed":%d,"gv_covered":%d,"quic_handled":%d,"quic_block":%d,"ipv6_off":%d,"strategy":"%s"}' \
+		"$pr" "$rn" "$dq" "$ah" "$gv" "$gvcov" "$qh" "$qb" "$v6" "$(z2_cur_strat)"
 }
 # hostnames auto-added to the exclude list to protect VPN nodes (protect_server) — must stay
 z2_node_hosts() {
@@ -1148,6 +1233,40 @@ mssclamp_set() {   # $1 = on(0/1)
 		nft delete chain inet fw4 mss_clamp_all 2>/dev/null
 		fw4 reload >/dev/null 2>&1 || /etc/init.d/firewall reload >/dev/null 2>&1
 	fi
+}
+# ---- IPv6 disable (router-wide) --------------------------------------------
+# Disabling IPv6 sometimes fixes the bypass: if clients keep a working IPv6 route to a blocked host,
+# their traffic goes over v6 and skips the v4 desync entirely. We stop handing IPv6 to LAN clients
+# (RA + DHCPv6 + prefix delegation off) and disable the v6 WAN, saving the prior values so it's fully
+# reversible. Applied with `network reload` + `odhcpd restart` (keeps the IPv4 LAN/SSH up).
+ipv6_off() { [ "$(uci -q get nikki-unblock.config.ipv6_off 2>/dev/null)" = 1 ]; }
+ipv6_set() {   # $1 = 1(disable) | 0(enable)
+	uci -q get nikki-unblock.config >/dev/null 2>&1 || uci set nikki-unblock.config=config
+	if [ "$1" = 1 ]; then
+		ipv6_off && return 0
+		# remember prior values (empty = "was unset" → restore by deleting)
+		uci set nikki-unblock.config.ipv6b_wan6="$(uci -q get network.wan6.disabled)"
+		uci set nikki-unblock.config.ipv6b_dhcpv6="$(uci -q get dhcp.lan.dhcpv6)"
+		uci set nikki-unblock.config.ipv6b_ra="$(uci -q get dhcp.lan.ra)"
+		uci set nikki-unblock.config.ipv6b_deleg="$(uci -q get network.lan.delegate)"
+		uci -q get network.wan6 >/dev/null 2>&1 && uci set network.wan6.disabled=1
+		uci set dhcp.lan.dhcpv6=disabled
+		uci set dhcp.lan.ra=disabled
+		uci set network.lan.delegate=0
+		uci set nikki-unblock.config.ipv6_off=1
+		uci commit
+	else
+		ipv6_off || return 0
+		_ip6_rst() { _v=$(uci -q get "nikki-unblock.config.$1"); if [ -n "$_v" ]; then uci set "$2=$_v"; else uci -q delete "$2" 2>/dev/null; fi; }
+		_ip6_rst ipv6b_wan6 network.wan6.disabled
+		_ip6_rst ipv6b_dhcpv6 dhcp.lan.dhcpv6
+		_ip6_rst ipv6b_ra dhcp.lan.ra
+		_ip6_rst ipv6b_deleg network.lan.delegate
+		for _k in ipv6_off ipv6b_wan6 ipv6b_dhcpv6 ipv6b_ra ipv6b_deleg; do uci -q delete "nikki-unblock.config.$_k"; done
+		uci commit
+	fi
+	/etc/init.d/network reload >/dev/null 2>&1
+	/etc/init.d/odhcpd restart >/dev/null 2>&1
 }
 # ---- Block-QUIC (zapret2 companion) -----------------------------------------
 # Drop forwarded UDP/443 so browsers fall back to TCP, where the zapret2 desync works.
@@ -1512,11 +1631,36 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		rn=0; z2_running && rn=1; bt=0; /etc/init.d/zapret2 enabled 2>/dev/null && bt=1
 		json_header; printf '{"ok":true,"running":%d,"boot":%d}' "$rn" "$bt"; exit 0
 
+	elif [ "$action" = "z2strat" ]; then
+		# switch the curated DPI-bypass strategy (rewrites NFQWS2_OPT) with backup + health rollback
+		id=$(printf '%s' "$(get_param id)" | tr -cd 'a-z0-9_-')
+		body=$(z2_strat_body "$id")
+		[ -z "$body" ] && { json_header; printf '{"ok":false,"error":"bad strategy"}'; exit 0; }
+		[ -f "$Z2_CONFIG" ] || { json_header; printf '{"ok":false,"error":"no config"}'; exit 0; }
+		was=0; z2_running && was=1
+		cp "$Z2_CONFIG" "$Z2_CONFIG.strat.bak"
+		printf '%s' "$body" | z2_write_opt
+		/etc/init.d/zapret2 restart >/dev/null 2>&1; sleep 4
+		if pgrep -f nfqws2 >/dev/null 2>&1 && { [ "$was" = 0 ] || z2_desync_ok; }; then
+			rm -f "$Z2_CONFIG.strat.bak"
+			json_header; printf '{"ok":true,"strategy":"%s"}' "$id"; exit 0
+		fi
+		# strategy broke the daemon / desync — revert
+		mv "$Z2_CONFIG.strat.bak" "$Z2_CONFIG"
+		/etc/init.d/zapret2 restart >/dev/null 2>&1
+		json_header; printf '{"ok":false,"error":"rejected (reverted)"}'; exit 0
+
 	elif [ "$action" = "z2quic" ]; then
 		on=$(get_param on | tr -cd '01' | cut -c1)
 		quicblock_set "$on"
 		q=0; quicblock_on && q=1
 		json_header; printf '{"ok":true,"quic_block":%d}' "$q"; exit 0
+
+	elif [ "$action" = "z2ipv6" ]; then
+		on=$(get_param on | tr -cd '01' | cut -c1)   # on=1 → DISABLE ipv6
+		ipv6_set "$on"
+		v=0; ipv6_off && v=1
+		json_header; printf '{"ok":true,"ipv6_off":%d}' "$v"; exit 0
 
 	elif [ "$action" = "z2hostadd" ]; then
 		d=$(printf '%s' "$(get_param domain)" | parse_domains | head -1)
@@ -2005,6 +2149,7 @@ devices_json() {
 [ "$API" = "iplist" ] && { iplist_json; exit 0; }
 [ "$API" = "devices" ] && { devices_json; exit 0; }
 [ "$API" = "z2status" ] && { z2status_json; exit 0; }
+[ "$API" = "ytdiag" ] && { ytdiag_json; exit 0; }
 [ "$API" = "z2hosts" ] && { z2hosts_json; exit 0; }
 [ "$API" = "z2presets" ] && { z2presets_json; exit 0; }
 [ "$API" = "presets" ] && {
@@ -2211,6 +2356,14 @@ cat <<'HTML'
   #rpDesc { width: 100%; min-height: 4rem; padding: .5rem .6rem; font-size: .9rem; border-radius: 8px; border: 1px solid #8884; background: #8881; color: inherit; box-sizing: border-box; }
   #rpFull { width: 100%; min-height: 6rem; margin-top: .4rem; padding: .5rem .6rem; font-family: ui-monospace, monospace; font-size: .78rem; border-radius: 8px; border: 1px solid #8884; background: #8881; color: inherit; box-sizing: border-box; }
   li .pick { flex: 0 0 auto; }
+  .strow { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin: .3rem 0; }
+  .strow select { flex: 1; min-width: 10rem; padding: .5rem .6rem; font-size: .9rem; border-radius: 8px; border: 1px solid #8884; background: #8881; color: inherit; }
+  .ytresult { margin: .4rem 0; display: flex; flex-direction: column; gap: .35rem; }
+  .ytrow { display: flex; align-items: center; gap: .5rem; font-size: .88rem; padding: .3rem .45rem; border-radius: 7px; background: #8881; }
+  .ytrow .ytic { flex: 0 0 1.1rem; text-align: center; font-weight: 700; }
+  .ytrow .ytmsg { flex: 1; }
+  .ytrow.ok .ytic { color: #16a34a; } .ytrow.bad .ytic { color: #dc2626; } .ytrow.warn .ytic { color: #f59e0b; } .ytrow.info { opacity: .7; }
+  .ytrow button { padding: .3rem .55rem; font-size: .8rem; white-space: nowrap; }
   .pmlist { list-style: none; margin: 0; padding: 0; font-family: ui-monospace, monospace; font-size: .82rem; columns: 2; column-gap: 1.2rem; }
   .pmlist li { padding: .05rem 0; border: 0; display: list-item; break-inside: avoid; }
 </style>
@@ -2457,11 +2610,34 @@ cat <<'HTML'
         <label class="sw"><input type="checkbox" id="z2Quic"><span class="sl"></span></label>
       </div>
       <div class="hint" data-i18n="z2QuicHint"></div>
+      <div class="swrow">
+        <span class="swlabel" data-i18n="z2Ipv6Label"></span>
+        <label class="sw"><input type="checkbox" id="z2Ipv6"><span class="sl"></span></label>
+      </div>
+      <div class="hint" data-i18n="z2Ipv6Hint"></div>
       <div class="btns">
         <button type="button" class="ghost" id="z2Restart" data-i18n="svcRestart"></button>
         <button type="button" class="ghost" id="z2Reload" data-i18n="svcReload"></button>
       </div>
       <div class="msg" id="z2Msg"></div>
+    </div>
+
+    <div class="svc" id="z2StratBlock">
+      <h3 data-i18n="z2StratTitle"></h3>
+      <div class="hint" data-i18n="z2StratHint"></div>
+      <div class="strow">
+        <select id="z2Strat"></select>
+        <button type="button" id="z2StratApply" data-i18n="apply"></button>
+      </div>
+      <div class="msg" id="z2StratMsg"></div>
+    </div>
+
+    <div class="svc" id="ytBlock">
+      <h3 data-i18n="ytTitle"></h3>
+      <div class="hint" data-i18n="ytHint"></div>
+      <div class="btns"><button type="button" id="ytBtn" data-i18n="ytBtn"></button></div>
+      <div class="ytresult" id="ytResult" hidden></div>
+      <div class="msg" id="ytMsg"></div>
     </div>
   </section>
 
@@ -2590,9 +2766,28 @@ const I18N = {
     fltPh: "Фильтр… (можно * как маску)", fltAll: "видимые", fltDel: "Удалить выбранные", fltNoBypass: "Не пробивать выбранные",
     fltConfirm: "Применить к выбранным записям: ",
     z2OnNoDesync: "работает, но обход не активен",
+    z2StratTitle: "Стратегия обхода", apply: "Применить",
+    z2StratHint: "Набор параметров десинхронизации. Если что-то не пробивается — попробуй другую; при поломке автоматически откатится на прежнюю.",
+    strat_default: "Сбалансированная (по умолчанию)", strat_youtube: "YouTube: QUIC-блоб googlevideo",
+    strat_aggressive: "Агрессивная (TLS multidisorder + badsum)", strat_light: "Лёгкая (для слабых роутеров)", strat_custom: "Своя (ручная правка config)",
+    stratCustomNote: "Это ручная стратегия из config — выбери одну из готовых, чтобы применить.", stratSame: "Эта стратегия уже активна",
+    ytTitle: "Диагностика YouTube", ytHint: "Проверяет, всё ли настроено для обхода YouTube: жив ли десинк, покрыт ли googlevideo, обрабатывается ли QUIC, не течёт ли трафик мимо. Проверка идёт по состоянию правил и конфига, а не по «открывается ли видео» (браузер про QUIC врёт). Рядом с проблемой — кнопка быстрого фикса.",
+    ytBtn: "Проверить YouTube",
+    ytNotInstalled: "zapret2 не установлен.", ytNotRunning: "Служба zapret2 не запущена.", ytFixStart: "Запустить",
+    ytNoDesync: "Служба запущена, но правила обхода не активны.", ytRunning: "Служба и правила обхода активны.",
+    ytGvListed: "googlevideo есть в списках обхода.", ytGvAuto: "googlevideo будет подхвачен автообучением при заходе.",
+    ytGvMissing: "googlevideo не покрыт: ни в списках, ни автообучением.", ytFixGv: "Добавить googlevideo.com",
+    ytQuicBlocked: "QUIC заблокирован — браузер уйдёт на TCP.", ytQuicHandled: "QUIC обрабатывается десинком.",
+    ytQuicNone: "QUIC не обрабатывается и не заблокирован — видео может зависать.", ytFixQuicBlock: "Резать QUIC",
+    ytIpv6On: "IPv6 включён — трафик может идти мимо обхода по IPv6.",
+    ytStratHint: "Сейчас общая стратегия. Для упрямого YouTube есть заточенная.",
+    ytFootnote: "Если всё зелёное, а видео не грузится — попробуй стратегию «YouTube» или «Агрессивная», очисти кэш браузера и проверь в приватном окне.",
     z2HealthWarn: "Служба запущена, но правила обхода не активны — трафик идёт мимо DPI-обхода. Нажми «Перезапустить», чтобы пересобрать правила.",
     z2QuicLabel: "Резать QUIC (форсить TCP)",
     z2QuicHint: "Блокирует UDP/443 из локальной сети — браузеры откатываются на TCP, где обход DPI работает надёжнее. Приложению YouTube на телефоне это не поможет: ему нужен рабочий QUIC-обход, а не блок.",
+    z2Ipv6Label: "Отключить IPv6 на роутере",
+    z2Ipv6Hint: "Иногда чинит обход: если у устройств остаётся рабочий IPv6-маршрут до заблокированного сайта, их трафик идёт по IPv6 мимо десинка. Выключает раздачу IPv6 в локалку (RA/DHCPv6) и IPv6-WAN. Полностью обратимо.",
+    z2Ipv6Confirm: "Отключить IPv6 на всём роутере? Сеть кратко переприменится, устройства перейдут на IPv4. Это обратимо тем же тумблером.",
     z2Excluded: "Исключения (не пробивать)", z2ExHint: "Домены, которые zapret2 НИКОГДА не трогает (проверяются первыми). Сюда попадают твои «баны» из автолиста и авто-защита серверов VPN-нод (её удалить нельзя).",
     noEngines: "Ни nikki (VPN), ни zapret2 не установлены — управлять нечем. Поставь хотя бы один.",
     devHint: "Устройства из этого списка ходят в интернет мимо VPN (напрямую). Выбери устройство из списка или впиши его IP. Исключение по IP — чтобы оно не «слетало», закрепи за устройством постоянный адрес (статический DHCP-лиз).",
@@ -2693,9 +2888,28 @@ const I18N = {
     fltPh: "Filter… (* works as a wildcard)", fltAll: "shown", fltDel: "Delete selected", fltNoBypass: "Don't bypass selected",
     fltConfirm: "Apply to the selected entries: ",
     z2OnNoDesync: "running, but bypass inactive",
+    z2StratTitle: "Bypass strategy", apply: "Apply",
+    z2StratHint: "The desync parameter set. If something won't get through, try another; a broken one auto-reverts to the previous.",
+    strat_default: "Balanced (default)", strat_youtube: "YouTube: googlevideo QUIC blob",
+    strat_aggressive: "Aggressive (TLS multidisorder + badsum)", strat_light: "Light (for weak routers)", strat_custom: "Custom (hand-edited config)",
+    stratCustomNote: "This is a manual strategy from config — pick one of the presets to apply.", stratSame: "That strategy is already active",
+    ytTitle: "YouTube diagnostics", ytHint: "Checks whether everything is set up to bypass YouTube: is the desync live, is googlevideo covered, is QUIC handled, is traffic leaking past. Based on rule/config state, not on 'does the video play' (the browser lies about QUIC). Each issue comes with a one-tap fix.",
+    ytBtn: "Check YouTube",
+    ytNotInstalled: "zapret2 is not installed.", ytNotRunning: "The zapret2 service is not running.", ytFixStart: "Start",
+    ytNoDesync: "Service is running but the bypass rules aren't active.", ytRunning: "Service and bypass rules are active.",
+    ytGvListed: "googlevideo is in the bypass lists.", ytGvAuto: "googlevideo will be picked up by auto-learn on first access.",
+    ytGvMissing: "googlevideo isn't covered — not in lists, not via auto-learn.", ytFixGv: "Add googlevideo.com",
+    ytQuicBlocked: "QUIC is blocked — the browser will use TCP.", ytQuicHandled: "QUIC is handled by the desync.",
+    ytQuicNone: "QUIC is neither handled nor blocked — video may hang.", ytFixQuicBlock: "Block QUIC",
+    ytIpv6On: "IPv6 is on — traffic may bypass the desync over IPv6.",
+    ytStratHint: "You're on a generic strategy. There's one tuned for stubborn YouTube.",
+    ytFootnote: "If everything is green but video won't load — try the 'YouTube' or 'Aggressive' strategy, clear the browser cache and test in a private window.",
     z2HealthWarn: "The service is running, but the desync rules are not active — traffic is passing without the DPI bypass. Hit Restart to rebuild the rules.",
     z2QuicLabel: "Block QUIC (force TCP)",
     z2QuicHint: "Drops LAN UDP/443 so browsers fall back to TCP, where the DPI bypass is more reliable. Won't help the mobile YouTube app — it needs a working QUIC desync, not a block.",
+    z2Ipv6Label: "Disable IPv6 on the router",
+    z2Ipv6Hint: "Sometimes fixes the bypass: if devices keep a working IPv6 route to a blocked site, their traffic goes over IPv6 and skips the desync. Turns off IPv6 for LAN clients (RA/DHCPv6) and the IPv6 WAN. Fully reversible.",
+    z2Ipv6Confirm: "Disable IPv6 on the whole router? The network re-applies briefly and devices switch to IPv4. Reversible with the same toggle.",
     z2Excluded: "Exclusions (never bypass)", z2ExHint: "Domains zapret2 NEVER touches (checked first). This holds your \"bans\" from the auto-list plus the automatic protection of your VPN-node servers (which you can't remove).",
     noEngines: "Neither nikki (VPN) nor zapret2 is installed — nothing to manage. Install at least one.",
     devHint: "Devices in this list reach the internet directly, bypassing the VPN. Pick a device or type its IP. Exclusion is by IP — give the device a fixed address (static DHCP lease) so it doesn't drift.",
@@ -3275,6 +3489,8 @@ function renderZ2(){
   $("#z2Health").hidden = !(run && !dOk);
   $("#z2Run").checked = run; $("#z2Boot").checked = Z2.boot === 1; $("#z2AutoChk").checked = Z2.autohostlist === 1;
   $("#z2Quic").checked = Z2.quic_block === 1;
+  $("#z2Ipv6").checked = Z2.ipv6_off === 1;
+  renderStrat();
   const ul = $("#z2UserList"); ul.innerHTML = "";
   const u = Z2HOSTS.user || []; $("#z2UserCount").textContent = "(" + u.length + ")";
   u.forEach(d => { const li = document.createElement("li");
@@ -3317,6 +3533,85 @@ $("#z2Quic").addEventListener("change", async e => {
   if (res && res.ok) setMsg($("#z2Msg"), t("done")); else setMsg($("#z2Msg"), t("errP") + ((res && res.error) || "?"), false);
   loadZapret2();
 });
+/* ---------- zapret2 strategies (curated NFQWS2_OPT) ---------- */
+const STRATS = ["default", "youtube", "aggressive", "light"];
+function renderStrat(){
+  const sel = $("#z2Strat");
+  const cur = Z2.strategy || "default";
+  // (re)build options, adding a read-only "custom" entry if the config was hand-edited
+  const want = STRATS.concat(cur === "custom" || !STRATS.includes(cur) ? ["custom"] : []);
+  if (sel.dataset.built !== want.join(",")){
+    sel.innerHTML = "";
+    want.forEach(id => { const o = document.createElement("option"); o.value = id;
+      o.textContent = t("strat_" + id) || id; sel.appendChild(o); });
+    sel.dataset.built = want.join(",");
+  } else {
+    [...sel.options].forEach(o => { o.textContent = t("strat_" + o.value) || o.value; });
+  }
+  sel.value = STRATS.includes(cur) ? cur : "custom";
+}
+$("#z2StratApply").addEventListener("click", async () => {
+  const id = $("#z2Strat").value;
+  if (id === "custom"){ setMsg($("#z2StratMsg"), t("stratCustomNote"), false); return; }
+  if (id === Z2.strategy){ setMsg($("#z2StratMsg"), t("stratSame")); return; }
+  const btn = $("#z2StratApply"); btn.disabled = true;
+  showOverlay(t("applying")); setMsg($("#z2StratMsg"), t("applying"));
+  let res; try { res = await api("z2strat", { id }); } catch(e){ res = {}; }
+  hideOverlay(); btn.disabled = false;
+  if (res && res.ok) setMsg($("#z2StratMsg"), t("done"));
+  else setMsg($("#z2StratMsg"), t("errP") + ((res && res.error) || "?"), false);
+  loadZapret2();
+});
+$("#z2Ipv6").addEventListener("change", async e => {
+  const el = e.currentTarget;
+  if (el.checked && !confirm(t("z2Ipv6Confirm"))){ el.checked = false; return; }
+  el.disabled = true; showOverlay(t("applying")); setMsg($("#z2Msg"), t("applying"));
+  let res; try { res = await api("z2ipv6", { on: el.checked ? 1 : 0 }); } catch(_){ res = {}; }
+  hideOverlay(); el.disabled = false;
+  if (res && res.ok) setMsg($("#z2Msg"), t("done")); else setMsg($("#z2Msg"), t("errP") + ((res && res.error) || "?"), false);
+  loadZapret2();
+});
+/* ---------- one-click YouTube diagnostics ---------- */
+async function ytCheck(){
+  const btn = $("#ytBtn"); btn.disabled = true; setMsg($("#ytMsg"), t("applying"));
+  let d; try { d = await (await fetch("?api=ytdiag")).json(); } catch(e){ setMsg($("#ytMsg"), t("errP"), false); btn.disabled = false; return; }
+  setMsg($("#ytMsg"), ""); btn.disabled = false;
+  const box = $("#ytResult"); box.innerHTML = ""; box.hidden = false;
+  const add = (state, msg, fix) => {
+    const div = document.createElement("div"); div.className = "ytrow " + state;
+    div.innerHTML = '<span class="ytic">' + (state === "ok" ? "✓" : state === "bad" ? "✕" : state === "warn" ? "!" : "·") + '</span>' +
+                    '<span class="ytmsg">' + escH(msg) + '</span>';
+    if (fix){
+      const b = document.createElement("button"); b.className = "ghost"; b.textContent = fix.label;
+      b.addEventListener("click", async () => {
+        b.disabled = true; showOverlay(t("applying"));
+        try { await api(fix.action, fix.params || {}); } catch(e){}
+        hideOverlay(); loadZapret2(); ytCheck();
+      });
+      div.appendChild(b);
+    }
+    box.appendChild(div);
+  };
+  if (!d.present){ add("bad", t("ytNotInstalled")); return; }
+  // service health
+  if (!d.running) add("bad", t("ytNotRunning"), { label: t("ytFixStart"), action: "z2svc", params: { op: "restart" } });
+  else if (!d.desync_ok) add("bad", t("ytNoDesync"), { label: t("svcRestart"), action: "z2svc", params: { op: "restart" } });
+  else add("ok", t("ytRunning"));
+  // googlevideo coverage
+  if (d.gv_covered) add("ok", d.gv_listed ? t("ytGvListed") : t("ytGvAuto"));
+  else add("bad", t("ytGvMissing"), { label: t("ytFixGv"), action: "z2hostadd", params: { domain: "googlevideo.com" } });
+  // QUIC
+  if (d.quic_block) add("ok", t("ytQuicBlocked"));
+  else if (d.quic_handled) add("ok", t("ytQuicHandled"));
+  else add("warn", t("ytQuicNone"), { label: t("ytFixQuicBlock"), action: "z2quic", params: { on: 1 } });
+  // IPv6 leak
+  if (!d.ipv6_off) add("warn", t("ytIpv6On"), { label: t("z2Ipv6Label"), action: "z2ipv6", params: { on: 1 } });
+  // strategy nudge if still on a generic one
+  if (d.strategy !== "youtube" && d.strategy !== "aggressive")
+    add("warn", t("ytStratHint"), { label: t("strat_youtube"), action: "z2strat", params: { id: "youtube" } });
+  add("info", t("ytFootnote"));
+}
+$("#ytBtn").addEventListener("click", ytCheck);
 $("#z2Restart").addEventListener("click", e => z2Do("restart", e.currentTarget));
 $("#z2Reload").addEventListener("click", e => z2Do("reload", e.currentTarget));
 $("#z2Form").addEventListener("submit", async e => {
