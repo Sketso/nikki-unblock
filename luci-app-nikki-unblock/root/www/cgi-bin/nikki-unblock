@@ -400,17 +400,42 @@ versions_json() {
 	if geoip_ready && [ "$(uci -q get nikki.mixin.geoip_format)" = dat ]; then
 		geo_ok=1; geo_date=$(date -r /etc/nikki/run/GeoIP.dat '+%Y-%m-%d' 2>/dev/null)
 	fi
-	printf '{"self":"%s","nikki":"%s","luci":"%s","mihomo":"%s","geo_ok":%d,"geo_date":"%s"}' \
+	z2p=0; z2v=""; if [ -x /etc/init.d/zapret2 ] && [ -d /opt/zapret2 ]; then z2p=1; z2v=$(z2_cur_ver); fi
+	printf '{"self":"%s","nikki":"%s","luci":"%s","mihomo":"%s","geo_ok":%d,"geo_date":"%s","z2_present":%d,"z2_ver":"%s"}' \
 		"$(pkg_ver luci-app-nikki-unblock)" "$(pkg_ver nikki)" \
-		"$(pkg_ver luci-app-nikki)" "$(pkg_ver "$(mihomo_pkg)")" "$geo_ok" "$geo_date"
+		"$(pkg_ver luci-app-nikki)" "$(pkg_ver "$(mihomo_pkg)")" "$geo_ok" "$geo_date" "$z2p" "$z2v"
+}
+# plaintext diagnostics for the Report feature — deliberately excludes secrets (no mihomo API token,
+# no node keys, no full uci dump); just enough to triage a "something broke" report.
+diag_json() {
+	json_header
+	DIST=""; DESC=""
+	[ -f /etc/openwrt_release ] && { DIST=$(sed -n "s/^DISTRIB_TARGET='\(.*\)'/\1/p" /etc/openwrt_release); DESC=$(sed -n "s/^DISTRIB_DESCRIPTION='\(.*\)'/\1/p" /etc/openwrt_release); }
+	{
+		echo "=== Nipret diagnostics · $(date '+%Y-%m-%d %H:%M') ==="
+		echo "router: $(cat /tmp/sysinfo/model 2>/dev/null) · ${DESC:-?} · ${DIST:-?}"
+		echo "nipret=$(pkg_ver luci-app-nikki-unblock) nikki=$(pkg_ver nikki) mihomo=$(pkg_ver "$(mihomo_pkg)") luci=$(pkg_ver luci-app-nikki)"
+		echo "nikki: running=$(pgrep -f /usr/bin/mihomo >/dev/null && echo 1 || echo 0) rules=$(uci show nikki 2>/dev/null | grep -c '=rule$')"
+		if [ -x /etc/init.d/zapret2 ] && [ -d /opt/zapret2 ]; then
+			echo "zapret2: ver=$(z2_cur_ver) running=$(z2_running && echo 1 || echo 0) desync_ok=$(z2_desync_ok && echo 1 || echo 0) quic_block=$(quicblock_on && echo 1 || echo 0) autohostlist=$(z2_autohostlist && echo 1 || echo 0)"
+			echo "zapret2 hosts: user=$(z2_count "$Z2_USER") auto=$(z2_count "$Z2_AUTO") presets=[$(z2_active_presets)]"
+			echo "nft zapret2 postnat queue rules: $(nft list chain inet zapret2 postnat 2>/dev/null | grep -c queue)"
+		else
+			echo "zapret2: not installed"
+		fi
+		echo "--- recent log (nikki/zapret/nfqws/mihomo, last 40) ---"
+		logread 2>/dev/null | grep -iE 'nikki|zapret|nfqws|mihomo' | tail -40
+	} > /tmp/nu-diag.txt
+	printf '{"ok":true,"text":"%s"}' "$(json_log /tmp/nu-diag.txt)"
+	rm -f /tmp/nu-diag.txt
 }
 upd_running() {   # 0 (true) if an update runner is alive
 	[ -f "$UPD_LOCK" ] || return 1
 	kill -0 "$(cat "$UPD_LOCK" 2>/dev/null)" 2>/dev/null
 }
-update_start() {   # $1=op(self|nikki|geo|all) ; 0=started 1=busy 2=bad op
+update_start() {   # $1=op(self|nikki|geo|z2|all) ; 0=started 1=busy 2=bad op
 	_op="$1"
-	case "$_op" in self|nikki|geo|all) ;; *) return 2 ;; esac
+	case "$_op" in self|nikki|geo|z2|all) ;; *) return 2 ;; esac
 	upd_running && return 1
 	: > "$UPD_LOG"
 	{
@@ -420,8 +445,16 @@ update_start() {   # $1=op(self|nikki|geo|all) ; 0=started 1=busy 2=bad op
 		# (for op=all) — the poll endpoint then disappears only once everything else is done.
 		case "$_op" in nikki|all)
 			_mp=$(mihomo_pkg)   # mihomo-meta / mihomo-alpha / mihomo — whichever is installed
+			# snapshot config first so a broken upgrade can be rolled back (build_backup is tiny)
+			printf 'echo ">> nikki: snapshot config (rollback point)"; "%s" _nikkisnap\n' "$SELF"
 			printf 'echo ">> apk update"; apk update\n'
-			printf 'echo ">> upgrading nikki + mihomo"; apk upgrade nikki luci-app-nikki %s || rc=$?\n' "$_mp" ;;
+			printf 'echo ">> upgrading nikki + mihomo"; apk upgrade nikki luci-app-nikki %s || rc=$?\n' "$_mp"
+			printf 'echo ">> checking mihomo"; sleep 4\n'
+			printf 'if ! pgrep -f /usr/bin/mihomo >/dev/null; then echo "!! mihomo down after update — rolling back config"; "%s" _nikkirollback; /etc/init.d/nikki restart >/dev/null 2>&1; sleep 3; pgrep -f /usr/bin/mihomo >/dev/null || echo "!! mihomo still down after rollback — restore a backup or downgrade manually"; rc=1; else echo ">> mihomo OK"; rm -f "%s"; fi\n' "$SELF" "$NIKKI_PRESNAP" ;;
+		esac
+		# zapret2 update BEFORE self (self replaces the CGI). Uses the pinned Pages manifest + rollback.
+		case "$_op" in z2|all)
+			printf 'if [ -x /etc/init.d/zapret2 ] && [ -d /opt/zapret2 ]; then echo ">> zapret2 update"; "%s" z2update || rc=$?; else echo ">> zapret2 not installed — skipping"; fi\n' "$SELF" ;;
 		esac
 		case "$_op" in geo|all)
 			# enable geodata-mode (GEOIP uses GeoIP.dat categories) + auto-update, then refresh both DBs
@@ -841,6 +874,16 @@ z2_list_json() {
 	[ -f "$1" ] || return 0
 	awk '{ sub(/\r$/,""); gsub(/[ \t]/,""); if ($0=="" || substr($0,1,1)=="#") next; printf "%s\"%s\"", sep, tolower($0); sep="," }' "$1"
 }
+# desync health: on fw4 a bare `start` brings nfqws2 up WITHOUT nft rules ("running but not
+# bypassing") — same check as the watchdog: the zapret2 postnat chain must queue to nfqws2
+z2_desync_ok() {
+	[ "$(nft list chain inet zapret2 postnat 2>/dev/null | grep -c queue)" -gt 0 ] \
+		&& pgrep -f nfqws2 >/dev/null 2>&1
+}
+# installed zapret2 version, e.g. "v1.0.2" (from the nfqws2 binary itself)
+z2_cur_ver() {
+	/opt/zapret2/nfq2/nfqws2 --version 2>/dev/null | grep -oE 'v[0-9][0-9.]*' | head -1
+}
 z2status_json() {
 	json_header
 	pr=0; zapret2_present && pr=1
@@ -849,15 +892,90 @@ z2status_json() {
 	ah=0; z2_autohostlist && ah=1
 	sd=0; [ "$(uci -q get nikki-unblock.z2.setup_done 2>/dev/null)" = 1 ] && sd=1
 	qb=0; quicblock_on && qb=1
-	# desync health: on fw4 a bare `start` brings nfqws2 up WITHOUT nft rules ("running but not
-	# bypassing") — same check as the watchdog: the zapret2 postnat chain must queue to nfqws2
-	dq=0
-	if [ "$rn" = 1 ]; then
-		[ "$(nft list chain inet zapret2 postnat 2>/dev/null | grep -c queue)" -gt 0 ] \
-			&& pgrep -f nfqws2 >/dev/null 2>&1 && dq=1
-	fi
+	dq=0; [ "$rn" = 1 ] && z2_desync_ok && dq=1
 	printf '{"present":%d,"running":%d,"boot":%d,"autohostlist":%d,"user_count":%s,"auto_count":%s,"setup_done":%d,"quic_block":%d,"desync_ok":%d}' \
 		"$pr" "$rn" "$bt" "$ah" "$(z2_count "$Z2_USER")" "$(z2_count "$Z2_AUTO")" "$sd" "$qb" "$dq"
+}
+# ---- zapret2 self-update (binary/strategy swap; not a package) ---------------
+# zapret2 is installed from bol-van's tarball, not apk — so updating = swap the daemon + lua
+# strategies + fake blobs while preserving the user's config and hostlists, then health-check and
+# roll back from a snapshot if the new build fails. The version to install is PINNED by us on the
+# Pages manifest (applist/z2/version.json) so friends get a version we've sanity-checked, and we
+# never depend on api.github.com (which is unreachable behind some DPI). Called detached via the
+# `$SELF z2update` CLI hook so its progress streams into the shared update log.
+Z2_UPD_SNAP="/tmp/nu-z2-preupd.tgz"
+z2_run_update() {   # [$1=version $2=url] — if omitted, resolved from the Pages manifest
+	_ver="$1"; _url="$2"
+	if [ -z "$_url" ]; then
+		_man=$(curl -sf --max-time 25 "$APPLIST_URL/z2/version.json" 2>/dev/null)
+		_ver=$(printf '%s' "$_man" | grep -oE 'v[0-9][0-9.]*' | head -1)
+		_url=$(printf '%s' "$_man" | grep -oE '(https?|file)://[^" ]*\.(tar\.gz|tgz)' | head -1)
+	fi
+	[ -z "$_url" ] && { echo "!! can't resolve the zapret2 update URL"; return 1; }
+	_cur=$(z2_cur_ver)
+	echo ">> zapret2: installed ${_cur:-?}, target ${_ver:-?}"
+	if [ -n "$_ver" ] && [ "$_cur" = "$_ver" ]; then echo ">> already up to date"; return 0; fi
+	_was=0; z2_running && _was=1
+	# /tmp is tmpfs (RAM) — guard low-memory routers. Peak use ~ download + small extract + snapshot.
+	_free=$(df -k /tmp 2>/dev/null | awk 'NR==2{print $4}')
+	_snap=1
+	if [ "${_free:-0}" -lt 16000 ]; then
+		[ "${_free:-0}" -lt 8000 ] && { echo "!! not enough /tmp space (${_free:-0}KB free) — aborting"; return 1; }
+		echo "!! low /tmp space (${_free}KB) — updating WITHOUT a rollback snapshot"; _snap=0
+	fi
+	_tarb=/tmp/nu-z2upd.tgz; rm -f "$_tarb"
+	case "$_url" in
+		file://*) echo ">> using local file"; cp "${_url#file://}" "$_tarb" || { echo "!! copy failed"; return 1; } ;;
+		*) echo ">> downloading $_url"; curl -sfL --max-time 180 -o "$_tarb" "$_url" || { echo "!! download failed"; rm -f "$_tarb"; return 1; } ;;
+	esac
+	[ -s "$_tarb" ] || { echo "!! empty download"; rm -f "$_tarb"; return 1; }
+	# active arch = the one the current install symlinks to (install_bin.sh getarch as fallback)
+	_arch=$(readlink /opt/zapret2/nfq2/nfqws2 2>/dev/null | sed 's#.*/binaries/##; s#/.*##')
+	[ -z "$_arch" ] && _arch=$(sh /opt/zapret2/install_bin.sh getarch 2>/dev/null | tail -1)
+	[ -z "$_arch" ] && { echo "!! can't detect arch"; rm -f "$_tarb"; return 1; }
+	_top=$(tar tzf "$_tarb" 2>/dev/null | head -1)   # e.g. zapret2-v1.0.2/
+	echo ">> arch $_arch, package ${_top%/}"
+	if [ "$_snap" = 1 ]; then
+		echo ">> snapshot for rollback"
+		tar czf "$Z2_UPD_SNAP" -C /opt zapret2 2>/dev/null || { echo "!! snapshot failed — aborting"; rm -f "$_tarb"; return 1; }
+	fi
+	# selective extraction keeps the /tmp footprint tiny: only the active arch + strategies + blobs
+	_exd=/tmp/nu-z2x; rm -rf "$_exd"; mkdir -p "$_exd"
+	tar xzf "$_tarb" -C "$_exd" "${_top}binaries/$_arch" "${_top}lua" "${_top}files" "${_top}common" "${_top}install_bin.sh" 2>/dev/null
+	_new="$_exd/$_top"
+	if [ ! -x "$_new/binaries/$_arch/nfqws2" ]; then echo "!! extract failed (no $_arch/nfqws2)"; rm -rf "$_exd" "$_tarb"; [ "$_snap" = 1 ] && rm -f "$Z2_UPD_SNAP"; return 1; fi
+	echo ">> installing new binaries + strategies (config & hostlists preserved)"
+	mkdir -p /opt/zapret2/binaries
+	rm -rf "/opt/zapret2/binaries/$_arch"; cp -a "$_new/binaries/$_arch" /opt/zapret2/binaries/
+	[ -d "$_new/lua" ]    && cp -af "$_new/lua/."    /opt/zapret2/lua/    2>/dev/null
+	[ -d "$_new/files" ]  && cp -af "$_new/files/."  /opt/zapret2/files/  2>/dev/null
+	[ -d "$_new/common" ] && cp -af "$_new/common/." /opt/zapret2/common/ 2>/dev/null
+	[ -f "$_new/install_bin.sh" ] && cp -f "$_new/install_bin.sh" /opt/zapret2/install_bin.sh
+	sh /opt/zapret2/install_bin.sh >/dev/null 2>&1   # relink the active arch into nfq2/ip2net/mdig
+	rm -rf "$_exd" "$_tarb"
+	echo ">> restarting zapret2"
+	/etc/init.d/zapret2 restart >/dev/null 2>&1; sleep 4
+	# health: the new daemon must report a version; if zapret2 was running, desync must be live again
+	_ok=1
+	[ -z "$(z2_cur_ver)" ] && _ok=0
+	if [ "$_was" = 1 ]; then z2_desync_ok || _ok=0; fi
+	if [ "$_ok" = 1 ]; then
+		echo ">> update OK — now $(z2_cur_ver)"
+		[ "$_snap" = 1 ] && rm -f "$Z2_UPD_SNAP"
+		return 0
+	fi
+	echo "!! health check FAILED after update"
+	if [ "$_snap" = 1 ] && [ -f "$Z2_UPD_SNAP" ]; then
+		echo ">> rolling back to ${_cur:-previous}"
+		tar xzf "$Z2_UPD_SNAP" -C /opt 2>/dev/null
+		sh /opt/zapret2/install_bin.sh >/dev/null 2>&1
+		/etc/init.d/zapret2 restart >/dev/null 2>&1; sleep 3
+		if [ -n "$(z2_cur_ver)" ] && { [ "$_was" = 0 ] || z2_desync_ok; }; then echo ">> rolled back OK ($(z2_cur_ver))"; else echo "!! rollback health still bad — check zapret2 manually"; fi
+		rm -f "$Z2_UPD_SNAP"
+		return 2
+	fi
+	echo "!! no snapshot to roll back from — zapret2 may need manual repair"
+	return 1
 }
 # hostnames auto-added to the exclude list to protect VPN nodes (protect_server) — must stay
 z2_node_hosts() {
@@ -1095,6 +1213,19 @@ nodes_json() {
 [ "$1" = "subsync" ] && { subrefresh_all; exit 0; }
 # cron/CLI: write a rotating auto-backup (daily/weekly/monthly)
 [ "$1" = "backupauto" ] && { backup_auto_run; exit 0; }
+# detached update runner hooks (called from the generated update script; stdout → shared update log)
+[ "$1" = "z2update" ] && { z2_run_update "$2" "$3"; exit $?; }
+# nikki update rollback point: snapshot config before, restore it if mihomo dies after
+NIKKI_PRESNAP="/tmp/nu-preupd-nikki.tgz"
+[ "$1" = "_nikkisnap" ] && { build_backup "$NIKKI_PRESNAP" >/dev/null 2>&1 && echo ">> nikki config snapshot saved" || echo "!! snapshot failed"; exit 0; }
+[ "$1" = "_nikkirollback" ] && {
+	[ -f "$NIKKI_PRESNAP" ] || { echo "!! no snapshot to roll back from"; exit 1; }
+	_rd="/tmp/nu-nikkirb.$$"; rm -rf "$_rd"; mkdir -p "$_rd"; tar -xzf "$NIKKI_PRESNAP" -C "$_rd" 2>/dev/null
+	restore_backup "$_rd" >/dev/null 2>&1; _rc=$?
+	rm -rf "$_rd"
+	[ "$_rc" = 0 ] && echo ">> nikki config restored from snapshot" || echo "!! config restore reported problems (rc=$_rc)"
+	exit 0
+}
 
 # ---- API -------------------------------------------------------------------
 
@@ -1860,6 +1991,7 @@ devices_json() {
 }
 [ "$API" = "autosync" ] && { autosync_json; exit 0; }
 [ "$API" = "versions" ] && { versions_json; exit 0; }
+[ "$API" = "diag" ] && { diag_json; exit 0; }
 [ "$API" = "subauto" ] && { subauto_json; exit 0; }
 [ "$API" = "backupauto" ] && { backupauto_json; exit 0; }
 [ "$API" = "updatestatus" ] && { updatestatus_json; exit 0; }
@@ -2039,6 +2171,9 @@ cat <<'HTML'
   .fbar { display: flex; gap: .5rem; align-items: center; margin: .4rem 0; flex-wrap: wrap; }
   .fbar .flt { flex: 1; min-width: 8rem; padding: .45rem .6rem; font-size: .9rem; border-radius: 8px; border: 1px solid #8884; background: #8881; color: inherit; }
   .fbar .fall { display: flex; align-items: center; gap: .3rem; font-size: .8rem; opacity: .85; white-space: nowrap; cursor: pointer; }
+  .fall { display: inline-flex; align-items: center; gap: .35rem; font-size: .85rem; cursor: pointer; margin: .2rem 0; }
+  #rpDesc { width: 100%; min-height: 4rem; padding: .5rem .6rem; font-size: .9rem; border-radius: 8px; border: 1px solid #8884; background: #8881; color: inherit; box-sizing: border-box; }
+  #rpFull { width: 100%; min-height: 6rem; margin-top: .4rem; padding: .5rem .6rem; font-family: ui-monospace, monospace; font-size: .78rem; border-radius: 8px; border: 1px solid #8884; background: #8881; color: inherit; box-sizing: border-box; }
   li .pick { flex: 0 0 auto; }
   .pmlist { list-style: none; margin: 0; padding: 0; font-family: ui-monospace, monospace; font-size: .82rem; columns: 2; column-gap: 1.2rem; }
   .pmlist li { padding: .05rem 0; border: 0; display: list-item; break-inside: avoid; }
@@ -2325,10 +2460,12 @@ cat <<'HTML'
       <div class="uprow"><span class="upname">nikki-unblock</span><span class="upver" id="verSelf">…</span></div>
       <div class="uprow"><span class="upname">nikki + mihomo</span><span class="upver" id="verNikki">…</span></div>
       <div class="uprow"><span class="upname">GeoIP / GeoSite</span><span class="upver" id="verGeo">…</span></div>
+      <div class="uprow" id="verZ2Row" hidden><span class="upname">zapret2</span><span class="upver" id="verZ2">…</span></div>
       <div class="btns">
         <button type="button" class="ghost" id="updSelf" data-i18n="updSelf"></button>
         <button type="button" class="ghost" id="updNikki" data-i18n="updNikki"></button>
         <button type="button" class="ghost" id="updGeo" data-i18n="updGeo"></button>
+        <button type="button" class="ghost" id="updZ2" data-i18n="updZ2" hidden></button>
         <button type="button" id="updAll" data-i18n="updAll"></button>
       </div>
       <pre class="uplog" id="updLog" hidden></pre>
@@ -2360,6 +2497,19 @@ cat <<'HTML'
       </div>
       <div class="hint" data-i18n="z2bkHint"></div>
       <div class="msg" id="z2bkMsg"></div>
+    </div>
+
+    <div class="svc upd">
+      <h3 data-i18n="rpTitle"></h3>
+      <div class="hint" data-i18n="rpHint"></div>
+      <textarea id="rpDesc" spellcheck="false" data-i18n-ph="rpPh"></textarea>
+      <label class="fall"><input type="checkbox" id="rpLogs" checked><span data-i18n="rpAttach"></span></label>
+      <div class="btns">
+        <button type="button" id="rpSend" data-i18n="rpSend"></button>
+      </div>
+      <textarea id="rpFull" spellcheck="false" readonly hidden></textarea>
+      <div class="hint" id="rpFullHint" hidden data-i18n="rpFullHint"></div>
+      <div class="msg" id="rpMsg"></div>
     </div>
   </section>
 
@@ -2465,7 +2615,11 @@ const I18N = {
     bkRestoreConfirm: "Восстановить из этого файла? Текущие настройки будут заменены (перед этим — авто-снимок для отката).", bkRestoring: "Восстанавливаю…", kb: "КБ",
     z2bkTitle: "Бэкап Zapret2", z2bkHint: "Сохраняет конфиг zapret2 (стратегии, автообучение) и все хостлисты: свои домены, автосписок, исключения, пресеты. Восстановление заменяет их и перезапускает службу; если zapret2 не поднимется — автоматический откат.",
     z2bkRestoreConfirm: "Восстановить zapret2 из этого файла? Текущий конфиг и хостлисты будут заменены (перед этим — авто-снимок для отката).",
-    updTitle: "Обновление", updSelf: "Обновить nikki-unblock", updNikki: "Обновить nikki", updGeo: "Обновить geo", updAll: "Обновить всё",
+    rpTitle: "Обратная связь", rpHint: "Опиши проблему или пожелание. Откроется черновик issue на GitHub — проверь и нажми «Submit». Ничего не отправляется без твоего подтверждения.",
+    rpPh: "Что не работает или что хотелось бы улучшить…", rpAttach: "приложить диагностику (версии, статус, последние логи — без ключей и паролей)",
+    rpSend: "Создать issue на GitHub", rpNeedDesc: "Сначала опиши проблему", rpOpened: "Открыл черновик issue в новой вкладке — проверь и отправь",
+    rpFullHint: "Лог не поместился в ссылку — скопируй текст выше и вставь в тело issue.",
+    updTitle: "Обновление", updSelf: "Обновить nikki-unblock", updNikki: "Обновить nikki", updGeo: "Обновить geo", updZ2: "Обновить zapret2", updAll: "Обновить всё",
     geoOn: "включено", geoOff: "выключено", geoipNeed: "Сначала включи базу GeoIP: «Обновить geo» во вкладке «Управление».",
     updRunning: "Обновляю… (можно закрыть — продолжится в фоне)", updOkCode: "Готово", updBad: "Ошибка, код ",
     on_: "Включить ", off_: "Отключить ", upd_: "Обновить ",
@@ -2563,7 +2717,11 @@ const I18N = {
     bkRestoreConfirm: "Restore from this file? Current settings will be replaced (an auto-snapshot is taken first for rollback).", bkRestoring: "Restoring…", kb: "KB",
     z2bkTitle: "Zapret2 backup", z2bkHint: "Saves the zapret2 config (strategies, auto-learn) and every hostlist: your domains, the auto list, exclusions, presets. Restore replaces them and restarts the service; if zapret2 fails to come up, it rolls back automatically.",
     z2bkRestoreConfirm: "Restore zapret2 from this file? The current config and hostlists will be replaced (an auto-snapshot is taken first for rollback).",
-    updTitle: "Updates", updSelf: "Update nikki-unblock", updNikki: "Update nikki", updGeo: "Update geo", updAll: "Update all",
+    rpTitle: "Feedback", rpHint: "Describe the problem or request. A GitHub issue draft opens — review it and hit Submit. Nothing is sent without your confirmation.",
+    rpPh: "What's broken or what you'd like improved…", rpAttach: "attach diagnostics (versions, status, recent logs — no keys or passwords)",
+    rpSend: "Open GitHub issue", rpNeedDesc: "Describe the problem first", rpOpened: "Opened an issue draft in a new tab — review and submit",
+    rpFullHint: "The log didn't fit in the link — copy the text above and paste it into the issue body.",
+    updTitle: "Updates", updSelf: "Update nikki-unblock", updNikki: "Update nikki", updGeo: "Update geo", updZ2: "Update zapret2", updAll: "Update all",
     geoOn: "enabled", geoOff: "disabled", geoipNeed: "Enable the GeoIP database first: «Update geo» in the Manage tab.",
     updRunning: "Updating… (you can leave — it continues in the background)", updOkCode: "Done", updBad: "Failed, code ",
     on_: "Enable ", off_: "Disable ", upd_: "Update ",
@@ -3458,6 +3616,32 @@ $("#bkAutoOn").addEventListener("change", async e => {
   setMsg($("#bkMsg"), res && res.ok ? t("done") : t("errP"), !res || res.ok);
   loadBackup();
 });
+/* ---------- Report / feedback (prefilled GitHub issue — no secrets, user submits) ---------- */
+const RP_REPO = "https://github.com/Sketso/nikki-unblock/issues/new";
+$("#rpSend").addEventListener("click", async () => {
+  const desc = $("#rpDesc").value.trim();
+  if (!desc){ setMsg($("#rpMsg"), t("rpNeedDesc"), false); return; }
+  $("#rpSend").disabled = true; setMsg($("#rpMsg"), t("applying"));
+  let full = "";
+  if ($("#rpLogs").checked){
+    try { const d = await (await fetch("?api=diag")).json(); full = (d && d.text) || ""; } catch(e){}
+  }
+  const mkUrl = b => RP_REPO + "?title=" + encodeURIComponent("[report] " + desc.slice(0, 60)) +
+                     "&body=" + encodeURIComponent(b);
+  let diag = full ? ("\n\n### diagnostics\n```\n" + full + "\n```\n") : "";
+  let url = mkUrl(desc + diag);
+  // GitHub/browser URL length is limited — if too long, send only a short tail inline and reveal
+  // the full log in a textarea for the user to copy-paste (clipboard API isn't available over http)
+  $("#rpFull").hidden = true; $("#rpFullHint").hidden = true;
+  if (url.length > 7000 && full){
+    const tail = full.split("\n").slice(-12).join("\n");
+    url = mkUrl(desc + "\n\n### diagnostics (trimmed — full log below to paste)\n```\n" + tail + "\n```\n");
+    $("#rpFull").value = full; $("#rpFull").hidden = false; $("#rpFullHint").hidden = false;
+  }
+  window.open(url, "_blank");
+  $("#rpSend").disabled = false;
+  setMsg($("#rpMsg"), t("rpOpened"));
+});
 $("#z2bkDownload").addEventListener("click", () => { window.location = "?api=z2backup"; });
 $("#z2bkRestoreBtn").addEventListener("click", () => $("#z2bkFile").click());
 $("#z2bkFile").addEventListener("change", async e => {
@@ -3512,11 +3696,14 @@ async function loadVersions(){
     const wasGeo = GEO_OK;
     GEO_OK = v.geo_ok === 1;
     $("#verGeo").textContent = GEO_OK ? (t("geoOn") + (v.geo_date ? " · " + v.geo_date : "")) : t("geoOff");
+    const z2 = v.z2_present === 1;
+    $("#verZ2Row").hidden = !z2; $("#updZ2").hidden = !z2;
+    if (z2) $("#verZ2").textContent = v.z2_ver || "?";
     // presets may load before versions — refresh cards so the geoip facet reflects the real DB state
     if (wasGeo !== GEO_OK && PRESETS.length) renderPresets();
   } catch(e){}
 }
-function updBtns(dis){ ["#updSelf","#updNikki","#updGeo","#updAll"].forEach(id => { $(id).disabled = dis; }); }
+function updBtns(dis){ ["#updSelf","#updNikki","#updGeo","#updZ2","#updAll"].forEach(id => { $(id).disabled = dis; }); }
 let updPolling = false;
 async function pollUpdate(){
   if (updPolling) return; updPolling = true;
@@ -3553,6 +3740,7 @@ async function doUpdate(op){
 $("#updSelf").addEventListener("click", () => doUpdate("self"));
 $("#updNikki").addEventListener("click", () => doUpdate("nikki"));
 $("#updGeo").addEventListener("click", () => doUpdate("geo"));
+$("#updZ2").addEventListener("click", () => doUpdate("z2"));
 $("#updAll").addEventListener("click", () => doUpdate("all"));
 
 /* ---------- boot ---------- */
