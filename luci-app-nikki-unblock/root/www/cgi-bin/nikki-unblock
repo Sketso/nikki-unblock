@@ -3153,7 +3153,7 @@ const I18N = {
     updTitle: "Обновление", updSelf: "Обновить nikki-unblock", updNikki: "Обновить nikki", updGeo: "Обновить geo", updZ2: "Обновить zapret2", updAll: "Обновить всё",
     updNew: "Доступно обновление", updUpToDate: "Актуальная версия", updAvail: "обновление",
     geoOn: "включено", geoOff: "выключено", geoipNeed: "Сначала включи базу GeoIP: «Обновить geo» во вкладке «Управление».",
-    updRunning: "Обновляю… (можно закрыть — продолжится в фоне)", updOkCode: "Готово", updBad: "Ошибка, код ",
+    updRunning: "Обновляю… (можно закрыть — продолжится в фоне)", updOkCode: "Готово", updBad: "Ошибка, код ", updReload: "Обновлено — перезагружаю страницу…",
     on_: "Включить ", off_: "Отключить ", upd_: "Обновить ",
     enabling: "Включаю ", disabling: "Отключаю ", updating: "Обновляю ",
     adding: "Добавляю ", removing: "Удаляю…", applying: "Применяю…", saving: "Сохраняю и применяю…",
@@ -3283,7 +3283,7 @@ const I18N = {
     updTitle: "Updates", updSelf: "Update nikki-unblock", updNikki: "Update nikki", updGeo: "Update geo", updZ2: "Update zapret2", updAll: "Update all",
     updNew: "Update available", updUpToDate: "Up to date", updAvail: "update",
     geoOn: "enabled", geoOff: "disabled", geoipNeed: "Enable the GeoIP database first: «Update geo» in the Manage tab.",
-    updRunning: "Updating… (you can leave — it continues in the background)", updOkCode: "Done", updBad: "Failed, code ",
+    updRunning: "Updating… (you can leave — it continues in the background)", updOkCode: "Done", updBad: "Failed, code ", updReload: "Updated — reloading the page…",
     on_: "Enable ", off_: "Disable ", upd_: "Update ",
     enabling: "Enabling ", disabling: "Disabling ", updating: "Updating ",
     adding: "Adding ", removing: "Removing…", applying: "Applying…", saving: "Saving & applying…",
@@ -4501,7 +4501,7 @@ async function loadUpdCheck(force){
   finally { updChecking = false; }
 }
 function updBtns(dis){ ["#updSelf","#updNikki","#updGeo","#updZ2","#updAll"].forEach(id => { $(id).disabled = dis; }); }
-let updPolling = false;
+let updPolling = false, updCurOp = null;
 async function pollUpdate(){
   if (updPolling) return; updPolling = true;
   updBtns(true);
@@ -4512,6 +4512,11 @@ async function pollUpdate(){
     updPolling = false; updBtns(false);
     setMsg($("#updMsg"), ok ? t("updOkCode") : (t("updBad") + code), ok);
     loadVersions(); loadSvc(); loadUpdCheck(true);   // versions changed → re-check availability
+    // a self-update swapped THIS page's code — reload so the new UI loads (only on success)
+    if (ok && (updCurOp === "self" || updCurOp === "all")){
+      setMsg($("#updMsg"), t("updReload"));
+      setTimeout(() => location.reload(), 2200);
+    }
   };
   const tick = async () => {
     let s = null;
@@ -4529,6 +4534,7 @@ async function pollUpdate(){
   tick();
 }
 async function doUpdate(op){
+  updCurOp = op;
   updBtns(true); setMsg($("#updMsg"), t("applying"));
   let r; try { r = await api("update", { op }); } catch(e){ r = {}; }
   if (r && r.ok){ pollUpdate(); }
