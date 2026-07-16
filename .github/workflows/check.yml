@@ -1,0 +1,21 @@
+name: check
+
+# Verification gate: shell syntax (busybox ash — the dialect the router runs),
+# JS syntax of the inline <script>, i18n ru/en key parity, applist JSON validity,
+# and LF-only line endings. Same script developers run locally: tools/check.sh.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install busybox (router shell dialect)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq busybox
+      - name: Run checks
+        run: sh tools/check.sh

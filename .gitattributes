@@ -1,0 +1,4 @@
+# Force LF in working copies too: the CGI and helper scripts run on busybox ash,
+# which chokes on CRLF ("syntax error: expecting do"). Blobs were always LF;
+# this kills the need to remember `tr -d '\r'` when deploying a working-copy file.
+* text=auto eol=lf

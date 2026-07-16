@@ -16,7 +16,18 @@ permissions:
   contents: write
 
 jobs:
+  check:
+    # A tag with broken syntax must not turn into a release — same gate as check.yml.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install busybox (router shell dialect)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq busybox
+      - name: Run checks
+        run: sh tools/check.sh
+
   build:
+    needs: check
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
