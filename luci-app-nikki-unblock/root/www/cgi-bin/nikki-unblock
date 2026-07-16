@@ -564,7 +564,7 @@ update_start() {   # $1=op(self|nikki|geo|z2|all) ; 0=started 1=busy 2=bad op
 			printf 'echo ">> reloading nikki"; /etc/init.d/nikki reload\n' ;;
 		esac
 		case "$_op" in self|all)
-			printf 'echo ">> nikki-unblock: fetching latest release .apk"\n'
+			printf 'echo ">> Nipret: fetching latest release .apk"\n'
 			printf 'if curl -sfL --max-time 120 -o /tmp/nu-new.apk "%s"; then apk add --allow-untrusted /tmp/nu-new.apk || rc=$?; else rc=1; echo "!! download failed"; fi\n' "$SELF_APK"
 			printf 'rm -f /tmp/nu-new.apk\n' ;;
 		esac
@@ -1555,7 +1555,7 @@ API=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^api=' | head -1 | cut -
 # ---- backup download (GET): stream the tar.gz with attachment headers ------
 [ "$API" = "backup" ] && [ "$REQUEST_METHOD" != "POST" ] && {
 	bk=$(build_backup)
-	printf 'Status: 200 OK\r\nContent-Type: application/gzip\r\nContent-Disposition: attachment; filename="nikki-unblock-backup.tar.gz"\r\n\r\n'
+	printf 'Status: 200 OK\r\nContent-Type: application/gzip\r\nContent-Disposition: attachment; filename="nipret-backup.tar.gz"\r\n\r\n'
 	cat "$bk"; exit 0
 }
 # ---- restore (POST, RAW tar.gz body — handled before urlencoded parsing) ----
@@ -2462,7 +2462,10 @@ cat <<'HTML'
     display: flex; align-items: center; gap: .5rem; max-width: 92vw;
     padding: .62rem 1rem; border-radius: 999px; font-size: .95rem; font-weight: 600; line-height: 1.2;
     color: #fff; box-shadow: 0 8px 30px #00000055; animation: toastIn .22s ease; }
+  .toast[hidden] { display: none; }   /* must beat .toast{display:flex}, else the toast never hides */
   .toast.run { background: #2563eb; }
+  .toast.clickable { cursor: pointer; }
+  .toast.clickable:hover { filter: brightness(1.1); }
   .toast.ok  { background: #16a34a; }
   .toast.err { background: #dc2626; }
   .toast-ic { font-size: 1.05rem; line-height: 1; }
@@ -2961,7 +2964,7 @@ cat <<'HTML'
   <section class="view" id="view-common">
     <div class="svc upd">
       <h3 data-i18n="updTitle"></h3>
-      <div class="uprow"><span class="upname">nikki-unblock</span><span class="upver" id="verSelf">…</span></div>
+      <div class="uprow"><span class="upname">Nipret</span><span class="upver" id="verSelf">…</span></div>
       <div class="uprow"><span class="upname">nikki + mihomo</span><span class="upver" id="verNikki">…</span></div>
       <div class="uprow"><span class="upname">GeoIP / GeoSite</span><span class="upver" id="verGeo">…</span></div>
       <div class="uprow" id="verZ2Row" hidden><span class="upname">zapret2</span><span class="upver" id="verZ2">…</span></div>
@@ -3150,10 +3153,10 @@ const I18N = {
     rpPh: "Что не работает или что хотелось бы улучшить…", rpAttach: "приложить диагностику (версии, статус, последние логи — без ключей и паролей)",
     rpSend: "Создать issue на GitHub", rpNeedDesc: "Сначала опиши проблему", rpOpened: "Открыл черновик issue в новой вкладке — проверь и отправь",
     rpFullHint: "Лог не поместился в ссылку — скопируй текст выше и вставь в тело issue.",
-    updTitle: "Обновление", updSelf: "Обновить nikki-unblock", updNikki: "Обновить nikki", updGeo: "Обновить geo", updZ2: "Обновить zapret2", updAll: "Обновить всё",
+    updTitle: "Обновление", updSelf: "Обновить Nipret", updNikki: "Обновить nikki", updGeo: "Обновить geo", updZ2: "Обновить zapret2", updAll: "Обновить всё",
     updNew: "Доступно обновление", updUpToDate: "Актуальная версия", updAvail: "обновление",
     geoOn: "включено", geoOff: "выключено", geoipNeed: "Сначала включи базу GeoIP: «Обновить geo» во вкладке «Управление».",
-    updRunning: "Обновляю… (можно закрыть — продолжится в фоне)", updOkCode: "Готово", updBad: "Ошибка, код ", updReload: "Обновлено — перезагружаю страницу…",
+    updRunning: "Обновляю… (можно закрыть — продолжится в фоне)", updOkCode: "Готово", updBad: "Ошибка, код ", updReload: "Nipret обновлён — нажми, чтобы перезагрузить страницу",
     on_: "Включить ", off_: "Отключить ", upd_: "Обновить ",
     enabling: "Включаю ", disabling: "Отключаю ", updating: "Обновляю ",
     adding: "Добавляю ", removing: "Удаляю…", applying: "Применяю…", saving: "Сохраняю и применяю…",
@@ -3280,10 +3283,10 @@ const I18N = {
     rpPh: "What's broken or what you'd like improved…", rpAttach: "attach diagnostics (versions, status, recent logs — no keys or passwords)",
     rpSend: "Open GitHub issue", rpNeedDesc: "Describe the problem first", rpOpened: "Opened an issue draft in a new tab — review and submit",
     rpFullHint: "The log didn't fit in the link — copy the text above and paste it into the issue body.",
-    updTitle: "Updates", updSelf: "Update nikki-unblock", updNikki: "Update nikki", updGeo: "Update geo", updZ2: "Update zapret2", updAll: "Update all",
+    updTitle: "Updates", updSelf: "Update Nipret", updNikki: "Update nikki", updGeo: "Update geo", updZ2: "Update zapret2", updAll: "Update all",
     updNew: "Update available", updUpToDate: "Up to date", updAvail: "update",
     geoOn: "enabled", geoOff: "disabled", geoipNeed: "Enable the GeoIP database first: «Update geo» in the Manage tab.",
-    updRunning: "Updating… (you can leave — it continues in the background)", updOkCode: "Done", updBad: "Failed, code ", updReload: "Updated — reloading the page…",
+    updRunning: "Updating… (you can leave — it continues in the background)", updOkCode: "Done", updBad: "Failed, code ", updReload: "Nipret updated — click to reload the page",
     on_: "Enable ", off_: "Disable ", upd_: "Update ",
     enabling: "Enabling ", disabling: "Disabling ", updating: "Updating ",
     adding: "Adding ", removing: "Removing…", applying: "Applying…", saving: "Saving & applying…",
@@ -3316,20 +3319,24 @@ document.querySelectorAll(".lang a").forEach(a => a.addEventListener("click", ()
 
 /* global status toast: in-progress (text ends with …) stays with running dots; success/errors
    pop then auto-dismiss. Driven by every setMsg call so statuses are noticeable everywhere. */
-let toastTimer = null;
-function showToast(txt, kind){
+let toastTimer = null, toastClick = null;
+function showToast(txt, kind, opts){
+  opts = opts || {};
   const el = $("#toast"); if (!el) return;
   if (toastTimer){ clearTimeout(toastTimer); toastTimer = null; }
   txt = (txt || "").trim();
-  if (!txt){ el.hidden = true; return; }
+  if (!txt){ el.hidden = true; toastClick = null; return; }
   let base = txt, running = kind === "run";
   if (running) base = base.replace(/\s*(…|\.{3})\s*$/, "");   // strip trailing … — the dots animate
-  el.className = "toast " + kind;
-  $("#toastIc").textContent = kind === "ok" ? "✓" : kind === "err" ? "✕" : "";
+  toastClick = opts.click || null;
+  el.className = "toast " + kind + (toastClick ? " clickable" : "");
+  $("#toastIc").textContent = opts.icon || (kind === "ok" ? "✓" : kind === "err" ? "✕" : "");
   $("#toastTxt").textContent = base;
   el.hidden = false;
-  if (!running) toastTimer = setTimeout(() => { el.hidden = true; }, kind === "err" ? 4200 : 2200);
+  // in-progress and sticky toasts stay until something replaces them
+  if (!running && !opts.sticky) toastTimer = setTimeout(() => { el.hidden = true; }, kind === "err" ? 4200 : 2200);
 }
+$("#toast").addEventListener("click", () => { if (toastClick) toastClick(); });
 const setMsg = (el, txt, ok=true) => {
   if (el){ el.textContent = txt; el.style.color = ok ? "" : "#dc2626"; }
   const s = (txt || "").trim();
@@ -4512,11 +4519,10 @@ async function pollUpdate(){
     updPolling = false; updBtns(false);
     setMsg($("#updMsg"), ok ? t("updOkCode") : (t("updBad") + code), ok);
     loadVersions(); loadSvc(); loadUpdCheck(true);   // versions changed → re-check availability
-    // a self-update swapped THIS page's code — reload so the new UI loads (only on success)
-    if (ok && (updCurOp === "self" || updCurOp === "all")){
-      setMsg($("#updMsg"), t("updReload"));
-      setTimeout(() => location.reload(), 2200);
-    }
+    // a self-update swapped THIS page's own code — the new UI only appears after a reload. Leave a
+    // sticky, clickable toast instead of forcing it, so the log stays readable until the user is ready.
+    if (ok && (updCurOp === "self" || updCurOp === "all"))
+      showToast(t("updReload"), "ok", { sticky: true, icon: "↻", click: () => location.reload() });
   };
   const tick = async () => {
     let s = null;
