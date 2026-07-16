@@ -15,6 +15,7 @@ PRESET_TTL=3600                                   # 1 h; presets depend only on 
 UPD_LOG="/tmp/nikki-unblock-update.log"          # live log of the async update runner
 UPD_LOCK="/tmp/nikki-unblock-update.lock"        # holds the runner PID while an update is in progress
 UPD_SCRIPT="/tmp/nikki-unblock-update.sh"        # generated per run, executed detached (setsid)
+PRESET_OP="/tmp/nikki-unblock-presetop"          # status of the current detached nikki-preset apply
 # nikki-unblock isn't in an apk repo (installed from a local file), so self-update pulls the latest
 # release .apk straight from GitHub (same as feed.sh) and `apk add` upgrades it in place.
 SELF_APK="https://github.com/Sketso/nikki-unblock/releases/latest/download/luci-app-nikki-unblock.apk"
@@ -354,6 +355,77 @@ sync_all() {
 	[ $((SYNC_ADDED + SYNC_REMOVED)) -gt 0 ] && { uci commit nikki; apply_nikki; }
 	rm -f "$PRESET_CACHE"   # applist lists were just re-fetched — drop the display cache so the UI shows fresh
 	logger -t nikki-unblock "autosync: +$SYNC_ADDED -$SYNC_REMOVED"
+}
+
+# Atomic nikki-preset apply, run DETACHED so a client reload/disconnect can't leave a hybrid preset
+# (geosite + domain list) half-applied. Progress is tracked in $PRESET_OP so the UI can show a per-card
+# spinner that survives tab switches and page reloads. Both facets happen here in one operation.
+_pop_write() {   # $1=phase $2=done $3=ok   (PA_* set by preset_apply_run)
+	printf 'pid=%s\nid=%s\nname=%s\non=%s\nphase=%s\ndone=%s\nok=%s\n' \
+		"$$" "$PA_ID" "$PA_NAME" "$PA_ON" "$1" "$2" "$3" > "$PRESET_OP"
+}
+preset_apply_run() {   # $1=id $2=on $3=cat $4=geoip $5=ips $6=node $7=haslist $8=name
+	PA_ID="$1"; PA_ON="$2"; _cat="$3"; _geoip="$4"; _ips="$5"; _node="$6"; _hl="$7"; PA_NAME="$8"
+	case "$_node" in PROXY|DIRECT|REJECT|"$EXIT_GROUP") ;; *) _node="$EXIT_GROUP" ;; esac
+	_pop_write geo 0 0
+	_ch=0
+	if [ -n "$_cat$_geoip$_ips" ]; then
+		if [ "$PA_ON" = 1 ]; then
+			for c in $(printf '%s' "$_cat" | tr ',' ' '); do
+				[ -n "$c" ] && [ "$(rule_exists GEOSITE "$c")" != 1 ] && { add_rule GEOSITE "$c" "$_node"; _ch=1; }
+			done
+			if [ -n "$_geoip" ] && geoip_ready; then
+				for g in $(printf '%s' "$_geoip" | tr ',' ' '); do
+					[ -n "$g" ] && [ "$(rule_exists GEOIP "$g")" != 1 ] && { add_rule GEOIP "$g" "$_node"; _ch=1; }
+				done
+			fi
+			for ip in $(printf '%s' "$_ips" | tr ',' ' '); do
+				ip=$(clean_ip "$ip"); [ -z "$ip" ] && continue
+				[ "$(rule_exists IP-CIDR "$ip")" != 1 ] && { add_rule IP-CIDR "$ip" "$_node"; uci set "nikki.@rule[-1].no_resolve=1"; _ch=1; }
+			done
+		else
+			for c in $(printf '%s' "$_cat" | tr ',' ' '); do [ -n "$c" ] && delete_rule GEOSITE "$c"; done
+			for g in $(printf '%s' "$_geoip" | tr ',' ' '); do [ -n "$g" ] && delete_rule GEOIP "$g"; done
+			for ip in $(printf '%s' "$_ips" | tr ',' ' '); do ip=$(clean_ip "$ip"); [ -n "$ip" ] && delete_rule IP-CIDR "$ip"; done
+			_ch=1
+		fi
+		[ "$_ch" = 1 ] && { uci commit nikki; apply_nikki; }
+	fi
+	if [ "$_hl" = 1 ]; then
+		_pop_write list 0 0
+		if [ "$PA_ON" = 1 ]; then
+			SYNC_ADDED=0; SYNC_REMOVED=0
+			do_preset_sync "$PA_ID" && { [ $((SYNC_ADDED + SYNC_REMOVED)) -gt 0 ] && { uci commit nikki; apply_nikki; }; }
+		else
+			OFF_REMOVED=0; do_preset_off "$PA_ID"; [ "$OFF_REMOVED" -gt 0 ] && { uci commit nikki; apply_nikki; }
+		fi
+	fi
+	_ok=1; pgrep -f /usr/bin/mihomo >/dev/null 2>&1 || _ok=0
+	_pop_write done 1 "$_ok"
+}
+presetop_json() {
+	json_header
+	[ -f "$PRESET_OP" ] || { printf '{"running":0}'; return; }
+	_pid=$(sed -n 's/^pid=//p' "$PRESET_OP"); _id=$(sed -n 's/^id=//p' "$PRESET_OP")
+	_nm=$(sed -n 's/^name=//p' "$PRESET_OP"); _on=$(sed -n 's/^on=//p' "$PRESET_OP")
+	_ph=$(sed -n 's/^phase=//p' "$PRESET_OP"); _dn=$(sed -n 's/^done=//p' "$PRESET_OP"); _okv=$(sed -n 's/^ok=//p' "$PRESET_OP")
+	# crash guard: not done, but a real pid that's gone, or the file has gone stale (>90s) → treat as failed
+	if [ "$_dn" != 1 ]; then
+		_dead=0; case "$_pid" in ''|*[!0-9]*|0) : ;; *) kill -0 "$_pid" 2>/dev/null || _dead=1 ;; esac
+		_age=$(( $(date +%s) - $(date -r "$PRESET_OP" +%s 2>/dev/null || echo 0) ))
+		{ [ "$_dead" = 1 ] || [ "$_age" -gt 90 ]; } && { _dn=1; _okv=0; }
+	fi
+	if [ "$_dn" = 1 ]; then
+		rm -f "$PRESET_OP"   # read-once: report completion exactly once
+		printf '{"running":0,"done":1,"ok":%s,"id":"%s","on":%s,"name":"%s"}' "${_okv:-0}" "$(json_esc "$_id")" "${_on:-0}" "$(json_esc "$_nm")"
+	else
+		printf '{"running":1,"id":"%s","on":%s,"phase":"%s","name":"%s"}' "$(json_esc "$_id")" "${_on:-0}" "$(json_esc "$_ph")" "$(json_esc "$_nm")"
+	fi
+}
+preset_busy() {   # 0(true) if an apply is in progress
+	[ -f "$PRESET_OP" ] || return 1
+	[ "$(sed -n 's/^done=//p' "$PRESET_OP")" = 1 ] && return 1
+	_p=$(sed -n 's/^pid=//p' "$PRESET_OP"); case "$_p" in ''|*[!0-9]*|0) return 0 ;; *) kill -0 "$_p" 2>/dev/null ;; esac
 }
 
 # ---- autosync (state in UCI, executed by cron) -----------------------------
@@ -1462,6 +1534,8 @@ nodes_json() {
 [ "$1" = "backupauto" ] && { backup_auto_run; exit 0; }
 # detached update runner hooks (called from the generated update script; stdout → shared update log)
 [ "$1" = "z2update" ] && { z2_run_update "$2" "$3"; exit $?; }
+# detached atomic nikki-preset apply (both facets) — status streamed to $PRESET_OP
+[ "$1" = "_presetapply" ] && { preset_apply_run "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9"; exit 0; }
 # nikki update rollback point: snapshot config before, restore it if mihomo dies after
 NIKKI_PRESNAP="/tmp/nu-preupd-nikki.tgz"
 [ "$1" = "_nikkisnap" ] && { build_backup "$NIKKI_PRESNAP" >/dev/null 2>&1 && echo ">> nikki config snapshot saved" || echo "!! snapshot failed"; exit 0; }
@@ -2004,6 +2078,22 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		[ "$OFF_REMOVED" -gt 0 ] && { uci commit nikki; apply_nikki; }
 		json_header; printf '{"ok":true,"removed":%d}' "$OFF_REMOVED"; exit 0
 
+	elif [ "$action" = "preset_apply" ]; then
+		# atomic on/off of a whole nikki preset (geosite + list) run DETACHED, tracked in $PRESET_OP
+		id=$(get_param id | sed 's/[^a-z0-9_-]//g')
+		[ -z "$id" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
+		preset_busy && { json_header; printf '{"ok":false,"error":"busy"}'; exit 0; }
+		on=$(get_param on | sed 's/[^01]//g'); [ -z "$on" ] && on=0
+		gcat=$(get_param cat | sed 's/[^a-z0-9._!,-]//g')
+		ggeoip=$(get_param geoip | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9,-]//g')
+		gips=$(get_param ips | sed 's#[^0-9a-fA-F.:,/]##g')
+		gnode=$(get_param node); pname=$(get_param name)
+		hl=$(get_param haslist | sed 's/[^01]//g'); [ -z "$hl" ] && hl=0
+		undo_push preset   # ONE undo point for the whole apply
+		printf 'pid=0\nid=%s\nname=%s\non=%s\nphase=start\ndone=0\nok=0\n' "$id" "$pname" "$on" > "$PRESET_OP"
+		setsid "$SELF" _presetapply "$id" "$on" "$gcat" "$ggeoip" "$gips" "$gnode" "$hl" "$pname" >/dev/null 2>&1 &
+		json_header; printf '{"ok":true,"started":true}'; exit 0
+
 	elif [ "$action" = "geosite_on" ]; then
 		# cat / geoip may be comma-separated (a combo preset like "all social") — handle each
 		cat=$(get_param cat | sed 's/[^a-z0-9._!,-]//g')
@@ -2326,6 +2416,7 @@ devices_json() {
 [ "$API" = "updcheck" ] && { updcheck_json; exit 0; }
 [ "$API" = "subauto" ] && { subauto_json; exit 0; }
 [ "$API" = "backupauto" ] && { backupauto_json; exit 0; }
+[ "$API" = "presetop" ] && { presetop_json; exit 0; }
 [ "$API" = "undolist" ] && { undolist_json; exit 0; }
 [ "$API" = "updatestatus" ] && { updatestatus_json; exit 0; }
 [ "$API" = "config" ] && { config_json; exit 0; }
@@ -2500,6 +2591,9 @@ cat <<'HTML'
   .pcard { display: flex; align-items: center; gap: .5rem; background: #8881; border: 1px solid #8884; border-radius: 10px; padding: .5rem .6rem; transition: background .2s, border-color .2s; }
   .pcard.on { background: #16a34a1f; border-color: #16a34a66; }
   .pcard.partial { background: #d977061f; border-color: #d9770666; }
+  .pcard.applying { position: relative; pointer-events: none; }
+  .pcard.applying > * { opacity: .3; }
+  .pcard.applying::after { content: ""; position: absolute; top: 50%; left: 50%; width: 1.2rem; height: 1.2rem; margin: -.6rem 0 0 -.6rem; border: 2px solid #8886; border-top-color: #3b82f6; border-radius: 50%; animation: spin .7s linear infinite; }
   .pcard .pname { flex: 1; font-size: .9rem; line-height: 1.25; }
   .pcard .pinfo { background: none; border: 1px solid #8886; color: inherit; width: 1.35rem; height: 1.35rem; min-width: 1.35rem; border-radius: 50%; padding: 0; font-size: .8rem; line-height: 1; opacity: .65; }
   .pcard .pinfo:hover { opacity: 1; border-color: #2563eb; }
@@ -3028,6 +3122,7 @@ const I18N = {
     undoTitle: "Откат изменений", undoHint: "Перед каждым переключением (стратегия, QUIC, IPv6, автообучение, пресеты) сохраняется снимок обоих движков. Если что-то сломалось после изменения — верни как было.",
     undoBtn: "↩ Вернуть как было", undoThis: "Откатить сюда", undoLast: "Вернуть последнее изменение", redoLast: "Вернуть отменённое", undoEmpty: "Пока нет изменений для отката", undoConfirm: "Откатить к состоянию до этого изменения? Настройки обоих движков вернутся к тому моменту.",
     act_z2strat: "стратегия zapret2", act_z2quic: "тумблер QUIC", act_z2ipv6: "тумблер IPv6", act_z2autotoggle: "автообучение zapret2",
+    act_preset: "пресет", presetFail: "не применилось полностью", presetBusy: "Дождись окончания текущего применения",
     act_z2preset_on: "пресет zapret2 вкл", act_z2preset_off: "пресет zapret2 выкл", act_geosite_on: "гео-пресет вкл", act_geosite_off: "гео-пресет выкл",
     act_preset_sync: "пресет доменов вкл", act_preset_off: "пресет доменов выкл", act_mssclamp: "MSS-clamp", act_auto: "авто-бэкап",
     z2bkTitle: "Бэкап Zapret2", z2bkHint: "Сохраняет конфиг zapret2 (стратегии, автообучение) и все хостлисты: свои домены, автосписок, исключения, пресеты. Восстановление заменяет их и перезапускает службу; если zapret2 не поднимется — автоматический откат.",
@@ -3157,6 +3252,7 @@ const I18N = {
     undoTitle: "Undo changes", undoHint: "Before each toggle (strategy, QUIC, IPv6, auto-learn, presets) a snapshot of both engines is saved. If something broke after a change — put it back.",
     undoBtn: "↩ Undo last change", undoThis: "Revert to here", undoLast: "Undo last change", redoLast: "Redo undone change", undoEmpty: "No changes to undo yet", undoConfirm: "Revert to the state before this change? Both engines' settings return to that point.",
     act_z2strat: "zapret2 strategy", act_z2quic: "QUIC toggle", act_z2ipv6: "IPv6 toggle", act_z2autotoggle: "zapret2 auto-learn",
+    act_preset: "preset", presetFail: "didn't fully apply", presetBusy: "Wait for the current apply to finish",
     act_z2preset_on: "zapret2 preset on", act_z2preset_off: "zapret2 preset off", act_geosite_on: "geo preset on", act_geosite_off: "geo preset off",
     act_preset_sync: "domain preset on", act_preset_off: "domain preset off", act_mssclamp: "MSS clamp", act_auto: "auto-backup",
     z2bkTitle: "Zapret2 backup", z2bkHint: "Saves the zapret2 config (strategies, auto-learn) and every hostlist: your domains, the auto list, exclusions, presets. Restore replaces them and restarts the service; if zapret2 fails to come up, it rolls back automatically.",
@@ -3216,6 +3312,7 @@ document.querySelectorAll(".tab").forEach(tb => tb.addEventListener("click", () 
   tb.classList.add("active");
   $("#view-" + tb.dataset.view).classList.add("active");
   if (tb.dataset.view === "nodes") loadNodes().then(autoPingNodes);
+  else if (tb.dataset.view === "domains") ensurePresetPoll();   // resume a preset spinner if one is applying
   else if (tb.dataset.view === "mgmt") loadSvc();
   else if (tb.dataset.view === "common") { loadVersions(); loadUpdCheck(); loadBackup(); loadUndo(); }   // Общее: updates + backup
   else if (tb.dataset.view === "devices") loadDevices();
@@ -3377,23 +3474,49 @@ function presetState(p){
   if (facets.every(f => f === "off")) return { on: false, part: false };
   return { on: true, part: true };
 }
-// enable/disable both facets (sequential — each triggers a nikki reload)
-async function presetToggle(p, wantOn){
-  let ok = true, error, didGeo = false;
-  if (p.geosite){
-    const ips = (p.ipcidr || []).join(",");
-    const r = wantOn ? await api("geosite_on", { cat: p.geosite, node: p.node || EXITG, ips, geoip: p.geoip || "" })
-                     : await api("geosite_off", { cat: p.geosite, ips, geoip: p.geoip || "" });
-    if (!r || !r.ok){ ok = false; error = r && r.error; }
-    didGeo = true;
+/* Preset apply is ATOMIC + DETACHED on the server (?api=preset_apply → both facets in one op tracked
+   in ?api=presetop). The UI shows a spinner on that one card and polls the server, so the status is
+   correct across tab switches and page reloads and a hybrid preset can't be left half-applied. */
+let presetPolling = false, presetApplyingId = null;
+function markPresetApplying(id){
+  presetApplyingId = id;
+  document.querySelectorAll("#presets .pcard").forEach(c => {
+    c.classList.toggle("applying", c.dataset.pid === id);
+    const inp = c.querySelector("input"); if (inp) inp.disabled = true;   // lock every card while one applies
+  });
+}
+function clearPresetApplying(){
+  presetApplyingId = null;
+  document.querySelectorAll("#presets .pcard").forEach(c => {
+    c.classList.remove("applying"); const inp = c.querySelector("input"); if (inp) inp.disabled = false;
+  });
+}
+async function pollPresetOp(){
+  presetPolling = true;
+  let s = null; try { s = await (await fetch("?api=presetop")).json(); } catch(e){}
+  if (s && s.running){
+    markPresetApplying(s.id);
+    setMsg($("#presetMsg"), (s.on === 1 ? t("enabling") : t("disabling")) + (s.name || "") + "…");
+    setTimeout(pollPresetOp, 1000); return;
   }
-  if ((p.domains || []).length){
-    // for a hybrid preset the geosite step already made the undo point → skip a 2nd one (nosnap)
-    const extra = didGeo ? { nosnap: 1 } : {};
-    const r = wantOn ? await api("preset_sync", { id: p.id, ...extra }) : await api("preset_off", { id: p.id, ...extra });
-    if (!r || !r.ok){ ok = false; error = r && r.error; }
+  presetPolling = false;
+  clearPresetApplying();
+  if (s && s.done){
+    setMsg($("#presetMsg"), s.ok === 1 ? t("done") : (t("errP") + t("presetFail")), s.ok === 1);
+    await loadDomains(); loadUndo();
   }
-  return { ok, error };
+}
+function ensurePresetPoll(){ if (!presetPolling) pollPresetOp(); }
+async function startPresetApply(p, wantOn){
+  markPresetApplying(p.id);
+  setMsg($("#presetMsg"), (wantOn ? t("enabling") : t("disabling")) + p.name + "…");
+  const params = { id: p.id, on: wantOn ? 1 : 0, cat: p.geosite || "", geoip: p.geoip || "",
+                   ips: (p.ipcidr || []).join(","), node: p.node || EXITG,
+                   haslist: (p.domains || []).length ? 1 : 0, name: p.name };
+  let r = null; try { r = await api("preset_apply", params); } catch(e){}
+  if (r && r.ok && r.started) ensurePresetPoll();
+  else if (r && r.error === "busy"){ setMsg($("#presetMsg"), t("presetBusy"), false); ensurePresetPoll(); }
+  else { clearPresetApplying(); setMsg($("#presetMsg"), t("errP") + ((r && r.error) || "?"), false); renderPresets(); }
 }
 function showPresetInfo(p){
   $("#pmTitle").textContent = p.name;
@@ -3422,27 +3545,21 @@ function presetCard(p){
   const st = presetState(p);
   const card = document.createElement("div");
   card.className = "pcard" + (st.part ? " partial" : st.on ? " on" : "");
+  card.dataset.pid = p.id;
   // checked only when FULLY on; a partial preset shows unchecked (orange) so a click completes the sync
   card.innerHTML =
     '<span class="pname">' + escH(p.name) + '</span>' +
     '<button class="pinfo" title="' + escH(t("pmShow")) + '">?</button>' +
     '<label class="sw"><input type="checkbox"' + (st.on && !st.part ? " checked" : "") + '><span class="sl"></span></label>';
   card.querySelector(".pinfo").addEventListener("click", () => showPresetInfo(p));
-  card.querySelector("input").addEventListener("change", async e => {
-    const chk = e.target; chk.disabled = true;
-    const wantOn = chk.checked;
-    setMsg($("#presetMsg"), (wantOn ? t("enabling") : t("disabling")) + p.name + "…");
-    const res = await presetToggle(p, wantOn);
-    if (res && res.ok) setMsg($("#presetMsg"), t("done"));
-    else setMsg($("#presetMsg"), t("errP") + ((res && res.error) || "?"), false);
-    await loadDomains(); loadUndo();   // a geosite/preset toggle created an undo point
-  });
+  card.querySelector("input").addEventListener("change", e => startPresetApply(p, e.target.checked));
   return card;
 }
 function renderPresets(){
   if (PRESETS.length === 0) return;
   const box = $("#presets"); box.innerHTML = "";
   PRESETS.forEach(p => box.appendChild(presetCard(p)));
+  if (presetApplyingId) markPresetApplying(presetApplyingId);   // keep the spinner across re-renders
 }
 $("#pmClose").addEventListener("click", () => { $("#pmodal").hidden = true; });
 $("#pmodal").addEventListener("click", e => { if (e.target.id === "pmodal") $("#pmodal").hidden = true; });
@@ -4397,7 +4514,7 @@ $("#updAll").addEventListener("click", () => doUpdate("all"));
   // essentials first (presets is the slow fetch); drop the overlay once the Domains view is ready
   if (CAPS.nikki) await Promise.allSettled([loadDomains(), loadPresets()]);
   hideOverlay();
-  if (CAPS.nikki){ loadIps(); loadDevices(); loadAutosync(); loadNodes(); loadSvc(); }
+  if (CAPS.nikki){ loadIps(); loadDevices(); loadAutosync(); loadNodes(); loadSvc(); ensurePresetPoll(); }
   loadVersions(); loadUpdCheck(); loadBackup(); loadUndo();   // one availability check per session (cached)
   // resume the log view if an update is already running (started from another tab/session)
   try { const s = await (await fetch("?api=updatestatus")).json(); if (s && s.running) pollUpdate(); } catch(e){}
