@@ -46,6 +46,19 @@ Install at least one engine on your router first (both is fine):
 
 Then install Nipret — its tabs light up for whatever you have.
 
+## Security model
+
+Nipret is built for a **trusted home LAN**. The panel (`/cgi-bin/nikki-unblock`) has **no login of its
+own**: anyone who can open your router's web page can also change routing, apply presets, restore
+backups and run updates. That is a deliberate trade-off for one-tap usability at home. What it means
+for you:
+
+- **never expose the router's web port (80/443) to the internet** — don't port-forward it, don't put
+  the router in a DMZ;
+- treat guest Wi-Fi accordingly: give guests an isolated network, or accept that they can reach the
+  panel;
+- LuCI's own login protects only the LuCI page that embeds Nipret, not the panel itself.
+
 ## Install
 
 Pick whichever is easier for you.

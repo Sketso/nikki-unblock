@@ -139,6 +139,14 @@ delete_rule() {
 # GeoIP is "ready" when GeoIP.dat is present (mihomo geodata-mode) — GEOIP rules need it to load.
 geoip_ready() { [ -s /etc/nikki/run/GeoIP.dat ]; }
 
+# /tmp is tmpfs (RAM) and / is small flash — a big download/extract on a full filesystem fails
+# halfway with confusing errors. Best-effort guard: allow when df output is unparseable.
+fs_has_room() {   # $1=dir $2=required KB
+	_free=$(df -k "$1" 2>/dev/null | awk 'NR==2 {print $4}')
+	case "$_free" in ''|*[!0-9]*) return 0 ;; esac
+	[ "$_free" -ge "$2" ]
+}
+
 # delete first DOMAIN-SUFFIX rule whose matcher == $1
 delete_domain() {
 	i=0
@@ -344,7 +352,7 @@ rules_tagged() {
 
 # cron/CLI: sync every currently-enabled domain-list preset
 sync_all() {
-	idx=$(curl -s --max-time 10 "$APPLIST_URL/index.json" 2>/dev/null)
+	idx=$(curl -sf --max-time 10 "$APPLIST_URL/index.json" 2>/dev/null)
 	SYNC_ADDED=0; SYNC_REMOVED=0; i=0
 	while :; do
 		id=$(printf '%s' "$idx" | jsonfilter -e "@[$i].id" 2>/dev/null)
@@ -533,10 +541,14 @@ upd_running() {   # 0 (true) if an update runner is alive
 	[ -f "$UPD_LOCK" ] || return 1
 	kill -0 "$(cat "$UPD_LOCK" 2>/dev/null)" 2>/dev/null
 }
-update_start() {   # $1=op(self|nikki|geo|z2|all) ; 0=started 1=busy 2=bad op
+update_start() {   # $1=op(self|nikki|geo|z2|all) ; 0=started 1=busy 2=bad op 3=no space
 	_op="$1"
 	case "$_op" in self|nikki|geo|z2|all) ;; *) return 2 ;; esac
 	upd_running && return 1
+	# refuse to start on a nearly-full filesystem: apk downloads via /tmp (tmpfs), geo DBs land in
+	# $GEO_RUN (~40 MB peak). z2 is NOT guarded here — z2_run_update has its own graceful check.
+	case "$_op" in self|nikki|all) fs_has_room /tmp 20480 || return 3 ;; esac
+	case "$_op" in geo|all) fs_has_room "$GEO_RUN" 40960 || return 3 ;; esac
 	: > "$UPD_LOG"
 	{
 		printf '#!/bin/sh\nexec >> "%s" 2>&1\nrc=0\n' "$UPD_LOG"
@@ -995,14 +1007,6 @@ z2_gv_blob() {
 	[ -n "$_b" ] && echo "${_b%.bin}" || echo "fake_default_quic"
 }
 z2_strat_ids() { echo "default youtube aggressive light"; }
-z2_strat_name() {   # human label per id (RU/EN handled in the UI; this is the fallback)
-	case "$1" in
-		default)    echo "Сбалансированная (по умолчанию)" ;;
-		youtube)    echo "YouTube: QUIC-блоб googlevideo" ;;
-		aggressive) echo "Агрессивная (TLS multidisorder + badsum)" ;;
-		light)      echo "Лёгкая (для слабых роутеров)" ;;
-	esac
-}
 z2_strat_body() {   # $1=id -> the NFQWS2_OPT body (profile lines); empty for unknown id
 	_gv=$(z2_gv_blob)
 	case "$1" in
@@ -1560,9 +1564,12 @@ API=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^api=' | head -1 | cut -
 }
 # ---- restore (POST, RAW tar.gz body — handled before urlencoded parsing) ----
 [ "$API" = "restore" ] && [ "$REQUEST_METHOD" = "POST" ] && {
-	bk="/tmp/nu-rst.$$.tgz"; head -c "${CONTENT_LENGTH:-0}" > "$bk"
-	rd="/tmp/nu-rst.$$"; rm -rf "$rd"; mkdir -p "$rd"; tar -xzf "$bk" -C "$rd" 2>/dev/null
 	json_header
+	# body + extraction both land in tmpfs — refuse honestly instead of failing halfway
+	fs_has_room /tmp $(( ${CONTENT_LENGTH:-0} / 512 + 1024 )) || { printf '{"ok":false,"error":"no space in /tmp"}'; exit 0; }
+	bk="/tmp/nu-rst.$$.tgz"; head -c "${CONTENT_LENGTH:-0}" > "$bk"
+	rd="/tmp/nu-rst.$$"; rm -rf "$rd"; mkdir -p "$rd"
+	tar -xzf "$bk" -C "$rd" 2>/dev/null || { rm -rf "$bk" "$rd"; printf '{"ok":false,"error":"corrupt archive"}'; exit 0; }
 	if [ ! -f "$rd/nikki.uci" ]; then rm -rf "$bk" "$rd"; printf '{"ok":false,"error":"not a valid backup"}'; exit 0; fi
 	restore_backup "$rd"; rc=$?
 	rm -f "$bk"; rm -rf "$rd"
@@ -1581,9 +1588,11 @@ API=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^api=' | head -1 | cut -
 	cat "$bk"; exit 0
 }
 [ "$API" = "z2restore" ] && [ "$REQUEST_METHOD" = "POST" ] && {
-	bk="/tmp/nu-z2rst.$$.tgz"; head -c "${CONTENT_LENGTH:-0}" > "$bk"
-	rd="/tmp/nu-z2rst.$$"; rm -rf "$rd"; mkdir -p "$rd"; tar -xzf "$bk" -C "$rd" 2>/dev/null
 	json_header
+	fs_has_room /tmp $(( ${CONTENT_LENGTH:-0} / 512 + 1024 )) || { printf '{"ok":false,"error":"no space in /tmp"}'; exit 0; }
+	bk="/tmp/nu-z2rst.$$.tgz"; head -c "${CONTENT_LENGTH:-0}" > "$bk"
+	rd="/tmp/nu-z2rst.$$"; rm -rf "$rd"; mkdir -p "$rd"
+	tar -xzf "$bk" -C "$rd" 2>/dev/null || { rm -rf "$bk" "$rd"; printf '{"ok":false,"error":"corrupt archive"}'; exit 0; }
 	if [ ! -f "$rd/z2-manifest.json" ]; then rm -rf "$bk" "$rd"; printf '{"ok":false,"error":"not a zapret2 backup"}'; exit 0; fi
 	z2_restore_backup "$rd"; rc=$?
 	rm -f "$bk"; rm -rf "$rd"
@@ -1605,7 +1614,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 	# nosnap=1 lets a multi-step UI action (e.g. a hybrid preset = geosite + list) skip the 2nd+ snapshot,
 	# so one user click produces ONE undo point (the first sub-action already captured the pre-click state)
 	case "$action" in
-		z2strat|z2quic|z2ipv6|z2autotoggle|z2preset_on|z2preset_off|geosite_on|geosite_off|preset_sync|preset_off|mssclamp)
+		z2strat|z2quic|z2ipv6|z2autotoggle|z2preset_on|z2preset_off|mssclamp)
 			[ "$(get_param nosnap)" = 1 ] || undo_push "$action" ;;
 	esac
 
@@ -1742,6 +1751,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		case "$rc" in
 			0) printf '{"ok":true,"started":true}' ;;
 			1) printf '{"ok":false,"error":"busy"}' ;;
+			3) printf '{"ok":false,"error":"no space left (/tmp or geo dir)"}' ;;
 			*) printf '{"ok":false,"error":"bad op"}' ;;
 		esac
 		exit 0
@@ -2063,21 +2073,6 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		/etc/init.d/zapret2 restart >/dev/null 2>&1
 		json_header; printf '{"ok":true,"autohostlist":%s}' "$([ "$on" = 1 ] && echo 1 || echo 0)"; exit 0
 
-	elif [ "$action" = "preset_sync" ]; then
-		id=$(get_param id | sed 's/[^a-z0-9_-]//g')
-		SYNC_ADDED=0; SYNC_REMOVED=0
-		if do_preset_sync "$id"; then
-			[ $((SYNC_ADDED + SYNC_REMOVED)) -gt 0 ] && { uci commit nikki; apply_nikki; }
-			json_header; printf '{"ok":true,"added":%d,"removed":%d}' "$SYNC_ADDED" "$SYNC_REMOVED"; exit 0
-		fi
-		json_header; printf '{"ok":false,"error":"list unavailable"}'; exit 0
-
-	elif [ "$action" = "preset_off" ]; then
-		id=$(get_param id | sed 's/[^a-z0-9_-]//g')
-		OFF_REMOVED=0; do_preset_off "$id"
-		[ "$OFF_REMOVED" -gt 0 ] && { uci commit nikki; apply_nikki; }
-		json_header; printf '{"ok":true,"removed":%d}' "$OFF_REMOVED"; exit 0
-
 	elif [ "$action" = "preset_apply" ]; then
 		# atomic on/off of a whole nikki preset (geosite + list) run DETACHED, tracked in $PRESET_OP
 		id=$(get_param id | sed 's/[^a-z0-9_-]//g')
@@ -2093,49 +2088,6 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		printf 'pid=0\nid=%s\nname=%s\non=%s\nphase=start\ndone=0\nok=0\n' "$id" "$pname" "$on" > "$PRESET_OP"
 		setsid "$SELF" _presetapply "$id" "$on" "$gcat" "$ggeoip" "$gips" "$gnode" "$hl" "$pname" >/dev/null 2>&1 &
 		json_header; printf '{"ok":true,"started":true}'; exit 0
-
-	elif [ "$action" = "geosite_on" ]; then
-		# cat / geoip may be comma-separated (a combo preset like "all social") — handle each
-		cat=$(get_param cat | sed 's/[^a-z0-9._!,-]//g')
-		# "VPN" presets now route through the managed exit group (EXIT_GROUP) by default too
-		gnode=$(get_param node); case "$gnode" in PROXY|DIRECT|REJECT|"$EXIT_GROUP") ;; *) gnode="$EXIT_GROUP" ;; esac
-		[ -z "$cat" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
-		changed=0
-		for c in $(printf '%s' "$cat" | tr ',' ' '); do
-			[ -z "$c" ] && continue
-			[ "$(rule_exists GEOSITE "$c")" != 1 ] && { add_rule GEOSITE "$c" "$gnode"; changed=1; }
-		done
-		# geoip facet: add GEOIP,<code> alongside — but ONLY if the GeoIP DB is enabled, else skip
-		# (geosite + IP-CIDR remain the working fallback so mihomo never breaks).
-		gip=$(get_param geoip | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9,-]//g')
-		if [ -n "$gip" ] && geoip_ready; then
-			for g in $(printf '%s' "$gip" | tr ',' ' '); do
-				[ -z "$g" ] && continue
-				[ "$(rule_exists GEOIP "$g")" != 1 ] && { add_rule GEOIP "$g" "$gnode"; changed=1; }
-			done
-		fi
-		for ip in $(get_param ips | tr ',' ' '); do
-			ip=$(clean_ip "$ip"); [ -z "$ip" ] && continue
-			if [ "$(rule_exists IP-CIDR "$ip")" != 1 ]; then
-				add_rule IP-CIDR "$ip" "$gnode"
-				uci set "nikki.@rule[-1].no_resolve=1"
-				changed=1
-			fi
-		done
-		[ "$changed" = 1 ] && { uci commit nikki; apply_nikki; }
-		json_header; printf '{"ok":true}'; exit 0
-
-	elif [ "$action" = "geosite_off" ]; then
-		cat=$(get_param cat | sed 's/[^a-z0-9._!,-]//g')
-		[ -z "$cat" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
-		for c in $(printf '%s' "$cat" | tr ',' ' '); do [ -n "$c" ] && delete_rule GEOSITE "$c"; done
-		gip=$(get_param geoip | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9,-]//g')
-		for g in $(printf '%s' "$gip" | tr ',' ' '); do [ -n "$g" ] && delete_rule GEOIP "$g"; done
-		for ip in $(get_param ips | tr ',' ' '); do
-			ip=$(clean_ip "$ip"); [ -n "$ip" ] && delete_rule IP-CIDR "$ip"
-		done
-		uci commit nikki; apply_nikki
-		json_header; printf '{"ok":true}'; exit 0
 
 	elif [ "$action" = "autosync" ]; then
 		on=$(get_param on | sed 's/[^01]//g'); [ -z "$on" ] && on=0
