@@ -37,6 +37,7 @@
     <button class="tab" data-view="z2domains" data-engine="zapret2" data-i18n="z2TabDomains"></button>
     <button class="tab" data-view="z2auto" data-engine="zapret2" data-i18n="z2TabAuto"></button>
     <button class="tab" data-view="z2exclude" data-engine="zapret2" data-i18n="z2TabExclude"></button>
+    <button class="tab" data-view="z2devices" data-engine="zapret2" data-i18n="z2TabDevices"></button>
     <button class="tab" data-view="z2svc" data-engine="zapret2" data-i18n="z2TabSvc"></button>
     <button class="tab" data-view="common" data-engine="common" data-i18n="tabCommon"></button>
   </div>
@@ -238,6 +239,18 @@
     </div>
     <ul id="z2ExList"></ul>
     <div class="msg" id="z2ExMsg"></div>
+  </section>
+
+  <section class="view" id="view-z2devices">
+    <div class="hint" data-i18n="z2DevHint"></div>
+    <div class="add">
+      <select id="z2DevPick"><option value="" data-i18n="devPickDefault"></option></select>
+      <input id="z2DevIp" placeholder="192.168.1.50" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <button type="button" id="z2DevBtn" data-i18n="add"></button>
+    </div>
+    <div class="msg" id="z2DevMsg"></div>
+    <h3><span data-i18n="z2DevExcluded"></span> <span class="count" id="z2DevCount"></span></h3>
+    <ul id="z2DevList"></ul>
   </section>
 
   <!-- ============ ZAPRET2 · SERVICE ============ -->

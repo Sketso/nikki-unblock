@@ -9,7 +9,7 @@ const I18N = {
     engCommonHint: "Обновления сервиса и движков + резервная копия настроек — общее для всего Nipret.",
     tabCommon: "Общее",
     tabDomains: "Домены в туннель", tabIps: "IP-исключения", tabDevices: "Устройства",
-    z2TabDomains: "Домены", z2TabAuto: "Автообучение", z2TabExclude: "Исключения", z2TabSvc: "Управление",
+    z2TabDomains: "Домены", z2TabAuto: "Автообучение", z2TabExclude: "Исключения", z2TabDevices: "Устройства", z2TabSvc: "Управление",
     engNikkiHint: "Nikki (Mihomo) заворачивает выбранные сайты в VPN/прокси — для того, что блокируют «снаружи» (гео-блок, блок по IP): ChatGPT, Instagram, Telegram и т.п. Управляй доменами, нодами и устройствами.",
     engZapret2Hint: "Zapret2 обходит блокировки провайдера на уровне DPI (без VPN) — для сайтов, которые режут «изнутри» (YouTube и т.п.). Управляй сервисом и списком доменов для обхода.",
     z2On: "zapret2 работает", z2Off: "zapret2 остановлен",
@@ -56,6 +56,8 @@ const I18N = {
     noEngines: "Ни nikki (VPN), ни zapret2 не установлены — управлять нечем. Поставь хотя бы один.",
     devHint: "Устройства из этого списка ходят в интернет мимо VPN (напрямую). Выбери устройство из списка или впиши его IP. Исключение по IP — чтобы оно не «слетало», закрепи за устройством постоянный адрес (статический DHCP-лиз).",
     devPickDefault: "— выбрать устройство —", devExcluded: "Мимо VPN (напрямую)",
+    z2DevHint: "Устройства из этого списка получают интернет БЕЗ обхода DPI — ровно такой, какой даёт провайдер, со всеми блокировками. Нужно, если за роутером стоит второй роутер со своим zapret2 (иначе он «работает» за счёт этого роутера, и проверить его нельзя). Только IPv4; закрепи за устройством статический DHCP-лиз, чтобы исключение не слетело.",
+    z2DevExcluded: "Без обхода DPI (чистый интернет)",
     add: "Добавить", tType: "тип условия", nAction: "действие",
     tSuffix: "домен+поддомены", tDomain: "точный домен", tKeyword: "подстрока",
     nProxy: "→ VPN", nDirect: "→ напрямую", nReject: "→ блок", nProxyProfile: "→ VPN (профиль)",
@@ -139,7 +141,7 @@ const I18N = {
     engCommonHint: "Service & engine updates + config backup — shared across Nipret.",
     tabCommon: "General",
     tabDomains: "Domains via VPN", tabIps: "IP exclusions", tabDevices: "Devices",
-    z2TabDomains: "Domains", z2TabAuto: "Auto-learn", z2TabExclude: "Exclusions", z2TabSvc: "Service",
+    z2TabDomains: "Domains", z2TabAuto: "Auto-learn", z2TabExclude: "Exclusions", z2TabDevices: "Devices", z2TabSvc: "Service",
     engNikkiHint: "Nikki (Mihomo) routes chosen sites through a VPN/proxy — for services blocked \"from outside\" (geo-blocks, IP blocks): ChatGPT, Instagram, Telegram, etc. Manage domains, nodes and devices.",
     engZapret2Hint: "Zapret2 defeats ISP DPI blocking (no VPN) — for sites throttled/blocked \"from inside\" (YouTube, etc.). Control the service and the list of domains to bypass.",
     z2On: "zapret2 running", z2Off: "zapret2 stopped",
@@ -186,6 +188,8 @@ const I18N = {
     noEngines: "Neither nikki (VPN) nor zapret2 is installed — nothing to manage. Install at least one.",
     devHint: "Devices in this list reach the internet directly, bypassing the VPN. Pick a device or type its IP. Exclusion is by IP — give the device a fixed address (static DHCP lease) so it doesn't drift.",
     devPickDefault: "— pick a device —", devExcluded: "Bypass VPN (direct)",
+    z2DevHint: "Devices in this list get the internet WITHOUT the DPI bypass — exactly as your ISP serves it, blocks and all. Needed when a second router with its own zapret2 sits behind this one (otherwise it \"works\" thanks to this router and can't be tested). IPv4 only; give the device a static DHCP lease so the exclusion doesn't drift.",
+    z2DevExcluded: "No DPI bypass (raw internet)",
     add: "Add", tType: "match type", nAction: "action",
     tSuffix: "domain + subdomains", tDomain: "exact domain", tKeyword: "keyword",
     nProxy: "→ VPN", nDirect: "→ direct", nReject: "→ block", nProxyProfile: "→ VPN (profile)",
@@ -331,6 +335,7 @@ document.querySelectorAll(".tab").forEach(tb => tb.addEventListener("click", () 
   else if (tb.dataset.view === "mgmt") loadSvc();
   else if (tb.dataset.view === "common") { loadVersions(); loadUpdCheck(); loadBackup(); loadUndo(); }   // Общее: updates + backup
   else if (tb.dataset.view === "devices") loadDevices();
+  else if (tb.dataset.view === "z2devices") loadZ2Devices();
   else if (tb.dataset.view.indexOf("z2") === 0) { loadZapret2(); z2PresetOp.ensure(); }   // any zapret2 sub-view
 }));
 /* top-level engine selector — shows only that engine's sub-tabs, opens the first */
@@ -738,6 +743,45 @@ $("#devList").addEventListener("click", async e => {
   hideOverlay();
   if (res.ok){ setMsg($("#devMsg"), t("done")); loadDevices(); }
   else { setMsg($("#devMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
+});
+
+/* ---------- devices excluded from the zapret2 desync ---------- */
+let Z2DEVICES = { excluded: [], known: [] };
+async function loadZ2Devices(){
+  try { Z2DEVICES = await (await fetch("?api=z2devices")).json(); } catch(e){ Z2DEVICES = { excluded: [], known: [] }; }
+  renderZ2Devices();
+}
+function renderZ2Devices(){
+  const pick = $("#z2DevPick");
+  pick.innerHTML = '<option value="">' + escH(t("devPickDefault")) + '</option>' +
+    (Z2DEVICES.known || []).map(d => '<option value="' + escH(d.ip) + '">' +
+      escH((d.name ? d.name + " — " : "") + d.ip + (d.mac ? " · " + d.mac : "")) + '</option>').join("");
+  const ul = $("#z2DevList"); ul.innerHTML = "";
+  const exc = Z2DEVICES.excluded || [];
+  $("#z2DevCount").textContent = "(" + exc.length + ")";
+  exc.forEach(d => {
+    const li = document.createElement("li");
+    li.innerHTML = '<span class="dom">' + escH(d.name || d.ip) + (d.name ? ' <span class="meta">' + escH(d.ip) + '</span>' : '') + '</span>' +
+      '<button class="ghost" data-z2devip="' + escH(d.ip) + '">✕</button>';
+    ul.appendChild(li);
+  });
+}
+$("#z2DevPick").addEventListener("change", e => { if (e.target.value) $("#z2DevIp").value = e.target.value; });
+$("#z2DevBtn").addEventListener("click", async () => {
+  const ip = $("#z2DevIp").value.trim(); if (!ip) return;
+  $("#z2DevBtn").disabled = true; setMsg($("#z2DevMsg"), t("applying")); showOverlay(t("applying"));
+  const res = await api("z2devexclude", { ip });
+  $("#z2DevBtn").disabled = false; hideOverlay();
+  if (res.ok){ setMsg($("#z2DevMsg"), res.dup ? t("dup") : t("done")); $("#z2DevIp").value = ""; $("#z2DevPick").value = ""; loadZ2Devices(); }
+  else setMsg($("#z2DevMsg"), t("errP") + (res.error || "?"), false);
+});
+$("#z2DevList").addEventListener("click", async e => {
+  const b = e.target.closest("button"); if (!b) return;
+  b.disabled = true; setMsg($("#z2DevMsg"), t("removing")); showOverlay(t("removing"));
+  const res = await api("z2devinclude", { ip: b.dataset.z2devip });
+  hideOverlay();
+  if (res.ok){ setMsg($("#z2DevMsg"), t("done")); loadZ2Devices(); }
+  else { setMsg($("#z2DevMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
 });
 
 /* ---------- combine capability gating (nikki / zapret2 present?) ---------- */
@@ -1539,7 +1583,7 @@ $("#updAll").addEventListener("click", () => doUpdate("all"));
   if (CAPS.nikki) await Promise.allSettled([loadDomains(), loadPresets()]);
   hideOverlay();
   if (CAPS.nikki){ loadIps(); loadDevices(); loadAutosync(); loadNodes(); loadSvc(); presetOp.ensure(); }
-  if (CAPS.zapret2) z2PresetOp.ensure();   // resume a z2-preset spinner if one is applying
+  if (CAPS.zapret2){ loadZ2Devices(); z2PresetOp.ensure(); }   // resume a z2-preset spinner if one is applying
   loadVersions(); loadUpdCheck(); loadBackup(); loadUndo();   // one availability check per session (cached)
   // resume the log view if an update is already running (started from another tab/session)
   try { const s = await (await fetch("?api=updatestatus")).json(); if (s && s.running) pollUpdate(); } catch(e){}

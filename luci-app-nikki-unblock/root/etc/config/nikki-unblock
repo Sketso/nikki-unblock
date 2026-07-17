@@ -17,3 +17,8 @@ config nikki-unblock 'config'
 	# Auto-refresh tracked link-subscriptions on a schedule (on by default; cron created once a sub exists).
 	option subauto '1'
 	option subauto_interval '24h'
+	# LAN devices (IPv4) whose traffic skips the zapret2 desync — managed from the panel's
+	# zapret2 → Devices tab. zapret2 can't filter by client itself (its hook runs after NAT), so
+	# the panel marks these source IPs pre-NAT with DESYNC_MARK, which makes zapret2 skip them.
+	# Useful for a dev router that must see the raw, un-bypassed internet.
+	#   list z2_bypass_ip '192.168.1.169'
