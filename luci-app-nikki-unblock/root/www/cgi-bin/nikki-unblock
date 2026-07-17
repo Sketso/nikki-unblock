@@ -16,6 +16,7 @@ UPD_LOG="/tmp/nikki-unblock-update.log"          # live log of the async update 
 UPD_LOCK="/tmp/nikki-unblock-update.lock"        # holds the runner PID while an update is in progress
 UPD_SCRIPT="/tmp/nikki-unblock-update.sh"        # generated per run, executed detached (setsid)
 PRESET_OP="/tmp/nikki-unblock-presetop"          # status of the current detached nikki-preset apply
+Z2_PRESET_OP="/tmp/nikki-unblock-z2presetop"     # status of the current detached zapret2-preset apply
 # nikki-unblock isn't in an apk repo (installed from a local file), so self-update pulls the latest
 # release .apk straight from GitHub (same as feed.sh) and `apk add` upgrades it in place.
 SELF_APK="https://github.com/Sketso/nikki-unblock/releases/latest/download/luci-app-nikki-unblock.apk"
@@ -365,12 +366,49 @@ sync_all() {
 	logger -t nikki-unblock "autosync: +$SYNC_ADDED -$SYNC_REMOVED"
 }
 
-# Atomic nikki-preset apply, run DETACHED so a client reload/disconnect can't leave a hybrid preset
-# (geosite + domain list) half-applied. Progress is tracked in $PRESET_OP so the UI can show a per-card
-# spinner that survives tab switches and page reloads. Both facets happen here in one operation.
-_pop_write() {   # $1=phase $2=done $3=ok   (PA_* set by preset_apply_run)
+# ---- detached-op status files (generic) --------------------------------------------------------
+# One tiny kv file per operation kind ($PRESET_OP, $Z2_PRESET_OP): the detached runner rewrites it
+# on each phase, the UI polls the matching ?api= endpoint. A poll that sees completion deletes the
+# file (read-once), and a crash guard turns a dead runner / stale file into an honest failure —
+# so a per-card spinner survives tab switches and page reloads but can never spin forever.
+op_write() {   # $1=file $2=pid $3=id $4=name $5=on $6=phase $7=done $8=ok
 	printf 'pid=%s\nid=%s\nname=%s\non=%s\nphase=%s\ndone=%s\nok=%s\n' \
-		"$$" "$PA_ID" "$PA_NAME" "$PA_ON" "$1" "$2" "$3" > "$PRESET_OP"
+		"$2" "$3" "$4" "$5" "$6" "$7" "$8" > "$1"
+}
+op_json() {   # $1=file — poll JSON; reports a completion exactly once, then removes the file
+	json_header
+	[ -f "$1" ] || { printf '{"running":0}'; return; }
+	_pid=$(sed -n 's/^pid=//p' "$1"); _id=$(sed -n 's/^id=//p' "$1")
+	_nm=$(sed -n 's/^name=//p' "$1"); _on=$(sed -n 's/^on=//p' "$1")
+	_ph=$(sed -n 's/^phase=//p' "$1"); _dn=$(sed -n 's/^done=//p' "$1"); _okv=$(sed -n 's/^ok=//p' "$1")
+	# crash guard: not done, but a real pid that's gone, or the file has gone stale (>90s) → treat as failed
+	if [ "$_dn" != 1 ]; then
+		_dead=0; case "$_pid" in ''|*[!0-9]*|0) : ;; *) kill -0 "$_pid" 2>/dev/null || _dead=1 ;; esac
+		_age=$(( $(date +%s) - $(date -r "$1" +%s 2>/dev/null || echo 0) ))
+		{ [ "$_dead" = 1 ] || [ "$_age" -gt 90 ]; } && { _dn=1; _okv=0; }
+	fi
+	if [ "$_dn" = 1 ]; then
+		rm -f "$1"
+		printf '{"running":0,"done":1,"ok":%s,"id":"%s","on":%s,"name":"%s"}' "${_okv:-0}" "$(json_esc "$_id")" "${_on:-0}" "$(json_esc "$_nm")"
+	else
+		printf '{"running":1,"id":"%s","on":%s,"phase":"%s","name":"%s"}' "$(json_esc "$_id")" "${_on:-0}" "$(json_esc "$_ph")" "$(json_esc "$_nm")"
+	fi
+}
+op_busy() {   # $1=file — 0(true) if that operation is in progress
+	[ -f "$1" ] || return 1
+	[ "$(sed -n 's/^done=//p' "$1")" = 1 ] && return 1
+	_p=$(sed -n 's/^pid=//p' "$1"); case "$_p" in ''|*[!0-9]*|0) return 0 ;; *) kill -0 "$_p" 2>/dev/null ;; esac
+}
+op_start() {   # $1=file $2=id $3=name $4=on $5…=CLI verb+args — seed the status file, detach the runner
+	_f="$1"; _oid="$2"; _onm="$3"; _oon="$4"; shift 4
+	op_write "$_f" 0 "$_oid" "$_onm" "$_oon" start 0 0
+	setsid "$SELF" "$@" >/dev/null 2>&1 &
+}
+
+# Atomic nikki-preset apply, run DETACHED so a client reload/disconnect can't leave a hybrid preset
+# (geosite + domain list) half-applied. Both facets happen here in one operation.
+_pop_write() {   # $1=phase $2=done $3=ok   (PA_* set by preset_apply_run)
+	op_write "$PRESET_OP" "$$" "$PA_ID" "$PA_NAME" "$PA_ON" "$1" "$2" "$3"
 }
 preset_apply_run() {   # $1=id $2=on $3=cat $4=geoip $5=ips $6=node $7=haslist $8=name
 	PA_ID="$1"; PA_ON="$2"; _cat="$3"; _geoip="$4"; _ips="$5"; _node="$6"; _hl="$7"; PA_NAME="$8"
@@ -411,30 +449,8 @@ preset_apply_run() {   # $1=id $2=on $3=cat $4=geoip $5=ips $6=node $7=haslist $
 	_ok=1; pgrep -f /usr/bin/mihomo >/dev/null 2>&1 || _ok=0
 	_pop_write done 1 "$_ok"
 }
-presetop_json() {
-	json_header
-	[ -f "$PRESET_OP" ] || { printf '{"running":0}'; return; }
-	_pid=$(sed -n 's/^pid=//p' "$PRESET_OP"); _id=$(sed -n 's/^id=//p' "$PRESET_OP")
-	_nm=$(sed -n 's/^name=//p' "$PRESET_OP"); _on=$(sed -n 's/^on=//p' "$PRESET_OP")
-	_ph=$(sed -n 's/^phase=//p' "$PRESET_OP"); _dn=$(sed -n 's/^done=//p' "$PRESET_OP"); _okv=$(sed -n 's/^ok=//p' "$PRESET_OP")
-	# crash guard: not done, but a real pid that's gone, or the file has gone stale (>90s) → treat as failed
-	if [ "$_dn" != 1 ]; then
-		_dead=0; case "$_pid" in ''|*[!0-9]*|0) : ;; *) kill -0 "$_pid" 2>/dev/null || _dead=1 ;; esac
-		_age=$(( $(date +%s) - $(date -r "$PRESET_OP" +%s 2>/dev/null || echo 0) ))
-		{ [ "$_dead" = 1 ] || [ "$_age" -gt 90 ]; } && { _dn=1; _okv=0; }
-	fi
-	if [ "$_dn" = 1 ]; then
-		rm -f "$PRESET_OP"   # read-once: report completion exactly once
-		printf '{"running":0,"done":1,"ok":%s,"id":"%s","on":%s,"name":"%s"}' "${_okv:-0}" "$(json_esc "$_id")" "${_on:-0}" "$(json_esc "$_nm")"
-	else
-		printf '{"running":1,"id":"%s","on":%s,"phase":"%s","name":"%s"}' "$(json_esc "$_id")" "${_on:-0}" "$(json_esc "$_ph")" "$(json_esc "$_nm")"
-	fi
-}
-preset_busy() {   # 0(true) if an apply is in progress
-	[ -f "$PRESET_OP" ] || return 1
-	[ "$(sed -n 's/^done=//p' "$PRESET_OP")" = 1 ] && return 1
-	_p=$(sed -n 's/^pid=//p' "$PRESET_OP"); case "$_p" in ''|*[!0-9]*|0) return 0 ;; *) kill -0 "$_p" 2>/dev/null ;; esac
-}
+presetop_json() { op_json "$PRESET_OP"; }
+preset_busy() { op_busy "$PRESET_OP"; }   # 0(true) if an apply is in progress
 
 # ---- autosync (state in UCI, executed by cron) -----------------------------
 autosync_sched() {
@@ -957,6 +973,57 @@ z2_rebuild_main() {
 	fi
 	rm -f "$_b"
 	z2_apply_main
+}
+# Atomic z2-preset apply, run DETACHED and tracked in $Z2_PRESET_OP (poll ?api=z2presetop) — same
+# machinery as the nikki preset apply: per-card spinner survives reloads, crash guard ends it honestly.
+_zpop_write() {   # $1=phase $2=done $3=ok   (ZA_* set by z2_preset_apply_run)
+	op_write "$Z2_PRESET_OP" "$$" "$ZA_ID" "$ZA_NAME" "$ZA_ON" "$1" "$2" "$3"
+}
+z2_preset_apply_run() {   # $1=id $2=on $3=name
+	ZA_ID="$1"; ZA_ON="$2"; ZA_NAME="$3"
+	if [ "$ZA_ON" = 1 ]; then
+		# fetch the preset's domains, cache them, mark active — a failed fetch fails the whole op
+		_zpop_write list 0 0
+		mkdir -p "$Z2_PDIR"
+		applist_domains "z2/$ZA_ID" > "$Z2_PDIR/$ZA_ID.lst.tmp" 2>/dev/null
+		if [ ! -s "$Z2_PDIR/$ZA_ID.lst.tmp" ]; then
+			rm -f "$Z2_PDIR/$ZA_ID.lst.tmp"; _zpop_write done 1 0; return
+		fi
+		mv "$Z2_PDIR/$ZA_ID.lst.tmp" "$Z2_PDIR/$ZA_ID.lst"
+		uci -q get nikki-unblock.z2 >/dev/null 2>&1 || uci set nikki-unblock.z2=z2
+		case " $(z2_active_presets) " in *" $ZA_ID "*) : ;; *) uci add_list nikki-unblock.z2.preset="$ZA_ID" ;; esac
+		uci commit nikki-unblock
+	else
+		_zpop_write off 0 0
+		uci -q del_list nikki-unblock.z2.preset="$ZA_ID" 2>/dev/null; uci commit nikki-unblock
+		rm -f "$Z2_PDIR/$ZA_ID.lst"
+	fi
+	_zpop_write apply 0 0
+	z2_rebuild_main
+	_zpop_write done 1 1
+}
+# "don't bypass" domains: ban them (user-exclude, checked first so they're never desynced) AND drop
+# them from the auto list so they disappear and stay out. zapret matches hostlists by suffix, so an
+# exclude covers subdomains too — the auto list is cleaned the same way. ONE reload per call.
+z2_exclude_domains() {   # $1 = whitespace-separated domains
+	touch "$Z2_HOSTX"
+	for d in $1; do
+		grep -qxF "$d" "$Z2_HOSTX" 2>/dev/null || echo "$d" >> "$Z2_HOSTX"
+		re=$(printf '%s' "$d" | sed 's/[.*]/\\&/g')
+		[ -f "$Z2_AUTO" ] && { grep -viE "(^|\.)$re\$" "$Z2_AUTO" > "$Z2_AUTO.tmp" 2>/dev/null; mv "$Z2_AUTO.tmp" "$Z2_AUTO"; }
+	done
+	/etc/init.d/zapret2 reload >/dev/null 2>&1
+}
+z2_unexclude_domains() {   # $1 = domains — drop from the exclude banlist; VPN-node protections are kept
+	[ -f "$Z2_HOSTX" ] || return 0
+	prot=$(z2_node_hosts)
+	cp "$Z2_HOSTX" "$Z2_HOSTX.tmp"
+	for d in $1; do
+		printf '%s\n' "$prot" | grep -qxF "$d" && continue   # never drop a VPN-node protection
+		grep -vxF "$d" "$Z2_HOSTX.tmp" > "$Z2_HOSTX.tmp2" 2>/dev/null; mv "$Z2_HOSTX.tmp2" "$Z2_HOSTX.tmp"
+	done
+	mv "$Z2_HOSTX.tmp" "$Z2_HOSTX"
+	/etc/init.d/zapret2 reload >/dev/null 2>&1
 }
 # [{id,name,active,domains[]}] — manifest at $APPLIST_URL/z2/index.json; active flag from UCI, domains
 # fetched server-side (routers reach the applist; the browser's origin can't). Empty domains if offline.
@@ -1540,6 +1607,7 @@ nodes_json() {
 [ "$1" = "z2update" ] && { z2_run_update "$2" "$3"; exit $?; }
 # detached atomic nikki-preset apply (both facets) — status streamed to $PRESET_OP
 [ "$1" = "_presetapply" ] && { preset_apply_run "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9"; exit 0; }
+[ "$1" = "_z2presetapply" ] && { z2_preset_apply_run "$2" "$3" "$4"; exit 0; }
 # nikki update rollback point: snapshot config before, restore it if mihomo dies after
 NIKKI_PRESNAP="/tmp/nu-preupd-nikki.tgz"
 [ "$1" = "_nikkisnap" ] && { build_backup "$NIKKI_PRESNAP" >/dev/null 2>&1 && echo ">> nikki config snapshot saved" || echo "!! snapshot failed"; exit 0; }
@@ -1614,7 +1682,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 	# nosnap=1 lets a multi-step UI action (e.g. a hybrid preset = geosite + list) skip the 2nd+ snapshot,
 	# so one user click produces ONE undo point (the first sub-action already captured the pre-click state)
 	case "$action" in
-		z2strat|z2quic|z2ipv6|z2autotoggle|z2preset_on|z2preset_off|mssclamp)
+		z2strat|z2quic|z2ipv6|z2autotoggle|mssclamp)
 			[ "$(get_param nosnap)" = 1 ] || undo_push "$action" ;;
 	esac
 
@@ -1926,81 +1994,41 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		fi
 		json_header; printf '{"ok":true}'; exit 0
 
-	elif [ "$action" = "z2preset_on" ]; then
-		# fetch the preset's domains, cache them, mark active, rebuild the preset hostlist
+	elif [ "$action" = "z2preset_apply" ]; then
+		# atomic on/off of a z2 preset, run DETACHED and tracked in $Z2_PRESET_OP (poll ?api=z2presetop)
 		id=$(printf '%s' "$(get_param id)" | tr -cd 'a-z0-9_-')   # sanitised: no slashes/dots → no path escape
 		[ -z "$id" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
-		mkdir -p "$Z2_PDIR"
-		applist_domains "z2/$id" > "$Z2_PDIR/$id.lst.tmp" 2>/dev/null
-		if [ ! -s "$Z2_PDIR/$id.lst.tmp" ]; then
-			rm -f "$Z2_PDIR/$id.lst.tmp"; json_header; printf '{"ok":false,"error":"fetch"}'; exit 0
+		# busy while another z2-preset apply runs, or while an update swaps the zapret2 binaries
+		{ op_busy "$Z2_PRESET_OP" || upd_running; } && { json_header; printf '{"ok":false,"error":"busy"}'; exit 0; }
+		on=$(get_param on | sed 's/[^01]//g'); [ -z "$on" ] && on=0
+		pname=$(get_param name)
+		undo_push z2preset   # ONE undo point for the whole apply
+		op_start "$Z2_PRESET_OP" "$id" "$pname" "$on" _z2presetapply "$id" "$on" "$pname"
+		json_header; printf '{"ok":true,"started":true}'; exit 0
+
+	elif [ "$action" = "z2exclude" ] || [ "$action" = "z2excludebulk" ]; then
+		if [ "$action" = "z2exclude" ]; then
+			ds=$(printf '%s' "$(get_param domain)" | parse_domains | head -1)
+		else
+			ds=$(printf '%s' "$(get_param domains)" | parse_domains)
 		fi
-		mv "$Z2_PDIR/$id.lst.tmp" "$Z2_PDIR/$id.lst"
-		uci -q get nikki-unblock.z2 >/dev/null 2>&1 || uci set nikki-unblock.z2=z2
-		case " $(z2_active_presets) " in *" $id "*) : ;; *) uci add_list nikki-unblock.z2.preset="$id" ;; esac
-		uci commit nikki-unblock
-		z2_rebuild_main
-		json_header; printf '{"ok":true}'; exit 0
-
-	elif [ "$action" = "z2preset_off" ]; then
-		id=$(printf '%s' "$(get_param id)" | tr -cd 'a-z0-9_-')
-		[ -z "$id" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
-		uci -q del_list nikki-unblock.z2.preset="$id" 2>/dev/null; uci commit nikki-unblock
-		rm -f "$Z2_PDIR/$id.lst"
-		z2_rebuild_main
-		json_header; printf '{"ok":true}'; exit 0
-
-	elif [ "$action" = "z2exclude" ]; then
-		# "don't bypass" an auto-learned domain: ban it (user-exclude, checked first so it's never
-		# desynced) AND drop it from the auto list so it disappears and stays out.
-		d=$(printf '%s' "$(get_param domain)" | parse_domains | head -1)
-		[ -z "$d" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
-		touch "$Z2_HOSTX"; grep -qxF "$d" "$Z2_HOSTX" 2>/dev/null || echo "$d" >> "$Z2_HOSTX"
-		# zapret matches hostlists by suffix, so the exclude covers subdomains too — clean the
-		# auto list the same way (excluding googlevideo.com drops every rrX…googlevideo.com)
-		re=$(printf '%s' "$d" | sed 's/[.*]/\\&/g')
-		[ -f "$Z2_AUTO" ] && { grep -viE "(^|\.)$re\$" "$Z2_AUTO" > "$Z2_AUTO.tmp" 2>/dev/null; mv "$Z2_AUTO.tmp" "$Z2_AUTO"; }
-		/etc/init.d/zapret2 reload >/dev/null 2>&1
+		[ -z "$ds" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
+		z2_exclude_domains "$ds"
 		json_header; printf '{"ok":true}'; exit 0
 
 	elif [ "$action" = "z2unexclude" ]; then
-		# remove a domain from the exclude "banlist" — but never a VPN-node protection
+		# single-domain form reports "protected" honestly (the bulk form just skips those)
 		d=$(printf '%s' "$(get_param domain)" | parse_domains | head -1)
 		if [ -n "$d" ] && z2_node_hosts | grep -qxF "$d"; then
 			json_header; printf '{"ok":false,"error":"protected"}'; exit 0
 		fi
-		if [ -n "$d" ] && [ -f "$Z2_HOSTX" ]; then
-			grep -vxF "$d" "$Z2_HOSTX" > "$Z2_HOSTX.tmp" 2>/dev/null; mv "$Z2_HOSTX.tmp" "$Z2_HOSTX"
-			/etc/init.d/zapret2 reload >/dev/null 2>&1
-		fi
-		json_header; printf '{"ok":true}'; exit 0
-
-	elif [ "$action" = "z2excludebulk" ]; then
-		# bulk "don't bypass": each domain goes to the user-exclude, covered auto entries dropped; ONE reload
-		ds=$(printf '%s' "$(get_param domains)" | parse_domains)
-		[ -z "$ds" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
-		touch "$Z2_HOSTX"
-		for d in $ds; do
-			grep -qxF "$d" "$Z2_HOSTX" 2>/dev/null || echo "$d" >> "$Z2_HOSTX"
-			re=$(printf '%s' "$d" | sed 's/[.*]/\\&/g')
-			[ -f "$Z2_AUTO" ] && { grep -viE "(^|\.)$re\$" "$Z2_AUTO" > "$Z2_AUTO.tmp" 2>/dev/null; mv "$Z2_AUTO.tmp" "$Z2_AUTO"; }
-		done
-		/etc/init.d/zapret2 reload >/dev/null 2>&1
+		[ -n "$d" ] && z2_unexclude_domains "$d"
 		json_header; printf '{"ok":true}'; exit 0
 
 	elif [ "$action" = "z2unexcludebulk" ]; then
 		ds=$(printf '%s' "$(get_param domains)" | parse_domains)
 		[ -z "$ds" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
-		if [ -f "$Z2_HOSTX" ]; then
-			prot=$(z2_node_hosts)
-			cp "$Z2_HOSTX" "$Z2_HOSTX.tmp"
-			for d in $ds; do
-				printf '%s\n' "$prot" | grep -qxF "$d" && continue   # never drop a VPN-node protection
-				grep -vxF "$d" "$Z2_HOSTX.tmp" > "$Z2_HOSTX.tmp2" 2>/dev/null; mv "$Z2_HOSTX.tmp2" "$Z2_HOSTX.tmp"
-			done
-			mv "$Z2_HOSTX.tmp" "$Z2_HOSTX"
-			/etc/init.d/zapret2 reload >/dev/null 2>&1
-		fi
+		z2_unexclude_domains "$ds"
 		json_header; printf '{"ok":true}'; exit 0
 
 	elif [ "$action" = "z2autoclear" ]; then
@@ -2085,8 +2113,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		gnode=$(get_param node); pname=$(get_param name)
 		hl=$(get_param haslist | sed 's/[^01]//g'); [ -z "$hl" ] && hl=0
 		undo_push preset   # ONE undo point for the whole apply
-		printf 'pid=0\nid=%s\nname=%s\non=%s\nphase=start\ndone=0\nok=0\n' "$id" "$pname" "$on" > "$PRESET_OP"
-		setsid "$SELF" _presetapply "$id" "$on" "$gcat" "$ggeoip" "$gips" "$gnode" "$hl" "$pname" >/dev/null 2>&1 &
+		op_start "$PRESET_OP" "$id" "$pname" "$on" _presetapply "$id" "$on" "$gcat" "$ggeoip" "$gips" "$gnode" "$hl" "$pname"
 		json_header; printf '{"ok":true,"started":true}'; exit 0
 
 	elif [ "$action" = "autosync" ]; then
@@ -2369,6 +2396,7 @@ devices_json() {
 [ "$API" = "subauto" ] && { subauto_json; exit 0; }
 [ "$API" = "backupauto" ] && { backupauto_json; exit 0; }
 [ "$API" = "presetop" ] && { presetop_json; exit 0; }
+[ "$API" = "z2presetop" ] && { op_json "$Z2_PRESET_OP"; exit 0; }
 [ "$API" = "undolist" ] && { undolist_json; exit 0; }
 [ "$API" = "updatestatus" ] && { updatestatus_json; exit 0; }
 [ "$API" = "config" ] && { config_json; exit 0; }

@@ -114,7 +114,7 @@ const I18N = {
     undoBtn: "↩ Вернуть как было", undoThis: "Откатить сюда", undoLast: "Вернуть последнее изменение", redoLast: "Вернуть отменённое", undoEmpty: "Пока нет изменений для отката", undoConfirm: "Откатить к состоянию до этого изменения? Настройки обоих движков вернутся к тому моменту.",
     act_z2strat: "стратегия zapret2", act_z2quic: "тумблер QUIC", act_z2ipv6: "тумблер IPv6", act_z2autotoggle: "автообучение zapret2",
     act_preset: "пресет", presetFail: "не применилось полностью", presetBusy: "Дождись окончания текущего применения",
-    act_z2preset_on: "пресет zapret2 вкл", act_z2preset_off: "пресет zapret2 выкл", act_geosite_on: "гео-пресет вкл", act_geosite_off: "гео-пресет выкл",
+    act_z2preset: "пресет zapret2", act_z2preset_on: "пресет zapret2 вкл", act_z2preset_off: "пресет zapret2 выкл", act_geosite_on: "гео-пресет вкл", act_geosite_off: "гео-пресет выкл",
     act_preset_sync: "пресет доменов вкл", act_preset_off: "пресет доменов выкл", act_mssclamp: "MSS-clamp", act_auto: "авто-бэкап",
     z2bkTitle: "Бэкап Zapret2", z2bkHint: "Сохраняет конфиг zapret2 (стратегии, автообучение) и все хостлисты: свои домены, автосписок, исключения, пресеты. Восстановление заменяет их и перезапускает службу; если zapret2 не поднимется — автоматический откат.",
     z2bkRestoreConfirm: "Восстановить zapret2 из этого файла? Текущий конфиг и хостлисты будут заменены (перед этим — авто-снимок для отката).",
@@ -244,7 +244,7 @@ const I18N = {
     undoBtn: "↩ Undo last change", undoThis: "Revert to here", undoLast: "Undo last change", redoLast: "Redo undone change", undoEmpty: "No changes to undo yet", undoConfirm: "Revert to the state before this change? Both engines' settings return to that point.",
     act_z2strat: "zapret2 strategy", act_z2quic: "QUIC toggle", act_z2ipv6: "IPv6 toggle", act_z2autotoggle: "zapret2 auto-learn",
     act_preset: "preset", presetFail: "didn't fully apply", presetBusy: "Wait for the current apply to finish",
-    act_z2preset_on: "zapret2 preset on", act_z2preset_off: "zapret2 preset off", act_geosite_on: "geo preset on", act_geosite_off: "geo preset off",
+    act_z2preset: "zapret2 preset", act_z2preset_on: "zapret2 preset on", act_z2preset_off: "zapret2 preset off", act_geosite_on: "geo preset on", act_geosite_off: "geo preset off",
     act_preset_sync: "domain preset on", act_preset_off: "domain preset off", act_mssclamp: "MSS clamp", act_auto: "auto-backup",
     z2bkTitle: "Zapret2 backup", z2bkHint: "Saves the zapret2 config (strategies, auto-learn) and every hostlist: your domains, the auto list, exclusions, presets. Restore replaces them and restarts the service; if zapret2 fails to come up, it rolls back automatically.",
     z2bkRestoreConfirm: "Restore zapret2 from this file? The current config and hostlists will be replaced (an auto-snapshot is taken first for rollback).",
@@ -327,11 +327,11 @@ document.querySelectorAll(".tab").forEach(tb => tb.addEventListener("click", () 
   tb.classList.add("active");
   $("#view-" + tb.dataset.view).classList.add("active");
   if (tb.dataset.view === "nodes") loadNodes().then(autoPingNodes);
-  else if (tb.dataset.view === "domains") ensurePresetPoll();   // resume a preset spinner if one is applying
+  else if (tb.dataset.view === "domains") presetOp.ensure();   // resume a preset spinner if one is applying
   else if (tb.dataset.view === "mgmt") loadSvc();
   else if (tb.dataset.view === "common") { loadVersions(); loadUpdCheck(); loadBackup(); loadUndo(); }   // Общее: updates + backup
   else if (tb.dataset.view === "devices") loadDevices();
-  else if (tb.dataset.view.indexOf("z2") === 0) loadZapret2();   // any zapret2 sub-view
+  else if (tb.dataset.view.indexOf("z2") === 0) { loadZapret2(); z2PresetOp.ensure(); }   // any zapret2 sub-view
 }));
 /* top-level engine selector — shows only that engine's sub-tabs, opens the first */
 function selectEngine(eng){
@@ -489,49 +489,59 @@ function presetState(p){
   if (facets.every(f => f === "off")) return { on: false, part: false };
   return { on: true, part: true };
 }
-/* Preset apply is ATOMIC + DETACHED on the server (?api=preset_apply → both facets in one op tracked
-   in ?api=presetop). The UI shows a spinner on that one card and polls the server, so the status is
-   correct across tab switches and page reloads and a hybrid preset can't be left half-applied. */
-let presetPolling = false, presetApplyingId = null;
-function markPresetApplying(id){
-  presetApplyingId = id;
-  document.querySelectorAll("#presets .pcard").forEach(c => {
-    c.classList.toggle("applying", c.dataset.pid === id);
-    const inp = c.querySelector("input"); if (inp) inp.disabled = true;   // lock every card while one applies
-  });
-}
-function clearPresetApplying(){
-  presetApplyingId = null;
-  document.querySelectorAll("#presets .pcard").forEach(c => {
-    c.classList.remove("applying"); const inp = c.querySelector("input"); if (inp) inp.disabled = false;
-  });
-}
-async function pollPresetOp(){
-  presetPolling = true;
-  let s = null; try { s = await (await fetch("?api=presetop")).json(); } catch(e){}
-  if (s && s.running){
-    markPresetApplying(s.id);
-    setMsg($("#presetMsg"), (s.on === 1 ? t("enabling") : t("disabling")) + (s.name || "") + "…");
-    setTimeout(pollPresetOp, 1000); return;
+/* Preset applies are ATOMIC + DETACHED on the server: one op per kind, tracked in a status file the
+   UI polls (?api=presetop / ?api=z2presetop). opPoller() is the shared per-card spinner machinery —
+   the spinner survives tab switches and page reloads, and the server's crash guard ends it honestly.
+   cfg: {api, cardsSel, msg(), onDone()} */
+function opPoller(cfg){
+  const st = { polling: false, applyingId: null };
+  function mark(id){
+    st.applyingId = id;
+    document.querySelectorAll(cfg.cardsSel).forEach(c => {
+      c.classList.toggle("applying", c.dataset.pid === id);
+      const inp = c.querySelector("input"); if (inp) inp.disabled = true;   // lock every card while one applies
+    });
   }
-  presetPolling = false;
-  clearPresetApplying();
-  if (s && s.done){
-    setMsg($("#presetMsg"), s.ok === 1 ? t("done") : (t("errP") + t("presetFail")), s.ok === 1);
-    await loadDomains(); loadUndo();
+  function clear(){
+    st.applyingId = null;
+    document.querySelectorAll(cfg.cardsSel).forEach(c => {
+      c.classList.remove("applying"); const inp = c.querySelector("input"); if (inp) inp.disabled = false;
+    });
   }
+  async function poll(){
+    st.polling = true;
+    let s = null; try { s = await (await fetch("?api=" + cfg.api)).json(); } catch(e){}
+    if (s && s.running){
+      mark(s.id);
+      setMsg(cfg.msg(), (s.on === 1 ? t("enabling") : t("disabling")) + (s.name || "") + "…");
+      setTimeout(poll, 1000); return;
+    }
+    st.polling = false;
+    clear();
+    if (s && s.done){
+      setMsg(cfg.msg(), s.ok === 1 ? t("done") : (t("errP") + t("presetFail")), s.ok === 1);
+      await cfg.onDone();
+    }
+  }
+  function ensure(){ if (!st.polling) poll(); }
+  /* start a card's apply: optimistic spinner, POST, then poll (or roll the card back on refusal) */
+  async function start(id, name, wantOn, action, params, onRefused){
+    mark(id);
+    setMsg(cfg.msg(), (wantOn ? t("enabling") : t("disabling")) + name + "…");
+    let r = null; try { r = await api(action, params); } catch(e){}
+    if (r && r.ok && r.started) ensure();
+    else if (r && r.error === "busy"){ setMsg(cfg.msg(), t("presetBusy"), false); ensure(); }
+    else { clear(); setMsg(cfg.msg(), t("errP") + ((r && r.error) || "?"), false); onRefused(); }
+  }
+  return { st, mark, clear, ensure, start };
 }
-function ensurePresetPoll(){ if (!presetPolling) pollPresetOp(); }
-async function startPresetApply(p, wantOn){
-  markPresetApplying(p.id);
-  setMsg($("#presetMsg"), (wantOn ? t("enabling") : t("disabling")) + p.name + "…");
+const presetOp = opPoller({ api: "presetop", cardsSel: "#presets .pcard", msg: () => $("#presetMsg"),
+  onDone: async () => { await loadDomains(); loadUndo(); } });
+function startPresetApply(p, wantOn){
   const params = { id: p.id, on: wantOn ? 1 : 0, cat: p.geosite || "", geoip: p.geoip || "",
                    ips: (p.ipcidr || []).join(","), node: p.node || EXITG,
                    haslist: (p.domains || []).length ? 1 : 0, name: p.name };
-  let r = null; try { r = await api("preset_apply", params); } catch(e){}
-  if (r && r.ok && r.started) ensurePresetPoll();
-  else if (r && r.error === "busy"){ setMsg($("#presetMsg"), t("presetBusy"), false); ensurePresetPoll(); }
-  else { clearPresetApplying(); setMsg($("#presetMsg"), t("errP") + ((r && r.error) || "?"), false); renderPresets(); }
+  presetOp.start(p.id, p.name, wantOn, "preset_apply", params, renderPresets);
 }
 function showPresetInfo(p){
   $("#pmTitle").textContent = p.name;
@@ -574,7 +584,7 @@ function renderPresets(){
   if (PRESETS.length === 0) return;
   const box = $("#presets"); box.innerHTML = "";
   PRESETS.forEach(p => box.appendChild(presetCard(p)));
-  if (presetApplyingId) markPresetApplying(presetApplyingId);   // keep the spinner across re-renders
+  if (presetOp.st.applyingId) presetOp.mark(presetOp.st.applyingId);   // keep the spinner across re-renders
 }
 $("#pmClose").addEventListener("click", () => { $("#pmodal").hidden = true; });
 $("#pmodal").addEventListener("click", e => { if (e.target.id === "pmodal") $("#pmodal").hidden = true; });
@@ -768,7 +778,10 @@ async function loadZapret2(){
   if (!z2presetsLoaded) loadZ2Presets();   // curated bypass presets — fetch once, then re-render from cache
   loadUndo();   // a toggle here may have created an undo point — refresh the header control
 }
-/* ---- curated DPI-bypass presets (YouTube/Discord/…), applist-style like nikki's ---- */
+/* ---- curated DPI-bypass presets (YouTube/Discord/…), applist-style like nikki's.
+   Applying one is atomic + detached (z2preset_apply → ?api=z2presetop) with a per-card spinner. */
+const z2PresetOp = opPoller({ api: "z2presetop", cardsSel: "#z2presets .pcard", msg: () => $("#z2PresetMsg"),
+  onDone: async () => { z2presetsLoaded = false; await loadZ2Presets(); loadZapret2(); } });
 async function loadZ2Presets(){
   try { Z2PRESETS = await (await fetch("?api=z2presets")).json(); z2presetsLoaded = true; }
   catch(e){ Z2PRESETS = []; }
@@ -778,27 +791,20 @@ function renderZ2Presets(){
   const box = $("#z2presets"); if (!box) return; box.innerHTML = "";
   if (!Array.isArray(Z2PRESETS) || !Z2PRESETS.length){ box.innerHTML = '<span class="hint">' + t("z2NoPresets") + '</span>'; return; }
   Z2PRESETS.forEach(p => box.appendChild(z2presetCard(p)));
+  if (z2PresetOp.st.applyingId) z2PresetOp.mark(z2PresetOp.st.applyingId);   // keep the spinner across re-renders
 }
 function z2presetCard(p){
   const card = document.createElement("div");
   card.className = "pcard" + (p.active ? " on" : "");
+  card.dataset.pid = p.id;
   card.innerHTML =
     '<span class="pname">' + escH(p.name) + '</span>' +
     '<button class="pinfo" title="' + escH(t("pmShow")) + '">?</button>' +
     '<label class="sw"><input type="checkbox"' + (p.active ? " checked" : "") + '><span class="sl"></span></label>';
   card.querySelector(".pinfo").addEventListener("click", () => z2showPresetInfo(p));
-  card.querySelector("input").addEventListener("change", async e => {
-    const chk = e.target; chk.disabled = true;
-    const wantOn = chk.checked;
-    showOverlay((wantOn ? t("enabling") : t("disabling")) + p.name + "…");
-    const res = await api(wantOn ? "z2preset_on" : "z2preset_off", { id: p.id });
-    hideOverlay();
-    if (res && res.ok){ p.active = wantOn ? 1 : 0; setMsg($("#z2PresetMsg"), t("done")); }
-    else { chk.checked = !wantOn; setMsg($("#z2PresetMsg"), t("errP") + ((res && res.error) || "?"), false); }
-    chk.disabled = false;
-    renderZ2Presets();
-    loadZapret2();   // a first enable / last disable restarts zapret2 — refresh running state + counts
-  });
+  card.querySelector("input").addEventListener("change", e =>
+    z2PresetOp.start(p.id, p.name, e.target.checked, "z2preset_apply",
+                     { id: p.id, on: e.target.checked ? 1 : 0, name: p.name }, renderZ2Presets));
   return card;
 }
 function z2showPresetInfo(p){
@@ -1534,7 +1540,8 @@ $("#updAll").addEventListener("click", () => doUpdate("all"));
   // essentials first (presets is the slow fetch); drop the overlay once the Domains view is ready
   if (CAPS.nikki) await Promise.allSettled([loadDomains(), loadPresets()]);
   hideOverlay();
-  if (CAPS.nikki){ loadIps(); loadDevices(); loadAutosync(); loadNodes(); loadSvc(); ensurePresetPoll(); }
+  if (CAPS.nikki){ loadIps(); loadDevices(); loadAutosync(); loadNodes(); loadSvc(); presetOp.ensure(); }
+  if (CAPS.zapret2) z2PresetOp.ensure();   // resume a z2-preset spinner if one is applying
   loadVersions(); loadUpdCheck(); loadBackup(); loadUndo();   // one availability check per session (cached)
   // resume the log view if an update is already running (started from another tab/session)
   try { const s = await (await fetch("?api=updatestatus")).json(); if (s && s.running) pollUpdate(); } catch(e){}
