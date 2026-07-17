@@ -33,13 +33,14 @@ for f in feed.sh \
 	if $SH_CHECK -n "$TMP_JS"; then ok "$SH_CHECK -n $f"; else err "shell syntax: $f"; fi
 done
 
-# --- 2. JS syntax of the inline <script> ----------------------------------
-awk '/<script>/{f=1;next} /<\/script>/{f=0} f' "$TMP_SH" > "$TMP_JS"
-if [ -s "$TMP_JS" ]; then
-	if node --check "$TMP_JS"; then ok "node --check inline <script>"; else err "JS syntax in $CGI"; fi
-else
-	err "no inline <script> extracted from $CGI"
-fi
+# --- 2. JS syntax + HTML shell sanity --------------------------------------
+APP=luci-app-nikki-unblock/root/www/nikki-unblock
+tr -d '\r' < "$APP/app.js" > "$TMP_JS"
+if node --check "$TMP_JS"; then ok "node --check $APP/app.js"; else err "JS syntax in $APP/app.js"; fi
+for a in 'app.css?v=@VER@' 'app.js?v=@VER@'; do
+	grep -q "$a" "$APP/app.html" || err "app.html lost its cache-busted $a link"
+done
+ok "app.html references @VER@-stamped assets"
 
 # --- 3. i18n parity: ru and en must expose the same key set ---------------
 if node -e '

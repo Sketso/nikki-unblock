@@ -1,0 +1,385 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nipret</title>
+<link rel="stylesheet" href="/nikki-unblock/app.css?v=@VER@">
+</head>
+<body>
+  <div class="overlay" id="overlay" hidden>
+    <div class="ovbox"><div class="spinner"></div><div class="ovtext" id="overlayText"></div></div>
+  </div>
+  <div class="toast" id="toast" hidden>
+    <span class="toast-ic" id="toastIc"></span><span id="toastTxt"></span><span class="toast-dots" id="toastDots"></span>
+  </div>
+  <h1><span data-i18n="h1"></span>
+    <span class="hdr-tools">
+      <span class="undo-wrap" id="undoWrap" hidden>
+        <button class="undo-btn" id="undoTop" aria-haspopup="true">↩</button>
+        <div class="undo-menu" id="undoMenu"></div>
+      </span>
+      <span class="lang"><a data-lang="ru">RU</a> · <a data-lang="en">EN</a></span>
+    </span></h1>
+  <div class="banner" id="guard" hidden></div>
+  <div class="tabs tabs-top">
+    <button class="tab-top active" data-engine="nikki" data-i18n="engNikki"></button>
+    <button class="tab-top" data-engine="zapret2" data-i18n="engZapret2"></button>
+    <button class="tab-top" data-engine="common" data-i18n="engCommon"></button>
+  </div>
+  <div class="hint engine-hint" id="engineHint"></div>
+  <div class="tabs tabs-sub">
+    <button class="tab active" data-view="domains" data-engine="nikki" data-i18n="tabDomains"></button>
+    <button class="tab" data-view="ips" data-engine="nikki" data-i18n="tabIps"></button>
+    <button class="tab" data-view="devices" data-engine="nikki" data-i18n="tabDevices"></button>
+    <button class="tab" data-view="nodes" data-engine="nikki" data-i18n="tabNodes"></button>
+    <button class="tab" data-view="mgmt" data-engine="nikki" data-i18n="tabMgmt"></button>
+    <button class="tab" data-view="z2domains" data-engine="zapret2" data-i18n="z2TabDomains"></button>
+    <button class="tab" data-view="z2auto" data-engine="zapret2" data-i18n="z2TabAuto"></button>
+    <button class="tab" data-view="z2exclude" data-engine="zapret2" data-i18n="z2TabExclude"></button>
+    <button class="tab" data-view="z2svc" data-engine="zapret2" data-i18n="z2TabSvc"></button>
+    <button class="tab" data-view="common" data-engine="common" data-i18n="tabCommon"></button>
+  </div>
+
+  <!-- ================= DOMAINS ================= -->
+  <section class="view active" id="view-domains">
+    <div class="dom-layout">
+      <div class="dom-main">
+        <form class="add" id="addForm">
+          <select id="rtype" data-i18n-title="tType">
+            <option value="DOMAIN-SUFFIX" data-i18n="tSuffix"></option>
+            <option value="DOMAIN" data-i18n="tDomain"></option>
+            <option value="DOMAIN-KEYWORD" data-i18n="tKeyword"></option>
+            <option value="GEOSITE">GEOSITE</option>
+            <option value="GEOIP">GEOIP</option>
+            <option value="IP-CIDR">IP-CIDR</option>
+          </select>
+          <input id="domain" placeholder="example.com" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+          <select id="rnode" data-i18n-title="nAction">
+            <option value="UNBLOCK" data-i18n="nProxy"></option>
+            <option value="DIRECT" data-i18n="nDirect"></option>
+            <option value="REJECT" data-i18n="nReject"></option>
+          </select>
+          <button type="submit" id="addBtn" data-i18n="add"></button>
+        </form>
+
+        <details class="help">
+          <summary data-i18n="helpSummary"></summary>
+          <div class="helpbody" data-i18n-html="helpBody"></div>
+        </details>
+
+        <div class="row">
+          <button type="button" class="ghost" id="modeToggle"></button>
+          <span class="count" id="count"></span>
+        </div>
+
+        <div class="fbar">
+          <input class="flt" id="fltList" data-i18n-ph="fltPh" autocomplete="off" autocapitalize="off" spellcheck="false">
+          <label class="fall"><input type="checkbox" id="fallList"><span data-i18n="fltAll"></span></label>
+          <button type="button" class="ghost" id="fdelList" data-i18n="fltDel" disabled></button>
+        </div>
+        <ul id="list"></ul>
+
+        <div id="bulkWrap" hidden>
+          <div class="hint" data-i18n="bulkHint"></div>
+          <textarea id="bulk" spellcheck="false"></textarea>
+          <div class="row">
+            <button type="button" id="saveList" data-i18n="save"></button>
+            <button type="button" class="ghost" id="cancelList" data-i18n="cancel"></button>
+          </div>
+        </div>
+
+        <div class="msg" id="msg"></div>
+      </div>
+
+      <aside class="dom-side">
+        <h3 data-i18n="unblock"></h3>
+        <div class="presets" id="presets"><span class="hint" data-i18n="loading"></span></div>
+        <div class="msg" id="presetMsg"></div>
+
+        <div class="autosync">
+          <div class="asrow"><label class="sw"><input type="checkbox" id="autoOn"><span class="sl"></span></label> <span data-i18n="autoUpdate"></span></div>
+          <select id="autoIv">
+            <option value="1h" data-i18n="iv1h"></option>
+            <option value="6h" data-i18n="iv6h"></option>
+            <option value="12h" data-i18n="iv12h"></option>
+            <option value="24h" data-i18n="iv24h"></option>
+            <option value="weekly" data-i18n="ivWeekly"></option>
+          </select>
+          <div class="hint" data-i18n="autoHint"></div>
+          <div class="msg" id="autoMsg"></div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ================= IP EXCLUSIONS ================= -->
+  <section class="view" id="view-ips">
+    <div class="hint" data-i18n="ipHint"></div>
+    <form class="add" id="ipForm">
+      <input id="ip" placeholder="1.2.3.4  ·  1.2.3.0/24" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+      <button type="submit" id="ipBtn" data-i18n="add"></button>
+    </form>
+    <div class="msg" id="ipMsg"></div>
+    <h3><span data-i18n="exclusions"></span> <span class="count" id="ipCount"></span></h3>
+    <ul id="ipList"></ul>
+  </section>
+
+  <!-- ================= DEVICES ================= -->
+  <section class="view" id="view-devices">
+    <div class="hint" data-i18n="devHint"></div>
+    <div class="add">
+      <select id="devPick"><option value="" data-i18n="devPickDefault"></option></select>
+      <input id="devIp" placeholder="192.168.1.50" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <button type="button" id="devBtn" data-i18n="add"></button>
+    </div>
+    <div class="msg" id="devMsg"></div>
+    <h3><span data-i18n="devExcluded"></span> <span class="count" id="devCount"></span></h3>
+    <ul id="devList"></ul>
+  </section>
+
+  <!-- ================= VPN NODES ================= -->
+  <section class="view" id="view-nodes">
+    <div class="hint" data-i18n="nodesHint"></div>
+    <div id="dropzone" class="dropzone" data-i18n="nodeDrop"></div>
+    <textarea id="nodeCfg" spellcheck="false" placeholder="[Interface]…   ·   vless://…   ·   https://sub…   ·   - name: …"></textarea>
+    <form class="add" id="nodeForm">
+      <input id="nodeName" data-i18n-ph="nodeName" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <button type="submit" id="nodeBtn" data-i18n="nodeAdd"></button>
+    </form>
+    <div class="msg" id="nodeMsg"></div>
+
+    <div class="exithead">
+      <h3><span data-i18n="exitsTitle"></span></h3>
+      <div class="seg" id="nodeMode">
+        <button type="button" data-mode="fallback" data-i18n="modePriority"></button>
+        <button type="button" data-mode="urltest" data-i18n="modeAuto"></button>
+      </div>
+      <button type="button" class="ghost" id="pingAll" data-i18n="pingAll"></button>
+    </div>
+    <div class="hint" id="modeHint"></div>
+    <div class="hint" id="z2Hint" hidden></div>
+    <ul id="nodeList" class="nodelist"></ul>
+    <button type="button" class="ghost" id="migrateBtn" data-i18n="migrateRules" style="margin-top:.4rem;font-size:.8rem"></button>
+
+    <h3 id="provHead" hidden><span data-i18n="provTitle"></span></h3>
+    <ul id="provList"></ul>
+    <div class="autosync" id="subAutoRow" hidden>
+      <div class="asrow"><label class="sw"><input type="checkbox" id="subAutoOn"><span class="sl"></span></label> <span data-i18n="subAutoLabel"></span></div>
+      <select id="subAutoIv">
+        <option value="1h" data-i18n="iv1h"></option>
+        <option value="6h" data-i18n="iv6h"></option>
+        <option value="12h" data-i18n="iv12h"></option>
+        <option value="24h" data-i18n="iv24h"></option>
+        <option value="weekly" data-i18n="ivWeekly"></option>
+      </select>
+      <div class="hint" data-i18n="subAutoHint"></div>
+    </div>
+    <div class="msg" id="subMsg"></div>
+  </section>
+
+  <!-- ================= ZAPRET2 (DPI bypass) ================= -->
+  <!-- ============ ZAPRET2 · BYPASS DOMAINS ============ -->
+  <section class="view" id="view-z2domains">
+    <h3 data-i18n="z2PresetsTitle"></h3>
+    <div class="hint" data-i18n="z2PresetsHint"></div>
+    <div class="presets" id="z2presets"><span class="hint" data-i18n="loading"></span></div>
+    <div class="msg" id="z2PresetMsg"></div>
+
+    <h3 class="z2-sep"><span data-i18n="z2Domains"></span> <span class="count" id="z2UserCount"></span></h3>
+    <div class="hint" data-i18n-html="z2AddHint"></div>
+    <form class="add" id="z2Form">
+      <input id="z2Domain" placeholder="youtube.com" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+      <button type="submit" id="z2Btn" data-i18n="add"></button>
+    </form>
+    <div class="msg" id="z2DomMsg"></div>
+    <div class="fbar">
+      <input class="flt" id="fltZ2U" data-i18n-ph="fltPh" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <label class="fall"><input type="checkbox" id="fallZ2U"><span data-i18n="fltAll"></span></label>
+      <button type="button" class="ghost" id="fdelZ2U" data-i18n="fltDel" disabled></button>
+    </div>
+    <ul id="z2UserList"></ul>
+  </section>
+
+  <!-- ============ ZAPRET2 · AUTO-LEARN ============ -->
+  <section class="view" id="view-z2auto">
+    <div class="banner soft" data-i18n="z2AutoRecommend"></div>
+    <div class="svc upd">
+      <h3 data-i18n="z2AutoTitle"></h3>
+      <div class="swrow">
+        <span class="swlabel" data-i18n="z2AutoLabel"></span>
+        <label class="sw"><input type="checkbox" id="z2AutoChk"><span class="sl"></span></label>
+      </div>
+      <div class="hint" data-i18n="z2AutoHint"></div>
+      <div class="btns">
+        <button type="button" class="ghost" id="z2AutoView"><span data-i18n="z2AutoView"></span> <span class="count" id="z2AutoCount"></span></button>
+        <button type="button" class="ghost" id="z2AutoPrune" data-i18n="z2AutoPrune"></button>
+        <button type="button" class="ghost" id="z2AutoClear" data-i18n="z2AutoClear"></button>
+      </div>
+      <div class="hint" data-i18n="z2AutoPruneHint"></div>
+      <div class="fbar" id="z2AutoBar" hidden>
+        <input class="flt" id="fltZ2A" data-i18n-ph="fltPh" autocomplete="off" autocapitalize="off" spellcheck="false">
+        <label class="fall"><input type="checkbox" id="fallZ2A"><span data-i18n="fltAll"></span></label>
+        <button type="button" class="ghost" id="fdelZ2A" data-i18n="fltNoBypass" disabled></button>
+      </div>
+      <ul id="z2AutoList" hidden></ul>
+      <div class="msg" id="z2AutoMsg"></div>
+    </div>
+  </section>
+
+  <!-- ============ ZAPRET2 · EXCLUDE LIST ============ -->
+  <section class="view" id="view-z2exclude">
+    <h3><span data-i18n="z2Excluded"></span> <span class="count" id="z2ExCount"></span></h3>
+    <div class="hint" data-i18n="z2ExHint"></div>
+    <div class="fbar">
+      <input class="flt" id="fltZ2X" data-i18n-ph="fltPh" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <label class="fall"><input type="checkbox" id="fallZ2X"><span data-i18n="fltAll"></span></label>
+      <button type="button" class="ghost" id="fdelZ2X" data-i18n="fltDel" disabled></button>
+    </div>
+    <ul id="z2ExList"></ul>
+    <div class="msg" id="z2ExMsg"></div>
+  </section>
+
+  <!-- ============ ZAPRET2 · SERVICE ============ -->
+  <section class="view" id="view-z2svc">
+    <div class="banner" id="z2Health" hidden data-i18n="z2HealthWarn"></div>
+    <div class="svc">
+      <div class="swrow">
+        <span class="swlabel"><span class="dot" id="z2Dot"></span><span id="z2State">…</span></span>
+        <label class="sw"><input type="checkbox" id="z2Run"><span class="sl"></span></label>
+      </div>
+      <div class="swrow">
+        <span class="swlabel" data-i18n="svcBoot"></span>
+        <label class="sw"><input type="checkbox" id="z2Boot"><span class="sl"></span></label>
+      </div>
+      <div class="swrow">
+        <span class="swlabel" data-i18n="z2QuicLabel"></span>
+        <label class="sw"><input type="checkbox" id="z2Quic"><span class="sl"></span></label>
+      </div>
+      <div class="hint" data-i18n="z2QuicHint"></div>
+      <div class="swrow">
+        <span class="swlabel" data-i18n="z2Ipv6Label"></span>
+        <label class="sw"><input type="checkbox" id="z2Ipv6"><span class="sl"></span></label>
+      </div>
+      <div class="hint" data-i18n="z2Ipv6Hint"></div>
+      <div class="btns">
+        <button type="button" class="ghost" id="z2Restart" data-i18n="svcRestart"></button>
+        <button type="button" class="ghost" id="z2Reload" data-i18n="svcReload"></button>
+      </div>
+      <div class="msg" id="z2Msg"></div>
+    </div>
+
+    <div class="svc" id="z2StratBlock">
+      <h3 data-i18n="z2StratTitle"></h3>
+      <div class="hint" data-i18n="z2StratHint"></div>
+      <div class="strow">
+        <select id="z2Strat"></select>
+        <button type="button" id="z2StratApply" data-i18n="apply"></button>
+      </div>
+      <div class="msg" id="z2StratMsg"></div>
+    </div>
+
+    <div class="svc" id="ytBlock">
+      <h3 data-i18n="ytTitle"></h3>
+      <div class="hint" data-i18n="ytHint"></div>
+      <div class="btns"><button type="button" id="ytBtn" data-i18n="ytBtn"></button></div>
+      <div class="ytresult" id="ytResult" hidden></div>
+      <div class="msg" id="ytMsg"></div>
+    </div>
+  </section>
+
+  <!-- ================= MANAGEMENT ================= -->
+  <section class="view" id="view-mgmt">
+    <div class="svc">
+      <div class="swrow">
+        <span class="swlabel"><span class="dot" id="svcDot"></span><span id="svcState">…</span></span>
+        <label class="sw"><input type="checkbox" id="svcRun"><span class="sl"></span></label>
+      </div>
+      <div class="swrow">
+        <span class="swlabel" data-i18n="svcBoot"></span>
+        <label class="sw"><input type="checkbox" id="svcBootChk"><span class="sl"></span></label>
+      </div>
+      <div class="swrow">
+        <span class="swlabel" data-i18n="mssLabel" data-i18n-title="mssHint"></span>
+        <label class="sw"><input type="checkbox" id="mssChk"><span class="sl"></span></label>
+      </div>
+      <div class="hint" data-i18n="mssHint"></div>
+      <div class="btns">
+        <button type="button" class="ghost" id="svcRestart" data-i18n="svcRestart"></button>
+        <button type="button" class="ghost" id="svcReload" data-i18n="svcReload"></button>
+      </div>
+      <div class="msg" id="svcMsg"></div>
+    </div>
+  </section>
+
+  <!-- ================= ОБЩЕЕ (обновления + бэкап, общее для всего сервиса) ================= -->
+  <section class="view" id="view-common">
+    <div class="svc upd">
+      <h3 data-i18n="updTitle"></h3>
+      <div class="uprow"><span class="upname">Nipret</span><span class="upver" id="verSelf">…</span></div>
+      <div class="uprow"><span class="upname">nikki + mihomo</span><span class="upver" id="verNikki">…</span></div>
+      <div class="uprow"><span class="upname">GeoIP / GeoSite</span><span class="upver" id="verGeo">…</span></div>
+      <div class="uprow" id="verZ2Row" hidden><span class="upname">zapret2</span><span class="upver" id="verZ2">…</span></div>
+      <div class="btns">
+        <button type="button" class="ghost" id="updSelf" data-i18n="updSelf"></button>
+        <button type="button" class="ghost" id="updNikki" data-i18n="updNikki"></button>
+        <button type="button" class="ghost" id="updGeo" data-i18n="updGeo"></button>
+        <button type="button" class="ghost" id="updZ2" data-i18n="updZ2" hidden></button>
+        <button type="button" id="updAll" data-i18n="updAll"></button>
+      </div>
+      <pre class="uplog" id="updLog" hidden></pre>
+      <div class="msg" id="updMsg"></div>
+    </div>
+
+    <div class="svc upd">
+      <h3 data-i18n="bkTitle"></h3>
+      <div class="btns">
+        <button type="button" id="bkDownload" data-i18n="bkDownload"></button>
+        <button type="button" class="ghost" id="bkRestoreBtn" data-i18n="bkRestore"></button>
+        <input type="file" id="bkFile" accept=".gz,.tar.gz,application/gzip" hidden>
+      </div>
+      <div class="swrow">
+        <span class="swlabel" data-i18n="bkAuto"></span>
+        <label class="sw"><input type="checkbox" id="bkAutoOn"><span class="sl"></span></label>
+      </div>
+      <ul id="bkList" class="nodelist"></ul>
+      <div class="hint" data-i18n="bkHint"></div>
+      <div class="msg" id="bkMsg"></div>
+    </div>
+
+    <div class="svc upd" id="z2bkBlock" hidden>
+      <h3 data-i18n="z2bkTitle"></h3>
+      <div class="btns">
+        <button type="button" id="z2bkDownload" data-i18n="bkDownload"></button>
+        <button type="button" class="ghost" id="z2bkRestoreBtn" data-i18n="bkRestore"></button>
+        <input type="file" id="z2bkFile" accept=".gz,.tar.gz,application/gzip" hidden>
+      </div>
+      <div class="hint" data-i18n="z2bkHint"></div>
+      <div class="msg" id="z2bkMsg"></div>
+    </div>
+
+    <div class="svc upd">
+      <h3 data-i18n="rpTitle"></h3>
+      <div class="hint" data-i18n="rpHint"></div>
+      <textarea id="rpDesc" spellcheck="false" data-i18n-ph="rpPh"></textarea>
+      <label class="fall"><input type="checkbox" id="rpLogs" checked><span data-i18n="rpAttach"></span></label>
+      <div class="btns">
+        <button type="button" id="rpSend" data-i18n="rpSend"></button>
+      </div>
+      <textarea id="rpFull" spellcheck="false" readonly hidden></textarea>
+      <div class="hint" id="rpFullHint" hidden data-i18n="rpFullHint"></div>
+      <div class="msg" id="rpMsg"></div>
+    </div>
+  </section>
+
+  <!-- preset contents modal -->
+  <div class="modal" id="pmodal" hidden>
+    <div class="modal-card">
+      <div class="modal-head"><span id="pmTitle"></span><button class="mclose" id="pmClose">✕</button></div>
+      <div class="modal-body" id="pmBody"></div>
+    </div>
+  </div>
+
+<script src="/nikki-unblock/app.js?v=@VER@"></script>
+</body>
+</html>
