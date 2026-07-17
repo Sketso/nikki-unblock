@@ -11,7 +11,10 @@ SELF="/www/cgi-bin/nikki-unblock"
 CRONTAB="/etc/crontabs/root"
 CRON_TAG="# nikki-unblock-autosync"
 PRESET_CACHE="/tmp/nikki-unblock-presets.json"   # server-side cache of presets_json (applist assembly)
+IDX_CACHE="/tmp/nikki-unblock-applist-index.json" # raw applist index.json (kept for offline fallback)
 PRESET_TTL=3600                                   # 1 h; presets depend only on the applist, not router state
+OP_STALE_SECS=90                                  # crash guard: a not-done op file older than this = dead runner
+GEO_MIN_BYTES=100000                              # sanity floor for a downloaded GeoSite/GeoIP.dat
 UPD_LOG="/tmp/nikki-unblock-update.log"          # live log of the async update runner
 UPD_LOCK="/tmp/nikki-unblock-update.lock"        # holds the runner PID while an update is in progress
 UPD_SCRIPT="/tmp/nikki-unblock-update.sh"        # generated per run, executed detached (setsid)
@@ -223,35 +226,71 @@ applist_domains() {   # $1 = preset id ; prints clean domains (one per line), em
 		| awk '!seen[$0]++'
 }
 
+# Raw applist index.json with an offline fallback: fresh cache → network (caches) → stale cache.
+# Keeps preset applies working when the applist host is briefly unreachable.
+applist_index() {
+	if [ -f "$IDX_CACHE" ]; then
+		_age=$(( $(date +%s) - $(date -r "$IDX_CACHE" +%s 2>/dev/null || echo 0) ))
+		[ "$_age" -ge 0 ] && [ "$_age" -lt "$PRESET_TTL" ] && { cat "$IDX_CACHE"; return; }
+	fi
+	_b=$(curl -sf --max-time 10 "$APPLIST_URL/index.json" 2>/dev/null)
+	case "$_b" in \[?*\]) printf '%s' "$_b" > "$IDX_CACHE"; printf '%s' "$_b"; return ;; esac
+	cat "$IDX_CACHE" 2>/dev/null   # offline: a stale index beats none
+}
+
+# SINGLE decoder of an index.json entry — the display path (presets_json) and the apply path
+# (preset_apply) both resolve a preset's fields here, so the schema semantics live in ONE place and
+# the client can no longer feed the server arbitrary geosites/IPs. Sets PF_NAME PF_CAT PF_GEOIP
+# PF_IPS PF_NODE PF_HASLIST.
+preset_fields_at() {   # $1=array index $2=index.json body
+	PF_NAME=$(printf '%s' "$2" | jsonfilter -e "@[$1].name" 2>/dev/null)
+	# geosite/geoip may be a single string OR a "geosites"/"geoips" array (combo preset like "all
+	# social") — combine into one comma-separated value. Old CGIs ignore the array fields (safe).
+	_g=$(printf '%s' "$2" | jsonfilter -e "@[$1].geosite" 2>/dev/null)
+	_ga=$(printf '%s' "$2" | jsonfilter -e "@[$1].geosites[*]" 2>/dev/null | tr '\n' ',')
+	PF_CAT=$(printf '%s,%s' "$_g" "$_ga" | sed 's/,,*/,/g; s/^,//; s/,$//')
+	_g=$(printf '%s' "$2" | jsonfilter -e "@[$1].geoip" 2>/dev/null)
+	_ga=$(printf '%s' "$2" | jsonfilter -e "@[$1].geoips[*]" 2>/dev/null | tr '\n' ',')
+	PF_GEOIP=$(printf '%s,%s' "$_g" "$_ga" | sed 's/,,*/,/g; s/^,//; s/,$//')
+	PF_NODE=$(printf '%s' "$2" | jsonfilter -e "@[$1].node" 2>/dev/null); [ -z "$PF_NODE" ] && PF_NODE=PROXY
+	PF_IPS=$(printf '%s' "$2" | jsonfilter -e "@[$1].ipcidr[*]" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+	# hybrid rule: the domain list applies when there is no geosite, or when the entry sets "list": true
+	_wl=$(printf '%s' "$2" | jsonfilter -e "@[$1].list" 2>/dev/null)
+	PF_HASLIST=0; { [ -z "$PF_CAT" ] || [ -n "$_wl" ]; } && PF_HASLIST=1
+}
+preset_fields() {   # $1=id [$2=index.json body] — scan by id; 1 if the id isn't in the manifest
+	_pfidx="$2"; [ -z "$_pfidx" ] && _pfidx=$(applist_index)
+	_pfi=0
+	while :; do
+		_pfid=$(printf '%s' "$_pfidx" | jsonfilter -e "@[$_pfi].id" 2>/dev/null)
+		[ -z "$_pfid" ] && return 1
+		[ "$_pfid" = "$1" ] && break
+		_pfi=$((_pfi + 1))
+	done
+	preset_fields_at "$_pfi" "$_pfidx"
+	[ -z "$PF_NAME" ] && PF_NAME="$1"
+	return 0
+}
+
 # [{id,name,geosite,node,ipcidr[],domains[]}] — an entry may carry a geosite AND a domain list
 # (hybrid): the list is fetched when there is no geosite, or when the entry sets "list": true.
 # Prints ONLY the JSON array (no HTTP header) so the endpoint can cache the assembled body.
 presets_json() {
-	idx=$(curl -sf --max-time 10 "$APPLIST_URL/index.json" 2>/dev/null)
+	idx=$(applist_index)
 	printf '['
 	first=1; i=0
 	while :; do
 		id=$(printf '%s' "$idx" | jsonfilter -e "@[$i].id" 2>/dev/null)
 		[ -z "$id" ] && break
-		name=$(printf '%s' "$idx" | jsonfilter -e "@[$i].name" 2>/dev/null); [ -z "$name" ] && name="$id"
-		# geosite/geoip may be a single string OR a "geosites"/"geoips" array (combo preset like "all
-		# social") — combine into one comma-separated value. Old CGIs ignore the array fields (safe).
-		geo=$(printf '%s' "$idx" | jsonfilter -e "@[$i].geosite" 2>/dev/null)
-		geoarr=$(printf '%s' "$idx" | jsonfilter -e "@[$i].geosites[*]" 2>/dev/null | tr '\n' ',')
-		geo=$(printf '%s,%s' "$geo" "$geoarr" | sed 's/,,*/,/g; s/^,//; s/,$//')
-		gip=$(printf '%s' "$idx" | jsonfilter -e "@[$i].geoip" 2>/dev/null)
-		giparr=$(printf '%s' "$idx" | jsonfilter -e "@[$i].geoips[*]" 2>/dev/null | tr '\n' ',')
-		gip=$(printf '%s,%s' "$gip" "$giparr" | sed 's/,,*/,/g; s/^,//; s/,$//')
-		gnode=$(printf '%s' "$idx" | jsonfilter -e "@[$i].node" 2>/dev/null); [ -z "$gnode" ] && gnode=PROXY
-		wantlist=$(printf '%s' "$idx" | jsonfilter -e "@[$i].list" 2>/dev/null)
-		ips=$(printf '%s' "$idx" | jsonfilter -e "@[$i].ipcidr[*]" 2>/dev/null | awk '{printf "%s\"%s\"", sep, $0; sep=","}')
+		preset_fields_at "$i" "$idx"; [ -z "$PF_NAME" ] && PF_NAME="$id"
 		dom=""
-		if [ -z "$geo" ] || [ -n "$wantlist" ]; then
+		if [ "$PF_HASLIST" = 1 ]; then
 			# unified fetch + shape filter (applist_domains); quote the clean lines into JSON
 			dom=$(applist_domains "$id" | awk '{ printf "%s\"%s\"", sep, $0; sep="," }')
 		fi
+		ips=$(printf '%s' "$PF_IPS" | tr ',' '\n' | awk 'NF { printf "%s\"%s\"", sep, $0; sep="," }')
 		[ "$first" = 1 ] || printf ','; first=0
-		printf '{"id":"%s","name":"%s","geosite":"%s","geoip":"%s","node":"%s","ipcidr":[%s],"domains":[%s]}' "$id" "$name" "$geo" "$gip" "$gnode" "$ips" "$dom"
+		printf '{"id":"%s","name":"%s","geosite":"%s","geoip":"%s","node":"%s","ipcidr":[%s],"domains":[%s]}' "$id" "$PF_NAME" "$PF_CAT" "$PF_GEOIP" "$PF_NODE" "$ips" "$dom"
 		i=$((i + 1))
 	done
 	printf ']'
@@ -353,7 +392,7 @@ rules_tagged() {
 
 # cron/CLI: sync every currently-enabled domain-list preset
 sync_all() {
-	idx=$(curl -sf --max-time 10 "$APPLIST_URL/index.json" 2>/dev/null)
+	idx=$(applist_index)
 	SYNC_ADDED=0; SYNC_REMOVED=0; i=0
 	while :; do
 		id=$(printf '%s' "$idx" | jsonfilter -e "@[$i].id" 2>/dev/null)
@@ -381,11 +420,11 @@ op_json() {   # $1=file — poll JSON; reports a completion exactly once, then r
 	_pid=$(sed -n 's/^pid=//p' "$1"); _id=$(sed -n 's/^id=//p' "$1")
 	_nm=$(sed -n 's/^name=//p' "$1"); _on=$(sed -n 's/^on=//p' "$1")
 	_ph=$(sed -n 's/^phase=//p' "$1"); _dn=$(sed -n 's/^done=//p' "$1"); _okv=$(sed -n 's/^ok=//p' "$1")
-	# crash guard: not done, but a real pid that's gone, or the file has gone stale (>90s) → treat as failed
+	# crash guard: not done, but a real pid that's gone, or the file has gone stale → treat as failed
 	if [ "$_dn" != 1 ]; then
 		_dead=0; case "$_pid" in ''|*[!0-9]*|0) : ;; *) kill -0 "$_pid" 2>/dev/null || _dead=1 ;; esac
 		_age=$(( $(date +%s) - $(date -r "$1" +%s 2>/dev/null || echo 0) ))
-		{ [ "$_dead" = 1 ] || [ "$_age" -gt 90 ]; } && { _dn=1; _okv=0; }
+		{ [ "$_dead" = 1 ] || [ "$_age" -gt "$OP_STALE_SECS" ]; } && { _dn=1; _okv=0; }
 	fi
 	if [ "$_dn" = 1 ]; then
 		rm -f "$1"
@@ -588,7 +627,7 @@ update_start() {   # $1=op(self|nikki|geo|z2|all) ; 0=started 1=busy 2=bad op 3=
 			# enable geodata-mode (GEOIP uses GeoIP.dat categories) + auto-update, then refresh both DBs
 			printf 'echo ">> geo: enabling GeoIP (geodata-mode) + auto-update"\n'
 			printf 'uci -q set nikki.mixin.geoip_format=dat; uci -q set nikki.mixin.geox_auto_update=1; [ -n "$(uci -q get nikki.mixin.geox_update_interval)" ] || uci -q set nikki.mixin.geox_update_interval=168; uci -q commit nikki\n'
-			printf 'for gg in "GeoSite.dat %s" "GeoIP.dat %s"; do set -- $gg; echo ">> downloading $1"; if curl -sfL --max-time 120 -o "%s/$1.new" "$2"; then if [ "$(wc -c < "%s/$1.new")" -gt 100000 ]; then mv "%s/$1.new" "%s/$1"; echo "   $1 ok"; else echo "!! $1 too small"; rm -f "%s/$1.new"; rc=1; fi; else echo "!! $1 download failed"; rm -f "%s/$1.new"; rc=1; fi; done\n' "$GEOSITE_URL" "$GEOIP_DAT_URL" "$GEO_RUN" "$GEO_RUN" "$GEO_RUN" "$GEO_RUN" "$GEO_RUN" "$GEO_RUN"
+			printf 'for gg in "GeoSite.dat %s" "GeoIP.dat %s"; do set -- $gg; echo ">> downloading $1"; if curl -sfL --max-time 120 -o "%s/$1.new" "$2"; then if [ "$(wc -c < "%s/$1.new")" -gt %s ]; then mv "%s/$1.new" "%s/$1"; echo "   $1 ok"; else echo "!! $1 too small"; rm -f "%s/$1.new"; rc=1; fi; else echo "!! $1 download failed"; rm -f "%s/$1.new"; rc=1; fi; done\n' "$GEOSITE_URL" "$GEOIP_DAT_URL" "$GEO_RUN" "$GEO_RUN" "$GEO_MIN_BYTES" "$GEO_RUN" "$GEO_RUN" "$GEO_RUN" "$GEO_RUN"
 			printf 'echo ">> reloading nikki"; /etc/init.d/nikki reload\n' ;;
 		esac
 		case "$_op" in self|all)
@@ -1686,7 +1725,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			[ "$(get_param nosnap)" = 1 ] || undo_push "$action" ;;
 	esac
 
-	if [ "$action" = "add" ]; then
+	case "$action" in
+	add)
 		rtype=$(get_param type)
 		case "$rtype" in DOMAIN-SUFFIX|DOMAIN|DOMAIN-KEYWORD|GEOSITE|IP-CIDR|GEOIP) ;; *) rtype=DOMAIN-SUFFIX ;; esac
 		rnode=$(get_param node)
@@ -1714,7 +1754,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		fi
 		json_header; printf '{"ok":true}'; exit 0
 
-	elif [ "$action" = "addbulk" ]; then
+		;;
+	addbulk)
 		tmp="/tmp/nikki_add.$$"
 		printf '%s' "$(get_param domains)" | parse_domains > "$tmp"
 		added=0; dup=0
@@ -1727,7 +1768,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		[ "$added" -gt 0 ] && { uci commit nikki; apply_nikki; }
 		json_header; printf '{"ok":true,"added":%d,"dup":%d}' "$added" "$dup"; exit 0
 
-	elif [ "$action" = "delbulk" ]; then
+		;;
+	delbulk)
 		tmp="/tmp/nikki_del.$$"
 		printf '%s' "$(get_param domains)" | parse_domains > "$tmp"
 		removed=0
@@ -1739,7 +1781,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		[ "$removed" -gt 0 ] && { uci commit nikki; apply_nikki; }
 		json_header; printf '{"ok":true,"removed":%d}' "$removed"; exit 0
 
-	elif [ "$action" = "setall" ]; then
+		;;
+	setall)
 		want="/tmp/nikki_want.$$"; cur="/tmp/nikki_cur.$$"
 		printf '%s' "$(get_param domains)" | parse_domains > "$want"
 		i=0
@@ -1762,14 +1805,16 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		[ $((removed + added)) -gt 0 ] && { uci commit nikki; apply_nikki; }
 		json_header; printf '{"ok":true,"added":%d,"removed":%d}' "$added" "$removed"; exit 0
 
-	elif [ "$action" = "del" ]; then
+		;;
+	del)
 		idx=$(get_param idx | sed 's/[^0-9]//g')
 		[ -z "$idx" ] && { json_header; printf '{"ok":false,"error":"bad idx"}'; exit 0; }
 		uci delete "nikki.@rule[$idx]" 2>/dev/null
 		uci commit nikki; apply_nikki
 		json_header; printf '{"ok":true}'; exit 0
 
-	elif [ "$action" = "ruledelbulk" ]; then
+		;;
+	ruledelbulk)
 		# delete several rules in ONE commit; indexes must be processed descending —
 		# uci reindexes anonymous sections on delete, ascending order would shift targets
 		idxs=$(get_param idxs | tr -c '0-9' ' ' | tr ' ' '\n' | grep . | sort -rn | uniq)
@@ -1779,7 +1824,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		uci commit nikki; apply_nikki
 		json_header; printf '{"ok":true,"removed":%d}' "$n"; exit 0
 
-	elif [ "$action" = "toggle" ]; then
+		;;
+	toggle)
 		idx=$(get_param idx | sed 's/[^0-9]//g')
 		cur=$(uci -q get "nikki.@rule[$idx].enabled"); [ -z "$cur" ] && cur=1
 		[ "$cur" = 1 ] && new=0 || new=1
@@ -1787,7 +1833,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		uci commit nikki; apply_nikki
 		json_header; printf '{"ok":true}'; exit 0
 
-	elif [ "$action" = "ruledit" ]; then
+		;;
+	ruledit)
 		idx=$(get_param idx | sed 's/[^0-9]//g')
 		[ -z "$idx" ] && { json_header; printf '{"ok":false,"error":"bad idx"}'; exit 0; }
 		uci -q get "nikki.@rule[$idx]" >/dev/null 2>&1 || { json_header; printf '{"ok":false,"error":"no rule"}'; exit 0; }
@@ -1802,7 +1849,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		fi
 		json_header; printf '{"ok":true}'; exit 0
 
-	elif [ "$action" = "svc" ]; then
+		;;
+	svc)
 		op=$(get_param op)
 		case "$op" in
 			start|stop|restart|reload|enable|disable) /etc/init.d/nikki "$op" >/dev/null 2>&1 ;;
@@ -1813,7 +1861,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		booten=0; /etc/init.d/nikki enabled 2>/dev/null && booten=1
 		json_header; printf '{"ok":true,"running":%d,"boot":%d}' "$running" "$booten"; exit 0
 
-	elif [ "$action" = "update" ]; then
+		;;
+	update)
 		update_start "$(get_param op)"; rc=$?
 		json_header
 		case "$rc" in
@@ -1824,7 +1873,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		esac
 		exit 0
 
-	elif [ "$action" = "undo" ]; then
+		;;
+	undo)
 		# restore a pre-change snapshot. Jumping back to point N means every CHANGE since then is undone,
 		# so drop the chosen snapshot AND all newer ones (filenames are epoch seconds → numerically newer).
 		id=$(get_param id | tr -cd '0-9')
@@ -1845,7 +1895,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		esac
 		exit 0
 
-	elif [ "$action" = "redo" ]; then
+		;;
+	redo)
 		# re-apply the state captured just before the last undo ("undo the undo")
 		[ -f "$REDO_FILE" ] || { json_header; printf '{"ok":false,"error":"nothing to redo"}'; exit 0; }
 		snap_restore "$REDO_FILE"; rc=$?
@@ -1858,7 +1909,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		esac
 		exit 0
 
-	elif [ "$action" = "bkrestore" ]; then
+		;;
+	bkrestore)
 		# one-click restore of a rotating auto-backup (daily/weekly/monthly)
 		which=$(get_param which | tr -cd 'a-z')
 		case "$which" in daily|weekly|monthly) ;; *) json_header; printf '{"ok":false,"error":"bad name"}'; exit 0 ;; esac
@@ -1872,7 +1924,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		esac
 		exit 0
 
-	elif [ "$action" = "ipadd" ]; then
+		;;
+	ipadd)
 		ip=$(clean_ip "$(get_param ip)")
 		[ -z "$ip" ] && { json_header; printf '{"ok":false,"error":"empty ip"}'; exit 0; }
 		case "$ip" in */*) ;; *:*) ;; *) ip="$ip/32" ;; esac
@@ -1883,7 +1936,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		uci add_list "nikki.proxy.reserved_ip=$ip"; uci commit nikki; apply_nikki
 		json_header; printf '{"ok":true,"ip":"%s"}' "$ip"; exit 0
 
-	elif [ "$action" = "ipdel" ]; then
+		;;
+	ipdel)
 		ip=$(clean_ip "$(get_param ip)")
 		if [ "$(ip_is_default "$ip")" = 1 ] || node_ips | grep -qxF "$ip"; then
 			json_header; printf '{"ok":false,"error":"protected"}'; exit 0   # default range or a VPN-node IP
@@ -1891,7 +1945,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		uci del_list "nikki.proxy.reserved_ip=$ip"; uci commit nikki; apply_nikki
 		json_header; printf '{"ok":true}'; exit 0
 
-	elif [ "$action" = "devexclude" ]; then
+		;;
+	devexclude)
 		dip=$(clean_ip "$(get_param ip)" | sed 's#/.*##')   # single source IP, no CIDR
 		case "$dip" in *.*|*:*) ;; *) json_header; printf '{"ok":false,"error":"bad ip"}'; exit 0 ;; esac
 		i=0; dup=0
@@ -1909,7 +1964,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		fi
 		json_header; printf '{"ok":true,"dup":%s}' "$([ "$dup" = 1 ] && echo true || echo false)"; exit 0
 
-	elif [ "$action" = "devinclude" ]; then
+		;;
+	devinclude)
 		dip=$(clean_ip "$(get_param ip)" | sed 's#/.*##')
 		changed=0; i=0
 		while uci -q get "nikki.@lan_access_control[$i]" >/dev/null 2>&1; do
@@ -1921,7 +1977,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		[ "$changed" = 1 ] && { uci commit nikki; apply_nikki; }
 		json_header; printf '{"ok":true}'; exit 0
 
-	elif [ "$action" = "z2svc" ]; then
+		;;
+	z2svc)
 		op=$(get_param op)
 		case "$op" in
 			# On OpenWrt fw4 a bare `start` brings up nfqws2 but does NOT rebuild the desync nft rules
@@ -1936,7 +1993,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		rn=0; z2_running && rn=1; bt=0; /etc/init.d/zapret2 enabled 2>/dev/null && bt=1
 		json_header; printf '{"ok":true,"running":%d,"boot":%d}' "$rn" "$bt"; exit 0
 
-	elif [ "$action" = "z2strat" ]; then
+		;;
+	z2strat)
 		# switch the curated DPI-bypass strategy (rewrites NFQWS2_OPT) with backup + health rollback
 		id=$(printf '%s' "$(get_param id)" | tr -cd 'a-z0-9_-')
 		body=$(z2_strat_body "$id")
@@ -1955,19 +2013,22 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		/etc/init.d/zapret2 restart >/dev/null 2>&1
 		json_header; printf '{"ok":false,"error":"rejected (reverted)"}'; exit 0
 
-	elif [ "$action" = "z2quic" ]; then
+		;;
+	z2quic)
 		on=$(get_param on | tr -cd '01' | cut -c1)
 		quicblock_set "$on"
 		q=0; quicblock_on && q=1
 		json_header; printf '{"ok":true,"quic_block":%d}' "$q"; exit 0
 
-	elif [ "$action" = "z2ipv6" ]; then
+		;;
+	z2ipv6)
 		on=$(get_param on | tr -cd '01' | cut -c1)   # on=1 → DISABLE ipv6
 		ipv6_set "$on"
 		v=0; ipv6_off && v=1
 		json_header; printf '{"ok":true,"ipv6_off":%d}' "$v"; exit 0
 
-	elif [ "$action" = "z2hostadd" ]; then
+		;;
+	z2hostadd)
 		d=$(printf '%s' "$(get_param domain)" | parse_domains | head -1)
 		[ -z "$d" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
 		touch "$Z2_USER"
@@ -1975,14 +2036,16 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		echo "$d" >> "$Z2_USER"; z2_apply_hosts
 		json_header; printf '{"ok":true}'; exit 0
 
-	elif [ "$action" = "z2hostdel" ]; then
+		;;
+	z2hostdel)
 		d=$(printf '%s' "$(get_param domain)" | parse_domains | head -1)
 		if [ -n "$d" ] && [ -f "$Z2_USER" ]; then
 			grep -vxF "$d" "$Z2_USER" > "$Z2_USER.tmp" 2>/dev/null; mv "$Z2_USER.tmp" "$Z2_USER"; z2_apply_hosts
 		fi
 		json_header; printf '{"ok":true}'; exit 0
 
-	elif [ "$action" = "z2hostdelbulk" ]; then
+		;;
+	z2hostdelbulk)
 		ds=$(printf '%s' "$(get_param domains)" | parse_domains)
 		[ -z "$ds" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
 		if [ -f "$Z2_USER" ]; then
@@ -1994,7 +2057,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		fi
 		json_header; printf '{"ok":true}'; exit 0
 
-	elif [ "$action" = "z2preset_apply" ]; then
+		;;
+	z2preset_apply)
 		# atomic on/off of a z2 preset, run DETACHED and tracked in $Z2_PRESET_OP (poll ?api=z2presetop)
 		id=$(printf '%s' "$(get_param id)" | tr -cd 'a-z0-9_-')   # sanitised: no slashes/dots → no path escape
 		[ -z "$id" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
@@ -2006,7 +2070,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		op_start "$Z2_PRESET_OP" "$id" "$pname" "$on" _z2presetapply "$id" "$on" "$pname"
 		json_header; printf '{"ok":true,"started":true}'; exit 0
 
-	elif [ "$action" = "z2exclude" ] || [ "$action" = "z2excludebulk" ]; then
+		;;
+	z2exclude|z2excludebulk)
 		if [ "$action" = "z2exclude" ]; then
 			ds=$(printf '%s' "$(get_param domain)" | parse_domains | head -1)
 		else
@@ -2016,7 +2081,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		z2_exclude_domains "$ds"
 		json_header; printf '{"ok":true}'; exit 0
 
-	elif [ "$action" = "z2unexclude" ]; then
+		;;
+	z2unexclude)
 		# single-domain form reports "protected" honestly (the bulk form just skips those)
 		d=$(printf '%s' "$(get_param domain)" | parse_domains | head -1)
 		if [ -n "$d" ] && z2_node_hosts | grep -qxF "$d"; then
@@ -2025,17 +2091,20 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		[ -n "$d" ] && z2_unexclude_domains "$d"
 		json_header; printf '{"ok":true}'; exit 0
 
-	elif [ "$action" = "z2unexcludebulk" ]; then
+		;;
+	z2unexcludebulk)
 		ds=$(printf '%s' "$(get_param domains)" | parse_domains)
 		[ -z "$ds" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
 		z2_unexclude_domains "$ds"
 		json_header; printf '{"ok":true}'; exit 0
 
-	elif [ "$action" = "z2autoclear" ]; then
+		;;
+	z2autoclear)
 		: > "$Z2_AUTO" 2>/dev/null; /etc/init.d/zapret2 reload >/dev/null 2>&1
 		json_header; printf '{"ok":true}'; exit 0
 
-	elif [ "$action" = "z2autoprune" ]; then
+		;;
+	z2autoprune)
 		# drop auto-learned domains already covered (exact or by suffix) by the manual OR preset lists —
 		# e.g. once googlevideo.com is a manual/preset entry, all the learned rrX.googlevideo.com are redundant
 		before=$(z2_count "$Z2_AUTO")
@@ -2053,7 +2122,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		after=$(z2_count "$Z2_AUTO")
 		json_header; printf '{"ok":true,"removed":%d,"kept":%s}' "$((before - after))" "$after"; exit 0
 
-	elif [ "$action" = "z2setup" ]; then
+		;;
+	z2setup)
 		# first-run curated default: switch a FRESH zapret2 to static curated presets instead of the flaky
 		# autohostlist (it learns per-host, so every new googlevideo CDN fails on first contact). Guarded —
 		# runs once (setup_done flag) and only when the user hasn't configured zapret2 yet, so a real setup
@@ -2092,7 +2162,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		if [ "$fresh" = 0 ] || [ "$applied" = 1 ]; then uci set nikki-unblock.z2.setup_done=1; uci commit nikki-unblock; fi
 		json_header; printf '{"ok":true,"applied":%d}' "$applied"; exit 0
 
-	elif [ "$action" = "z2autotoggle" ]; then
+		;;
+	z2autotoggle)
 		on=$(get_param on | sed 's/[^01]//g')
 		[ -f "$Z2_CONFIG" ] || { json_header; printf '{"ok":false,"error":"no config"}'; exit 0; }
 		cp "$Z2_CONFIG" "$Z2_CONFIG.nipret.bak" 2>/dev/null
@@ -2101,33 +2172,34 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		/etc/init.d/zapret2 restart >/dev/null 2>&1
 		json_header; printf '{"ok":true,"autohostlist":%s}' "$([ "$on" = 1 ] && echo 1 || echo 0)"; exit 0
 
-	elif [ "$action" = "preset_apply" ]; then
-		# atomic on/off of a whole nikki preset (geosite + list) run DETACHED, tracked in $PRESET_OP
+		;;
+	preset_apply)
+		# atomic on/off of a whole nikki preset (geosite + list) run DETACHED, tracked in $PRESET_OP.
+		# The client sends only id+on — the schema fields are resolved server-side (preset_fields).
 		id=$(get_param id | sed 's/[^a-z0-9_-]//g')
 		[ -z "$id" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
 		preset_busy && { json_header; printf '{"ok":false,"error":"busy"}'; exit 0; }
 		on=$(get_param on | sed 's/[^01]//g'); [ -z "$on" ] && on=0
-		gcat=$(get_param cat | sed 's/[^a-z0-9._!,-]//g')
-		ggeoip=$(get_param geoip | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9,-]//g')
-		gips=$(get_param ips | sed 's#[^0-9a-fA-F.:,/]##g')
-		gnode=$(get_param node); pname=$(get_param name)
-		hl=$(get_param haslist | sed 's/[^01]//g'); [ -z "$hl" ] && hl=0
+		preset_fields "$id" || { json_header; printf '{"ok":false,"error":"unknown preset"}'; exit 0; }
 		undo_push preset   # ONE undo point for the whole apply
-		op_start "$PRESET_OP" "$id" "$pname" "$on" _presetapply "$id" "$on" "$gcat" "$ggeoip" "$gips" "$gnode" "$hl" "$pname"
+		op_start "$PRESET_OP" "$id" "$PF_NAME" "$on" _presetapply "$id" "$on" "$PF_CAT" "$PF_GEOIP" "$PF_IPS" "$PF_NODE" "$PF_HASLIST" "$PF_NAME"
 		json_header; printf '{"ok":true,"started":true}'; exit 0
 
-	elif [ "$action" = "autosync" ]; then
+		;;
+	autosync)
 		on=$(get_param on | sed 's/[^01]//g'); [ -z "$on" ] && on=0
 		iv=$(get_param interval | sed 's/[^0-9a-z]//g'); [ -z "$iv" ] && iv=6h
 		autosync_set "$on" "$iv"
 		json_header; printf '{"ok":true,"enabled":%s,"interval":"%s"}' "$([ "$on" = 1 ] && echo true || echo false)" "$iv"; exit 0
 
-	elif [ "$action" = "setlang" ]; then
+		;;
+	setlang)
 		lang=$(get_param lang | sed 's/[^a-z]//g'); case "$lang" in ru|en) ;; *) lang=ru ;; esac
 		uci set nikki-unblock.config.lang="$lang" 2>/dev/null; uci commit nikki-unblock 2>/dev/null
 		json_header; printf '{"ok":true,"lang":"%s"}' "$lang"; exit 0
 
-	elif [ "$action" = "nodeadd" ]; then
+		;;
+	nodeadd)
 		mkdir -p "$NODES_DIR" "$PROV_DIR"
 		raw=$(get_param config | sed 's/\r//g')
 		nm=$(get_param name)
@@ -2218,7 +2290,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		fi
 		json_header; printf '{"ok":true,"kind":"provider","id":"%s"}' "$pid"; exit 0
 
-	elif [ "$action" = "nodedel" ]; then
+		;;
+	nodedel)
 		id=$(get_param id | sed 's/[^a-z0-9_-]//g')
 		if [ -n "$id" ]; then
 			nm=$(grep -m1 'name:' "$NODES_DIR/$id.yaml" 2>/dev/null | sed 's/.*name:[[:space:]]*//')
@@ -2231,7 +2304,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		regen_mixin; apply_nikki
 		json_header; printf '{"ok":true}'; exit 0
 
-	elif [ "$action" = "nodecheck" ]; then
+		;;
+	nodecheck)
 		id=$(get_param id | sed 's/[^a-z0-9_-]//g')
 		rn=$(grep -m1 'name:' "$NODES_DIR/$id.yaml" 2>/dev/null | sed 's/.*name:[[:space:]]*//')
 		# fall back to the raw name param (profile nodes aren't in our store) for a live probe
@@ -2239,7 +2313,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		[ -z "$rn" ] && { json_header; printf '{"ok":false,"error":"not found"}'; exit 0; }
 		json_header; printf '{"ok":true,"delay":"%s"}' "$(mihomo_delay "$rn")"; exit 0
 
-	elif [ "$action" = "nodetoggle" ]; then
+		;;
+	nodetoggle)
 		# toggle a node (profile OR ours) on/off by NAME via the shared off-list
 		nm=$(get_param name)
 		[ -z "$nm" ] && { json_header; printf '{"ok":false,"error":"no name"}'; exit 0; }
@@ -2257,20 +2332,23 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		fi
 		json_header; printf '{"ok":true,"enabled":%s}' "$en"; exit 0
 
-	elif [ "$action" = "nodeorder" ]; then
+		;;
+	nodeorder)
 		# names = the full ordered list of exit node names, newline-separated
 		get_param names | sed 's/[[:space:]]*$//' | awk 'NF' > "$ORDER_FILE"
 		regen_mixin; apply_nikki
 		json_header; printf '{"ok":true}'; exit 0
 
-	elif [ "$action" = "nodemode" ]; then
+		;;
+	nodemode)
 		m=$(get_param mode | sed 's/[^a-z-]//g'); case "$m" in urltest|fallback) ;; *) m=fallback ;; esac
 		uci set nikki-unblock.config.node_mode="$m" 2>/dev/null; uci commit nikki-unblock 2>/dev/null
 		regen_mixin; apply_nikki; sleep 3
 		pgrep -f /usr/bin/mihomo >/dev/null || apply_nikki
 		json_header; printf '{"ok":true,"mode":"%s"}' "$m"; exit 0
 
-	elif [ "$action" = "migraterules" ]; then
+		;;
+	migraterules)
 		# move all "→ VPN" rules from the raw profile group ($BASE_GROUP) onto the managed exit group
 		regen_mixin   # make sure UNBLOCK exists before rules point at it
 		i=0; changed=0
@@ -2283,7 +2361,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		pgrep -f /usr/bin/mihomo >/dev/null || apply_nikki
 		json_header; printf '{"ok":true,"changed":%d}' "$changed"; exit 0
 
-	elif [ "$action" = "subrefresh" ]; then
+		;;
+	subrefresh)
 		sid=$(get_param id | sed 's/[^a-z0-9_-]//g')
 		[ -f "$SUBS_DIR/$sid.conf" ] || { json_header; printf '{"ok":false,"error":"no sub"}'; exit 0; }
 		url=$(grep -m1 '^url=' "$SUBS_DIR/$sid.conf" | cut -d= -f2-); snm=$(grep -m1 '^name=' "$SUBS_DIR/$sid.conf" | cut -d= -f2-)
@@ -2300,7 +2379,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		fi
 		rm -rf "$BK"; json_header; printf '{"ok":false,"error":"subscription empty/unreachable"}'; exit 0
 
-	elif [ "$action" = "subdel" ]; then
+		;;
+	subdel)
 		sid=$(get_param id | sed 's/[^a-z0-9_-]//g')
 		for oid in $(sub_owned_ids "$sid"); do
 			onm=$(node_name_of "$oid"); rm -f "$NODES_DIR/$oid.yaml" "$NODES_DIR/$oid.src"
@@ -2310,23 +2390,27 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		regen_mixin; apply_nikki
 		json_header; printf '{"ok":true}'; exit 0
 
-	elif [ "$action" = "subauto" ]; then
+		;;
+	subauto)
 		on=$(get_param on | sed 's/[^01]//g'); [ -z "$on" ] && on=0
 		iv=$(get_param interval | sed 's/[^0-9a-z]//g'); [ -z "$iv" ] && iv=24h
 		subauto_set "$on" "$iv"
 		json_header; printf '{"ok":true,"enabled":%s,"interval":"%s"}' "$([ "$on" = 1 ] && echo true || echo false)" "$iv"; exit 0
 
-	elif [ "$action" = "backupauto" ]; then
+		;;
+	backupauto)
 		on=$(get_param on | sed 's/[^01]//g'); [ -z "$on" ] && on=0
 		backupauto_set "$on"
 		[ "$on" = 1 ] && backup_auto_run   # write one immediately so there's something to restore
 		json_header; printf '{"ok":true,"enabled":%s}' "$([ "$on" = 1 ] && echo true || echo false)"; exit 0
 
-	elif [ "$action" = "mssclamp" ]; then
+		;;
+	mssclamp)
 		on=$(get_param on | sed 's/[^01]//g'); [ -z "$on" ] && on=0
 		mssclamp_set "$on"
 		json_header; printf '{"ok":true,"enabled":%s}' "$([ "$on" = 1 ] && echo true || echo false)"; exit 0
-	fi
+		;;
+	esac
 
 	json_header; printf '{"ok":false,"error":"unknown action"}'; exit 0
 fi
@@ -2377,7 +2461,7 @@ devices_json() {
 [ "$API" = "presets" ] && {
 	json_header
 	# `fresh=1` forces a rebuild (manual refresh after editing the applist).
-	case "$QUERY_STRING" in *fresh=1*) rm -f "$PRESET_CACHE" ;; esac
+	case "$QUERY_STRING" in *fresh=1*) rm -f "$PRESET_CACHE" "$IDX_CACHE" ;; esac
 	# Serve the cache if it's younger than the TTL (cold build does index.json + N .lst curls ~7 s).
 	if [ -f "$PRESET_CACHE" ]; then
 		age=$(( $(date +%s) - $(date -r "$PRESET_CACHE" +%s 2>/dev/null || echo 0) ))

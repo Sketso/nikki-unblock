@@ -538,10 +538,8 @@ function opPoller(cfg){
 const presetOp = opPoller({ api: "presetop", cardsSel: "#presets .pcard", msg: () => $("#presetMsg"),
   onDone: async () => { await loadDomains(); loadUndo(); } });
 function startPresetApply(p, wantOn){
-  const params = { id: p.id, on: wantOn ? 1 : 0, cat: p.geosite || "", geoip: p.geoip || "",
-                   ips: (p.ipcidr || []).join(","), node: p.node || EXITG,
-                   haslist: (p.domains || []).length ? 1 : 0, name: p.name };
-  presetOp.start(p.id, p.name, wantOn, "preset_apply", params, renderPresets);
+  // schema fields (geosite/ips/node/…) are resolved server-side from the applist index by id
+  presetOp.start(p.id, p.name, wantOn, "preset_apply", { id: p.id, on: wantOn ? 1 : 0 }, renderPresets);
 }
 function showPresetInfo(p){
   $("#pmTitle").textContent = p.name;
