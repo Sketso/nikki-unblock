@@ -49,7 +49,8 @@ OFF_FILE="/etc/nikki-unblock/nodes.off"        # disabled exit node names (works
 SUBS_DIR="/etc/nikki-unblock/subs"             # tracked link-subscriptions: <subid>.conf (url + name)
 SUB_TAG="# nikki-unblock-subsync"              # crontab marker for subscription auto-refresh
 BACKUP_DIR="/etc/nikki-unblock/backups"        # rotating auto-backups (daily/weekly/monthly)
-BK_TAG="# nikki-unblock-backup"                # crontab marker for auto-backup
+BK_TAG="# nikki-unblock-backup"                # crontab marker for auto-backup (combined nikki+zapret2)
+Z2BK_TAG="# nikki-unblock-z2backup"            # crontab marker for the zapret2-only auto-backup
 UNDO_DIR="/etc/nikki-unblock/undo"             # ring of pre-change snapshots for "undo last change"
 UNDO_KEEP=8                                    # how many undo points to retain
 REDO_FILE="/etc/nikki-unblock/undo/.redo.tgz"  # pre-undo state so an undo can itself be undone (redo)
@@ -97,7 +98,11 @@ clean_ip() { printf '%s' "$1" | sed 's#[^0-9a-fA-F.:/]##g'; }
 clean_mac() { printf '%s' "$1" | tr 'A-Z' 'a-z' | tr '-' ':' | sed 's#[^0-9a-f:]##g'; }
 valid_mac() { case "$1" in [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) return 0 ;; *) return 1 ;; esac; }
 
-# prints "mac<TAB>ip<TAB>name" per known LAN device, deduped by MAC (static host wins over live lease).
+# prints "mac<TAB>ip<TAB>name" per known LAN device, one row per MAC. Merges two sources: static hosts
+# (uci dhcp.@host — admin-set, nice names, but the IP can be stale / from a cloned config in a foreign
+# subnet) and the live DHCP leases (/tmp/dhcp.leases — the device's ACTUAL current address). So: name
+# prefers the static entry, IP prefers the live lease. Rows are prefixed S/L so the awk merge knows the
+# source; order follows first-seen MAC.
 # Lives here (not near devicesall_json further down) because migrate_dev_ip_to_mac() needs it before
 # the dispatcher runs, on every request until migration completes.
 lan_devices_by_mac() {
@@ -105,11 +110,20 @@ lan_devices_by_mac() {
 		j=0
 		while uci -q get "dhcp.@host[$j]" >/dev/null 2>&1; do
 			hip=$(uci -q get "dhcp.@host[$j].ip"); hmac=$(uci -q get "dhcp.@host[$j].mac"); hnm=$(uci -q get "dhcp.@host[$j].name")
-			[ -n "$hmac" ] && printf '%s\t%s\t%s\n' "$(clean_mac "$hmac")" "$hip" "$hnm"
+			[ -n "$hmac" ] && printf 'S\t%s\t%s\t%s\n' "$(clean_mac "$hmac")" "$hip" "$hnm"
 			j=$((j + 1))
 		done
-		awk '{ h=$4; if (h=="*") h=""; mac=tolower($2); if (mac!="") printf "%s\t%s\t%s\n", mac, $3, h }' /tmp/dhcp.leases 2>/dev/null
-	} | awk -F'\t' '$1!="" && !seen[$1]++'
+		awk '{ h=$4; if (h=="*") h=""; mac=tolower($2); if (mac!="") printf "L\t%s\t%s\t%s\n", mac, $3, h }' /tmp/dhcp.leases 2>/dev/null
+	} | awk -F'\t' '
+		{ src=$1; mac=$2; ip=$3; nm=$4
+		  if (!(mac in seen)) { seen[mac]=1; order[++n]=mac }
+		  # IP: a live-lease value always wins (current reality); otherwise first non-empty.
+		  if (ip != "" && (!(mac in IP) || (src == "L" && ipsrc[mac] != "L"))) { IP[mac]=ip; ipsrc[mac]=src }
+		  # name: a static value always wins (admin-chosen); otherwise first non-empty.
+		  if (nm != "" && (!(mac in NM) || (src == "S" && nmsrc[mac] != "S"))) { NM[mac]=nm; nmsrc[mac]=src }
+		}
+		END { for (i = 1; i <= n; i++) { m = order[i]; printf "%s\t%s\t%s\n", m, IP[m], NM[m] } }
+	'
 }
 
 json_header() { printf 'Status: 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n\r\n'; }
@@ -1608,6 +1622,16 @@ backup_auto_run() {
 	[ "$(date +%d)" = 01 ] && cp "$BACKUP_DIR/daily.tar.gz" "$BACKUP_DIR/monthly.tar.gz" 2>/dev/null
 	logger -t nikki-unblock "auto-backup written"
 }
+# zapret2-only rotating auto-backup (mirror of backup_auto_run). Files are prefixed z2- so they never
+# collide with the combined set. No-op if zapret2 isn't installed.
+z2_backup_auto_run() {
+	zapret2_present || return 0
+	mkdir -p "$BACKUP_DIR"
+	z2_build_backup "$BACKUP_DIR/z2-daily.tar.gz" >/dev/null 2>&1
+	[ "$(date +%u)" = 1 ]  && cp "$BACKUP_DIR/z2-daily.tar.gz" "$BACKUP_DIR/z2-weekly.tar.gz" 2>/dev/null
+	[ "$(date +%d)" = 01 ] && cp "$BACKUP_DIR/z2-daily.tar.gz" "$BACKUP_DIR/z2-monthly.tar.gz" 2>/dev/null
+	logger -t nikki-unblock "zapret2 auto-backup written"
+}
 # ---- combined snapshots + "undo last change" -------------------------------
 # A combined snapshot bundles a nikki backup (build_backup) AND a zapret2 backup (z2_build_backup)
 # plus a small meta label, so restoring it reverts BOTH engines at once. Used by the auto-backup and
@@ -1703,6 +1727,15 @@ backupauto_set() {   # $1=on(0/1)
 	uci set nikki-unblock.config.backupauto="$1" 2>/dev/null; uci commit nikki-unblock 2>/dev/null
 	touch "$CRONTAB"; sed -i "/$BK_TAG/d" "$CRONTAB"
 	if [ "$1" = 1 ]; then echo "30 4 * * * $SELF backupauto $BK_TAG" >> "$CRONTAB"; /etc/init.d/cron enable >/dev/null 2>&1; fi
+	/etc/init.d/cron restart >/dev/null 2>&1
+}
+# zapret2-only auto-backup, mirror of backupauto_set. Independent of the combined one above (which also
+# covers zapret2) — this is the per-engine parity the panel's manual backups already have. Runs 5 min
+# after the combined one to avoid a simultaneous cron burst.
+z2_backupauto_set() {   # $1=on(0/1)
+	uci set nikki-unblock.config.z2_backupauto="$1" 2>/dev/null; uci commit nikki-unblock 2>/dev/null
+	touch "$CRONTAB"; sed -i "/$Z2BK_TAG/d" "$CRONTAB"
+	if [ "$1" = 1 ]; then echo "35 4 * * * $SELF z2backupauto $Z2BK_TAG" >> "$CRONTAB"; /etc/init.d/cron enable >/dev/null 2>&1; fi
 	/etc/init.d/cron restart >/dev/null 2>&1
 }
 # ---- zapret2 backup/restore -------------------------------------------------
@@ -1834,6 +1867,19 @@ backupauto_json() {
 	done
 	printf ']}'
 }
+# same shape as backupauto_json, for the zapret2-only rotating set (z2-daily/weekly/monthly)
+z2_backupauto_json() {
+	json_header
+	en=$(uci -q get nikki-unblock.config.z2_backupauto 2>/dev/null)
+	printf '{"enabled":%s,"files":[' "$([ "$en" = 1 ] && echo true || echo false)"
+	_f=1
+	for b in daily weekly monthly; do
+		[ -f "$BACKUP_DIR/z2-$b.tar.gz" ] || continue
+		[ "$_f" = 1 ] || printf ','; _f=0
+		printf '{"name":"%s","kb":%s,"date":"%s"}' "$b" "$(( $(wc -c < "$BACKUP_DIR/z2-$b.tar.gz") / 1024 ))" "$(date -r "$BACKUP_DIR/z2-$b.tar.gz" '+%Y-%m-%d %H:%M' 2>/dev/null)"
+	done
+	printf ']}'
+}
 
 # Unified exit list as JSON — NEVER includes secrets. Shape:
 # {mode, active, nodes:[{name,kind,id,type,host,enabled,active}], providers:[{id,name,count}]}
@@ -1901,6 +1947,7 @@ nodes_json() {
 [ "$1" = "subsync" ] && { subrefresh_all; exit 0; }
 # cron/CLI: write a rotating auto-backup (daily/weekly/monthly)
 [ "$1" = "backupauto" ] && { backup_auto_run; exit 0; }
+[ "$1" = "z2backupauto" ] && { z2_backup_auto_run; exit 0; }
 # detached update runner hooks (called from the generated update script; stdout → shared update log)
 [ "$1" = "z2update" ] && { z2_run_update "$2" "$3"; exit $?; }
 # detached atomic nikki-preset apply (both facets) — status streamed to $PRESET_OP
@@ -2182,6 +2229,24 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			0) printf '{"ok":true}' ;;
 			2) printf '{"ok":false,"error":"restore broke a service (reverted)"}' ;;
 			*) printf '{"ok":false,"error":"restore had problems (code %s)"}' "$rc" ;;
+		esac
+		exit 0
+
+		;;
+	z2bkrestore)
+		# one-click restore of a rotating zapret2-only auto-backup (z2-daily/weekly/monthly)
+		which=$(get_param which | tr -cd 'a-z')
+		case "$which" in daily|weekly|monthly) ;; *) json_header; printf '{"ok":false,"error":"bad name"}'; exit 0 ;; esac
+		[ -f "$BACKUP_DIR/z2-$which.tar.gz" ] || { json_header; printf '{"ok":false,"error":"no such backup"}'; exit 0; }
+		rd="/tmp/nu-z2rrst.$$"; rm -rf "$rd"; mkdir -p "$rd"
+		tar -xzf "$BACKUP_DIR/z2-$which.tar.gz" -C "$rd" 2>/dev/null
+		z2_restore_backup "$rd"; rc=$?
+		rm -rf "$rd"
+		json_header
+		case "$rc" in
+			0) printf '{"ok":true}' ;;
+			2) printf '{"ok":false,"error":"restore broke zapret2 (reverted)"}' ;;
+			*) printf '{"ok":false,"error":"restore failed (code %s)"}' "$rc" ;;
 		esac
 		exit 0
 
@@ -2668,6 +2733,14 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		json_header; printf '{"ok":true,"enabled":%s}' "$([ "$on" = 1 ] && echo true || echo false)"; exit 0
 
 		;;
+	z2backupauto)
+		on=$(get_param on | sed 's/[^01]//g'); [ -z "$on" ] && on=0
+		zapret2_present || { json_header; printf '{"ok":false,"error":"no zapret2"}'; exit 0; }
+		z2_backupauto_set "$on"
+		[ "$on" = 1 ] && z2_backup_auto_run   # write one immediately so there's something to restore
+		json_header; printf '{"ok":true,"enabled":%s}' "$([ "$on" = 1 ] && echo true || echo false)"; exit 0
+
+		;;
 	mssclamp)
 		on=$(get_param on | sed 's/[^01]//g'); [ -z "$on" ] && on=0
 		mssclamp_set "$on"
@@ -2741,6 +2814,7 @@ devicesall_json() {
 [ "$API" = "updcheck" ] && { updcheck_json; exit 0; }
 [ "$API" = "subauto" ] && { subauto_json; exit 0; }
 [ "$API" = "backupauto" ] && { backupauto_json; exit 0; }
+[ "$API" = "z2backupauto" ] && { z2_backupauto_json; exit 0; }
 [ "$API" = "presetop" ] && { presetop_json; exit 0; }
 [ "$API" = "z2presetop" ] && { op_json "$Z2_PRESET_OP"; exit 0; }
 [ "$API" = "undolist" ] && { undolist_json; exit 0; }

@@ -46,6 +46,7 @@ const I18N = {
     ytQuicNone: "QUIC не обрабатывается и не заблокирован — видео может зависать.", ytFixQuicBlock: "Резать QUIC",
     ytIpv6On: "IPv6 включён — трафик может идти мимо обхода по IPv6.",
     ytStratHint: "Сейчас общая стратегия. Для упрямого YouTube есть заточенная.",
+    ytHintsTitle: "Не обязательно — можно улучшить",
     ytFootnote: "Если всё зелёное, а видео не грузится — попробуй стратегию «YouTube» или «Агрессивная», очисти кэш браузера и проверь в приватном окне.",
     z2HealthWarn: "Служба запущена, но правила обхода не активны — трафик идёт мимо DPI-обхода. Нажми «Перезапустить», чтобы пересобрать правила.",
     z2QuicLabel: "Резать QUIC (форсить TCP)",
@@ -185,6 +186,7 @@ const I18N = {
     ytQuicNone: "QUIC is neither handled nor blocked — video may hang.", ytFixQuicBlock: "Block QUIC",
     ytIpv6On: "IPv6 is on — traffic may bypass the desync over IPv6.",
     ytStratHint: "You're on a generic strategy. There's one tuned for stubborn YouTube.",
+    ytHintsTitle: "Optional — could be improved",
     ytFootnote: "If everything is green but video won't load — try the 'YouTube' or 'Aggressive' strategy, clear the browser cache and test in a private window.",
     z2HealthWarn: "The service is running, but the desync rules are not active — traffic is passing without the DPI bypass. Hit Restart to rebuild the rules.",
     z2QuicLabel: "Block QUIC (force TCP)",
@@ -347,7 +349,7 @@ document.querySelectorAll(".tab").forEach(tb => tb.addEventListener("click", () 
   if (tb.dataset.view === "nodes") loadNodes().then(autoPingNodes);
   else if (tb.dataset.view === "domains") presetOp.ensure();   // resume a preset spinner if one is applying
   else if (tb.dataset.view === "mgmt") loadSvc();
-  else if (tb.dataset.view === "common") { loadVersions(); loadUpdCheck(); loadBackup(); loadUndo(); }   // Общее: updates + backup
+  else if (tb.dataset.view === "common") { loadVersions(); loadUpdCheck(); loadBackup(); loadZ2Backup(); loadUndo(); }   // Общее: updates + backup
   else if (tb.dataset.view === "devices") loadDevices();
   else if (tb.dataset.view.indexOf("z2") === 0) { loadZapret2(); z2PresetOp.ensure(); }   // any zapret2 sub-view
 }));
@@ -973,39 +975,51 @@ async function ytCheck(){
   let d; try { d = await (await fetch("?api=ytdiag")).json(); } catch(e){ setMsg($("#ytMsg"), t("errP"), false); btn.disabled = false; return; }
   setMsg($("#ytMsg"), ""); btn.disabled = false;
   const box = $("#ytResult"); box.innerHTML = ""; box.hidden = false;
-  const add = (state, msg, fix) => {
-    const div = document.createElement("div"); div.className = "ytrow " + state;
-    div.innerHTML = '<span class="ytic">' + (state === "ok" ? "✓" : state === "bad" ? "✕" : state === "warn" ? "!" : "·") + '</span>' +
-                    '<span class="ytmsg">' + escH(msg) + '</span>';
-    if (fix){
-      const b = document.createElement("button"); b.className = "ghost"; b.textContent = fix.label;
+  // Two buckets: definite pass/fail checks (ok/bad) vs. optional advisories (warn/info). The advisories
+  // are non-critical nudges — with the checks green, the bypass already works — so they render under a
+  // separate "не обязательно" divider instead of looking like errors stacked on the checks.
+  const checks = [], hints = [];
+  const add = (bucket, state, msg, fix) => bucket.push({ state, msg, fix });
+  const render = (entry) => {
+    const div = document.createElement("div"); div.className = "ytrow " + entry.state;
+    div.innerHTML = '<span class="ytic">' + (entry.state === "ok" ? "✓" : entry.state === "bad" ? "✕" : entry.state === "warn" ? "!" : "·") + '</span>' +
+                    '<span class="ytmsg">' + escH(entry.msg) + '</span>';
+    if (entry.fix){
+      const b = document.createElement("button"); b.className = "ghost"; b.textContent = entry.fix.label;
       b.addEventListener("click", async () => {
         b.disabled = true; showOverlay(t("applying"));
-        try { await api(fix.action, fix.params || {}); } catch(e){}
+        try { await api(entry.fix.action, entry.fix.params || {}); } catch(e){}
         hideOverlay(); loadZapret2(); ytCheck();
       });
       div.appendChild(b);
     }
     box.appendChild(div);
   };
-  if (!d.present){ add("bad", t("ytNotInstalled")); return; }
+  if (!d.present){ render({ state: "bad", msg: t("ytNotInstalled") }); return; }
   // service health
-  if (!d.running) add("bad", t("ytNotRunning"), { label: t("ytFixStart"), action: "z2svc", params: { op: "restart" } });
-  else if (!d.desync_ok) add("bad", t("ytNoDesync"), { label: t("svcRestart"), action: "z2svc", params: { op: "restart" } });
-  else add("ok", t("ytRunning"));
+  if (!d.running) add(checks, "bad", t("ytNotRunning"), { label: t("ytFixStart"), action: "z2svc", params: { op: "restart" } });
+  else if (!d.desync_ok) add(checks, "bad", t("ytNoDesync"), { label: t("svcRestart"), action: "z2svc", params: { op: "restart" } });
+  else add(checks, "ok", t("ytRunning"));
   // googlevideo coverage
-  if (d.gv_covered) add("ok", d.gv_listed ? t("ytGvListed") : t("ytGvAuto"));
-  else add("bad", t("ytGvMissing"), { label: t("ytFixGv"), action: "z2hostadd", params: { domain: "googlevideo.com" } });
-  // QUIC
-  if (d.quic_block) add("ok", t("ytQuicBlocked"));
-  else if (d.quic_handled) add("ok", t("ytQuicHandled"));
-  else add("warn", t("ytQuicNone"), { label: t("ytFixQuicBlock"), action: "z2quic", params: { on: 1 } });
-  // IPv6 leak
-  if (!d.ipv6_off) add("warn", t("ytIpv6On"), { label: t("z2Ipv6Label"), action: "z2ipv6", params: { on: 1 } });
-  // strategy nudge if still on a generic one
+  if (d.gv_covered) add(checks, "ok", d.gv_listed ? t("ytGvListed") : t("ytGvAuto"));
+  else add(checks, "bad", t("ytGvMissing"), { label: t("ytFixGv"), action: "z2hostadd", params: { domain: "googlevideo.com" } });
+  // QUIC — a clear verdict either way, so it's a check
+  if (d.quic_block) add(checks, "ok", t("ytQuicBlocked"));
+  else if (d.quic_handled) add(checks, "ok", t("ytQuicHandled"));
+  else add(hints, "warn", t("ytQuicNone"), { label: t("ytFixQuicBlock"), action: "z2quic", params: { on: 1 } });
+  // IPv6 leak — advisory
+  if (!d.ipv6_off) add(hints, "warn", t("ytIpv6On"), { label: t("z2Ipv6Label"), action: "z2ipv6", params: { on: 1 } });
+  // strategy nudge if still on a generic one — advisory
   if (d.strategy !== "youtube" && d.strategy !== "aggressive")
-    add("warn", t("ytStratHint"), { label: t("strat_youtube"), action: "z2strat", params: { id: "youtube" } });
-  add("info", t("ytFootnote"));
+    add(hints, "warn", t("ytStratHint"), { label: t("strat_youtube"), action: "z2strat", params: { id: "youtube" } });
+  checks.forEach(render);
+  if (hints.length){
+    const sep = document.createElement("div"); sep.className = "ytsep";
+    sep.textContent = t("ytHintsTitle"); box.appendChild(sep);
+    hints.forEach(render);
+  }
+  const foot = document.createElement("div"); foot.className = "ythint"; foot.textContent = t("ytFootnote");
+  box.appendChild(foot);
 }
 $("#ytBtn").addEventListener("click", ytCheck);
 $("#z2Restart").addEventListener("click", e => z2Do("restart", e.currentTarget));
@@ -1464,6 +1478,35 @@ $("#z2bkFile").addEventListener("change", async e => {
   } catch(err){ setMsg($("#z2bkMsg"), t("errP") + err, false); }
   e.target.value = "";
 });
+async function loadZ2Backup(){
+  if (!CAPS.zapret2) return;
+  try {
+    const s = await (await fetch("?api=z2backupauto")).json();
+    $("#z2bkAutoOn").checked = !!s.enabled;
+    const ul = $("#z2bkList"); ul.innerHTML = "";
+    (s.files || []).forEach(f => {
+      const li = document.createElement("li");
+      li.innerHTML = '<span class="dom">' + escH(t("bk_" + f.name) || f.name) + '</span>' +
+        '<span class="meta">' + f.kb + ' ' + t("kb") + ' · ' + escH(f.date || "") + '</span>' +
+        '<button class="ghost" data-z2bkrestore="' + escH(f.name) + '">' + escH(t("bkRestoreRow")) + '</button>';
+      ul.appendChild(li);
+    });
+  } catch(e){}
+}
+$("#z2bkAutoOn").addEventListener("change", async e => {
+  setMsg($("#z2bkMsg"), t("applying"));
+  const res = await api("z2backupauto", { on: e.currentTarget.checked ? 1 : 0 });
+  setMsg($("#z2bkMsg"), res && res.ok ? t("done") : t("errP") + ((res && res.error) || "?"), !res || res.ok);
+  loadZ2Backup();
+});
+$("#z2bkList").addEventListener("click", async e => {
+  const b = e.target.closest("button[data-z2bkrestore]"); if (!b) return;
+  if (!confirm(t("z2bkRestoreConfirm"))) return;
+  setMsg($("#z2bkMsg"), t("bkRestoring"));
+  const res = await api("z2bkrestore", { which: b.dataset.z2bkrestore });
+  if (res && res.ok){ setMsg($("#z2bkMsg"), t("done")); loadZapret2(); }
+  else setMsg($("#z2bkMsg"), t("errP") + ((res && res.error) || "?"), false);
+});
 $("#bkRestoreBtn").addEventListener("click", () => $("#bkFile").click());
 $("#bkFile").addEventListener("change", async e => {
   const file = e.target.files[0]; if (!file){ return; }
@@ -1604,7 +1647,7 @@ $("#updAll").addEventListener("click", () => doUpdate("all"));
   if (CAPS.nikki){ loadIps(); loadAutosync(); loadNodes(); loadSvc(); presetOp.ensure(); }
   if (CAPS.zapret2) z2PresetOp.ensure();   // resume a z2-preset spinner if one is applying
   if (CAPS.nikki || CAPS.zapret2) loadDevices();
-  loadVersions(); loadUpdCheck(); loadBackup(); loadUndo();   // one availability check per session (cached)
+  loadVersions(); loadUpdCheck(); loadBackup(); loadZ2Backup(); loadUndo();   // one availability check per session (cached)
   // resume the log view if an update is already running (started from another tab/session)
   try { const s = await (await fetch("?api=updatestatus")).json(); if (s && s.running) pollUpdate(); } catch(e){}
 })();

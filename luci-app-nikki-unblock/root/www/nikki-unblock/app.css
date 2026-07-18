@@ -213,5 +213,7 @@
   .ytrow .ytmsg { flex: 1; }
   .ytrow.ok .ytic { color: #16a34a; } .ytrow.bad .ytic { color: #dc2626; } .ytrow.warn .ytic { color: #f59e0b; } .ytrow.info { opacity: .7; }
   .ytrow button { padding: .3rem .55rem; font-size: .8rem; white-space: nowrap; }
+  .ytsep { margin: .55rem 0 .1rem; padding-top: .5rem; border-top: 1px solid #8883; font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; opacity: .55; }
+  .ythint { font-size: .82rem; opacity: .6; padding: .3rem .45rem; line-height: 1.5; }
   .pmlist { list-style: none; margin: 0; padding: 0; font-family: ui-monospace, monospace; font-size: .82rem; columns: 2; column-gap: 1.2rem; }
   .pmlist li { padding: .05rem 0; border: 0; display: list-item; break-inside: avoid; }

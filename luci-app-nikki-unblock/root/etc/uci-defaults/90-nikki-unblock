@@ -51,6 +51,19 @@ if [ -f /etc/crontabs/root ] || touch /etc/crontabs/root; then
 	}
 fi
 
+# Collapse exact-duplicate crontab lines (order-preserving). Not our lines to own, but a co-installed
+# zapret v1 (leftover /etc/config/zapret) appends a `/tmp/zapret+*.log` cleanup line without dedup, so it
+# piles up (seen 19x). Identical cron lines are never intentional — they'd just run the same command
+# twice at once — so keeping one of each is safe and self-heals the crontab on every upgrade.
+if [ -f /etc/crontabs/root ]; then
+	awk '!seen[$0]++' /etc/crontabs/root > /etc/crontabs/root.dedup 2>/dev/null &&
+		! cmp -s /etc/crontabs/root /etc/crontabs/root.dedup && {
+			mv /etc/crontabs/root.dedup /etc/crontabs/root
+			/etc/init.d/cron restart >/dev/null 2>&1
+		}
+	rm -f /etc/crontabs/root.dedup 2>/dev/null
+fi
+
 # Refresh the LuCI menu/index cache so the new entry shows up.
 rm -f /tmp/luci-indexcache* 2>/dev/null
 rm -rf /tmp/luci-modulecache 2>/dev/null
