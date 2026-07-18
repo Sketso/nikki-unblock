@@ -7,12 +7,14 @@ const I18N = {
     h1: "Nipret · VPN + обход DPI",
     engNikki: "VPN (Nikki)", engZapret2: "Обход DPI (Zapret2)", engCommon: "Общее",
     modeSimple: "Простой", modeAdvanced: "Расширенный",
+    kioskTitle: "Разблокировать сайт", kioskHint: "Впиши адрес сайта, который не открывается, и нажми «Добавить» — он пойдёт через VPN. Ниже можно развернуть список добавленных и готовые наборы (YouTube, Instagram и др.). Страница доступна с любого устройства в домашней сети.",
+    kioskCopy: "Скопировать ссылку на страницу", kioskCopied: "Ссылка скопирована", kioskNoNikki: "VPN (nikki) не установлен — разблокировка через VPN недоступна.",
     engCommonHint: "Обновления сервиса и движков + резервная копия настроек — общее для всего Nipret.",
     tabCommon: "Общее",
     tabDomains: "Домены в туннель", tabIps: "IP-исключения",
     z2TabDomains: "Домены", z2TabAuto: "Автообучение", z2TabExclude: "Исключения", z2TabSvc: "Управление",
     tabDevices: "Устройства",
-    engNikkiHint: "Nikki (Mihomo) заворачивает выбранные сайты в VPN/прокси — для того, что блокируют «снаружи» (гео-блок, блок по IP): ChatGPT, Instagram, Telegram и т.п. Управляй доменами, нодами и устройствами.",
+    engNikkiHint: "Nikki (Mihomo) заворачивает выбранные сайты в VPN/прокси — для того, что блокируют «снаружи» (гео-блок, блок по IP): ChatGPT, Instagram, Telegram и т.п. Управляй доменами, нодами и устройствами. Простую страницу для добавления сайтов (можно дать любому в семье) открой по адресу «IP-роутера/unblock».",
     engZapret2Hint: "Zapret2 обходит блокировки провайдера на уровне DPI (без VPN) — для сайтов, которые режут «изнутри» (YouTube и т.п.). Управляй сервисом и списком доменов для обхода.",
     z2On: "zapret2 работает", z2Off: "zapret2 остановлен",
     z2Domains: "Свои домены", z2AddHint: "Домен, который zapret2 будет пробивать через DPI. Пиши как <code>youtube.com</code> — подходит и для поддоменов.",
@@ -149,12 +151,14 @@ const I18N = {
     h1: "Nipret · VPN + DPI-bypass",
     engNikki: "VPN (Nikki)", engZapret2: "DPI bypass (Zapret2)", engCommon: "General",
     modeSimple: "Simple", modeAdvanced: "Advanced",
+    kioskTitle: "Unblock a site", kioskHint: "Type the address of a site that won't open and hit “Add” — it will go through the VPN. Below you can expand the added list and ready-made bundles (YouTube, Instagram, etc.). This page works from any device on the home network.",
+    kioskCopy: "Copy link to this page", kioskCopied: "Link copied", kioskNoNikki: "VPN (nikki) isn't installed — VPN unblocking is unavailable.",
     engCommonHint: "Service & engine updates + config backup — shared across Nipret.",
     tabCommon: "General",
     tabDomains: "Domains via VPN", tabIps: "IP exclusions",
     z2TabDomains: "Domains", z2TabAuto: "Auto-learn", z2TabExclude: "Exclusions", z2TabSvc: "Service",
     tabDevices: "Devices",
-    engNikkiHint: "Nikki (Mihomo) routes chosen sites through a VPN/proxy — for services blocked \"from outside\" (geo-blocks, IP blocks): ChatGPT, Instagram, Telegram, etc. Manage domains, nodes and devices.",
+    engNikkiHint: "Nikki (Mihomo) routes chosen sites through a VPN/proxy — for services blocked \"from outside\" (geo-blocks, IP blocks): ChatGPT, Instagram, Telegram, etc. Manage domains, nodes and devices. A simple add-a-site page you can hand to anyone in the family is at \"router-IP/unblock\".",
     engZapret2Hint: "Zapret2 defeats ISP DPI blocking (no VPN) — for sites throttled/blocked \"from inside\" (YouTube, etc.). Control the service and the list of domains to bypass.",
     z2On: "zapret2 running", z2Off: "zapret2 stopped",
     z2Domains: "Your own domains", z2AddHint: "A domain zapret2 will push through DPI. Type it like <code>youtube.com</code> — also covers subdomains.",
@@ -1651,6 +1655,26 @@ $("#updGeo").addEventListener("click", () => doUpdate("geo"));
 $("#updZ2").addEventListener("click", () => doUpdate("z2"));
 $("#updAll").addEventListener("click", () => doUpdate("all"));
 
+/* kiosk: the /unblock page reuses this whole app but strips it to the VPN "add a site" essentials.
+   Same engine/domain/preset logic, just a minimal standalone surface for non-technical users. */
+const KIOSK = /[?&]page=unblock(\b|$)/.test(location.search);
+$("#kioskCopy") && $("#kioskCopy").addEventListener("click", () => {
+  const url = location.origin + "/unblock";
+  // navigator.clipboard needs https; over plain-http LAN fall back to execCommand on a temp textarea
+  const ta = document.createElement("textarea"); ta.value = url;
+  ta.style.position = "fixed"; ta.style.opacity = "0"; document.body.appendChild(ta); ta.focus(); ta.select();
+  let ok = false; try { ok = document.execCommand("copy"); } catch(e){}
+  document.body.removeChild(ta);
+  setMsg(null, ok ? t("kioskCopied") : url);
+});
+async function bootKiosk(){
+  document.body.classList.add("kiosk");
+  $("#kioskHead").hidden = false;
+  if (CAPS.nikki){ selectEngine("nikki"); await Promise.allSettled([loadDomains(), loadPresets()]); }
+  else $("#kioskNikkiWarn").hidden = false;
+  hideOverlay();
+}
+
 /* ---------- boot ---------- */
 (async () => {
   showOverlay(t("loading"));         // dim + spinner over the whole UI while it loads (~5 s cold)
@@ -1658,12 +1682,14 @@ $("#updAll").addEventListener("click", () => doUpdate("all"));
   try { const c = await (await fetch("?api=config")).json(); def = c.lang || "ru"; EXITG = c.exit_group || "UNBLOCK";
         CAPS = { nikki: c.nikki !== 0, zapret2: c.zapret2 !== 0 }; } catch(e){}
   try { LANG = localStorage.nikkiLang || def; } catch(e){ LANG = def; }
-  try { MODE = (localStorage.nikkiMode === "advanced") ? "advanced" : "simple"; } catch(e){ MODE = "simple"; }
+  MODE = "simple";
+  if (!KIOSK) { try { MODE = (localStorage.nikkiMode === "advanced") ? "advanced" : "simple"; } catch(e){ MODE = "simple"; } }
   document.body.classList.add(MODE === "advanced" ? "mode-advanced" : "mode-simple");
   document.querySelectorAll(".mode a").forEach(a => a.classList.toggle("active", a.dataset.mode === MODE));
   applyI18n();
   applyCaps();                       // hide the tabs/controls for whichever engine isn't installed
   setOverlay(t("loading"));
+  if (KIOSK) { await bootKiosk(); return; }
   // essentials first (presets is the slow fetch); drop the overlay once the Domains view is ready
   if (CAPS.nikki) await Promise.allSettled([loadDomains(), loadPresets()]);
   hideOverlay();

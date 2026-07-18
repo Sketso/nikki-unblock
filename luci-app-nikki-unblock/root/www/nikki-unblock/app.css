@@ -41,6 +41,14 @@
   .mode a.active { opacity: 1; font-weight: 600; text-decoration: underline; }
   /* simple mode hides every advanced control/sub-tab; advanced shows everything */
   body.mode-simple .adv { display: none !important; }
+  /* kiosk (/unblock): strip the panel to the VPN add-a-site essentials */
+  body.kiosk > h1, body.kiosk .tabs-top, body.kiosk .tabs-sub, body.kiosk .engine-hint,
+  body.kiosk #guard, body.kiosk .dom-side .autosync { display: none !important; }
+  body.kiosk #kioskHead { display: block; margin: .2rem 0 1rem; }
+  .kiosk-bar { display: flex; align-items: baseline; gap: 1rem; }
+  .kiosk-bar h2 { margin: 0; flex: 1; }
+  .kiosk-tools { display: flex; align-items: center; gap: .8rem; margin-top: .5rem; }
+  .kiosk-nikkiwarn { color: #dc2626; font-size: .85rem; }
   .undo-wrap { position: relative; }
   .undo-btn { padding: .3rem .6rem; font-size: 1rem; line-height: 1; background: #8883; color: inherit; border-radius: 8px; }
   .undo-menu { display: none; position: absolute; right: 0; top: 100%; margin-top: .35rem; z-index: 50; min-width: 15rem; max-width: 22rem;
