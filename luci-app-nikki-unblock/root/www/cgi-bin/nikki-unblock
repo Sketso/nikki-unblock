@@ -2839,9 +2839,14 @@ devicesall_json() {
 
 # ---- HTML page -------------------------------------------------------------
 # The UI lives in static files (/www/nikki-unblock/app.{html,css,js}) served by uhttpd; the CGI
-# stays the entry-point URL and stamps @VER@ (app.js mtime) into the asset links, so browsers pick
-# up fresh CSS/JS right after a self-update instead of a stale cache.
+# stays the entry-point URL and stamps @VER@ into the asset links so browsers fetch fresh CSS/JS
+# after an upgrade instead of a stale cache. @VER@ is a content hash of the two assets, NOT their
+# mtime: apk unpacks package files with mtime=epoch-0, so an mtime buster stays "0" across every
+# upgrade and the browser keeps a stale JS against the new HTML (blank UI). A content hash changes
+# whenever either asset changes — on apk, opkg, or a dev rsync alike.
 APP_DIR="/www/nikki-unblock"
 printf 'Status: 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\n\r\n'
-_v=$(date -r "$APP_DIR/app.js" +%s 2>/dev/null); [ -z "$_v" ] && _v=0
+_v=$(cat "$APP_DIR/app.js" "$APP_DIR/app.css" 2>/dev/null | md5sum 2>/dev/null | cut -c1-12)
+[ -z "$_v" ] && _v=$(( $(wc -c < "$APP_DIR/app.js" 2>/dev/null) + $(wc -c < "$APP_DIR/app.css" 2>/dev/null) ))   # fallback: size sum
+[ -z "$_v" ] && _v=0
 sed "s/@VER@/$_v/g" "$APP_DIR/app.html"
