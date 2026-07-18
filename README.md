@@ -18,12 +18,14 @@ You set it up once, then everything is buttons in your router's web panel — no
 - **Add your own sites** — send any domain through the VPN, keep it direct, or block it.
 - **Add your own VPN servers** — paste a subscription link or a `vless://` / WireGuard config; reorder
   them and let it auto-pick the fastest. Import your friends' configs too.
-- **Keep some devices off the VPN** — exclude specific devices (pick them by name) so their traffic
-  goes straight out, not through the tunnel.
+- **Per-device control** — on one Devices page, keep specific devices off the VPN and/or off the
+  DPI-bypass (or flip it: apply an engine to only the devices you pick). Matched by MAC, so an
+  exclusion survives the device's IP changing.
 - **Bypass DPI without a VPN (zapret2)** — for sites blocked "from inside" by your ISP (YouTube, etc.):
   turn zapret2 on/off and add domains to bypass with one-click **presets** (YouTube, Discord, Twitch,
   Twitter/X) or your own. Presets are the recommended replacement for "auto-learn", which often picks up junk.
-- **One control page** — start/stop each engine, update with one click, and back up your setup.
+- **One control page** — start/stop each engine, update with one click, and back up each engine
+  (manual or scheduled auto-backup).
 
 ## Two engines
 
@@ -95,7 +97,7 @@ Either way, open it in your web panel: **LuCI → Services → “nikki · Unblo
 
 ## Updating
 
-- In the app: **Manage** tab → **Update nikki-unblock** (works no matter how you installed).
+- In the app: **General** tab → **Update Nipret** (works no matter how you installed).
 - Or in the router panel: **LuCI → System → Software** — if you used Option B it's listed there; with
   Option A just re-do the upload / paste-link with the newer version.
 
@@ -103,8 +105,8 @@ Either way, open it in your web panel: **LuCI → Services → “nikki · Unblo
 
 - **A service is ON but nothing goes through the VPN.** The app shows a warning banner at the top when
   it can't find your VPN's group (it looks for one named `PROXY`, which is the default). If your VPN in
-  nikki uses a different group name, open **Manage → advanced settings** and set the group name there —
-  it's a one-time fix and the banner tells you when it's needed. Most people never touch this.
+  nikki uses a different group name, the banner shows a one-line command to set it — a one-time fix.
+  Most people never touch this.
 - **Presets won't load / “lists unavailable”.** Your router can't reach the preset list host — check the
   router's internet/DNS, or that your VPN is up.
 
