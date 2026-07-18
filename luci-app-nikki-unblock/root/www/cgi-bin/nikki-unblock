@@ -20,6 +20,9 @@ UPD_LOCK="/tmp/nikki-unblock-update.lock"        # holds the runner PID while an
 UPD_SCRIPT="/tmp/nikki-unblock-update.sh"        # generated per run, executed detached (setsid)
 PRESET_OP="/tmp/nikki-unblock-presetop"          # status of the current detached nikki-preset apply
 Z2_PRESET_OP="/tmp/nikki-unblock-z2presetop"     # status of the current detached zapret2-preset apply
+Z2_USERSTOP="/tmp/nikki-unblock-z2-userstop"     # set on a deliberate panel Stop; makes the desync watchdog
+                                                 # leave zapret2 down instead of resurrecting it (tmpfs → a
+                                                 # reboot clears it, so the boot flag decides after restart)
 # nikki-unblock isn't in an apk repo (installed from a local file), so self-update pulls the latest
 # release .apk straight from GitHub (same as feed.sh) and `apk add` upgrades it in place.
 SELF_APK="https://github.com/Sketso/nikki-unblock/releases/latest/download/luci-app-nikki-unblock.apk"
@@ -90,6 +93,24 @@ parse_domains() {
 }
 
 clean_ip() { printf '%s' "$1" | sed 's#[^0-9a-fA-F.:/]##g'; }
+
+clean_mac() { printf '%s' "$1" | tr 'A-Z' 'a-z' | tr '-' ':' | sed 's#[^0-9a-f:]##g'; }
+valid_mac() { case "$1" in [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) return 0 ;; *) return 1 ;; esac; }
+
+# prints "mac<TAB>ip<TAB>name" per known LAN device, deduped by MAC (static host wins over live lease).
+# Lives here (not near devicesall_json further down) because migrate_dev_ip_to_mac() needs it before
+# the dispatcher runs, on every request until migration completes.
+lan_devices_by_mac() {
+	{
+		j=0
+		while uci -q get "dhcp.@host[$j]" >/dev/null 2>&1; do
+			hip=$(uci -q get "dhcp.@host[$j].ip"); hmac=$(uci -q get "dhcp.@host[$j].mac"); hnm=$(uci -q get "dhcp.@host[$j].name")
+			[ -n "$hmac" ] && printf '%s\t%s\t%s\n' "$(clean_mac "$hmac")" "$hip" "$hnm"
+			j=$((j + 1))
+		done
+		awk '{ h=$4; if (h=="*") h=""; mac=tolower($2); if (mac!="") printf "%s\t%s\t%s\n", mac, $3, h }' /tmp/dhcp.leases 2>/dev/null
+	} | awk -F'\t' '$1!="" && !seen[$1]++'
+}
 
 json_header() { printf 'Status: 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n\r\n'; }
 
@@ -944,31 +965,35 @@ zapret2_present() { [ -x /etc/init.d/zapret2 ] && [ -d /opt/zapret2 ]; }
 nikki_present() { [ -x /etc/init.d/nikki ] && [ -x /usr/bin/mihomo ]; }
 
 # ---- nikki device-exclusion ordering ------------------------------------------------------
-# nikki renders lan_access_control in UCI ORDER and `redirect` is a terminal verdict, so an exclusion
-# placed after the catch-all section (the one with no `ip`) is dead code: the panel shows the device
-# as excluded while its traffic is still proxied. Anything that adds an exclusion must keep it above
-# the catch-all. Counters tell the truth — a shadowed rule stays at 0 packets.
+# nikki renders lan_access_control in UCI ORDER and `redirect`/`return` are terminal verdicts, so a
+# device section placed after the catch-all section (the one with no `mac`) is dead code: the panel
+# shows the device as selected while its traffic follows the catch-all instead. This holds regardless
+# of which way `proxy` points (exclude vs only mode) — a device section must be above the catch-all
+# either way. Counters tell the truth — a shadowed rule stays at 0 packets.
+# Identified by MAC, not IP: friends never set up DHCP reservations, so IPs drift and an IP-keyed
+# exclusion silently starts matching the wrong device (or nothing). nikki's own template already
+# supports `ether saddr` matching via the section's `mac` list — this only changes what we write.
+nikki_device_mode() { _m=$(uci -q get nikki-unblock.config.nikki_device_mode 2>/dev/null); [ "$_m" = "only" ] && printf only || printf exclude; }
 nikki_acl_catchall_idx() {
 	_i=0
 	while uci -q get "nikki.@lan_access_control[$_i]" >/dev/null 2>&1; do
-		[ -z "$(uci -q get "nikki.@lan_access_control[$_i].ip")" ] && { printf '%s' "$_i"; return 0; }
+		[ -z "$(uci -q get "nikki.@lan_access_control[$_i].mac")" ] && { printf '%s' "$_i"; return 0; }
 		_i=$((_i + 1))
 	done
 	return 1
 }
-nikki_acl_excluded_ips() {
+nikki_acl_selected_macs() {   # every panel-managed device section, either mode
 	_i=0
 	while uci -q get "nikki.@lan_access_control[$_i]" >/dev/null 2>&1; do
-		_eip=$(uci -q get "nikki.@lan_access_control[$_i].ip")
-		[ -n "$_eip" ] && [ "$(uci -q get "nikki.@lan_access_control[$_i].proxy")" = 0 ] && printf '%s\n' "$_eip"
+		_m=$(uci -q get "nikki.@lan_access_control[$_i].mac")
+		[ -n "$_m" ] && printf '%s\n' "$_m"
 		_i=$((_i + 1))
 	done
 }
-nikki_acl_idx_of() {   # $1 = ip → index of that exclusion section
+nikki_acl_idx_of() {   # $1 = mac → index of that device section (mode-agnostic)
 	_i=0
 	while uci -q get "nikki.@lan_access_control[$_i]" >/dev/null 2>&1; do
-		[ "$(uci -q get "nikki.@lan_access_control[$_i].ip")" = "$1" ] &&
-			[ "$(uci -q get "nikki.@lan_access_control[$_i].proxy")" = 0 ] && { printf '%s' "$_i"; return 0; }
+		[ "$(uci -q get "nikki.@lan_access_control[$_i].mac")" = "$1" ] && { printf '%s' "$_i"; return 0; }
 		_i=$((_i + 1))
 	done
 	return 1
@@ -976,34 +1001,76 @@ nikki_acl_idx_of() {   # $1 = ip → index of that exclusion section
 # 0 = moved something (caller must commit), 1 = already correct. Also self-heals installs where an
 # older version appended exclusions after the catch-all.
 nikki_acl_fix_order() {
-	_cat=$(nikki_acl_catchall_idx) || return 1   # no catch-all → nothing can shadow an exclusion
+	_cat=$(nikki_acl_catchall_idx) || return 1   # no catch-all → nothing can shadow a device section
 	_i=$((_cat + 1)); _need=0; _g=0
 	while uci -q get "nikki.@lan_access_control[$_i]" >/dev/null 2>&1; do
 		_g=$((_g + 1)); [ "$_g" -gt 64 ] && break   # cap: never spin on a malformed config
-		[ -n "$(uci -q get "nikki.@lan_access_control[$_i].ip")" ] &&
-			[ "$(uci -q get "nikki.@lan_access_control[$_i].proxy")" = 0 ] && { _need=1; break; }
+		[ -n "$(uci -q get "nikki.@lan_access_control[$_i].mac")" ] && { _need=1; break; }
 		_i=$((_i + 1))
 	done
 	[ "$_need" = 0 ] && return 1
-	# Reorder by IP, not by index — each reorder shifts everything after it.
+	# Reorder by MAC, not by index — each reorder shifts everything after it.
 	_g=0
-	for _eip in $(nikki_acl_excluded_ips); do
+	for _m in $(nikki_acl_selected_macs); do
 		_g=$((_g + 1)); [ "$_g" -gt 64 ] && break
-		_idx=$(nikki_acl_idx_of "$_eip") || continue
+		_idx=$(nikki_acl_idx_of "$_m") || continue
 		uci reorder "nikki.@lan_access_control[$_idx]=0" >/dev/null 2>&1
 	done
 	return 0
 }
+nikki_acl_ensure_catchall() {   # defensive: a fresh/edge-case install with zero lan_access_control sections
+	nikki_acl_catchall_idx >/dev/null 2>&1 && return 0
+	uci add nikki lan_access_control >/dev/null
+	uci set "nikki.@lan_access_control[-1].dns=0"
+	uci set "nikki.@lan_access_control[-1].enabled=1"
+	uci set "nikki.@lan_access_control[-1].proxy=1"   # overwritten by nikki_acl_apply_mode right after
+}
+# Rewrite the catch-all's proxy AND every device section's proxy to match $1 (exclude|only). A mode
+# flip isn't a per-section bit-invert — it's "what does everyone-not-listed get" vs "what do the
+# listed devices get", so both ends are derived fresh from the mode every time.
+nikki_acl_apply_mode() {
+	_catchall_pv=1; _dev_pv=0
+	[ "$1" = "only" ] && { _catchall_pv=0; _dev_pv=1; }
+	nikki_acl_ensure_catchall
+	_cat=$(nikki_acl_catchall_idx) && uci set "nikki.@lan_access_control[$_cat].proxy=$_catchall_pv"
+	_i=0
+	while uci -q get "nikki.@lan_access_control[$_i]" >/dev/null 2>&1; do
+		[ -n "$(uci -q get "nikki.@lan_access_control[$_i].mac")" ] &&
+			uci set "nikki.@lan_access_control[$_i].proxy=$_dev_pv"
+		_i=$((_i + 1))
+	done
+}
+# Replace ALL device sections with exactly $1 (space-separated MAC list) — the panel's Apply button
+# commits the whole checked/unchecked table state in one shot, not one request per checkbox, so this
+# is a full-list rebuild rather than an add/remove pair. proxy is set by nikki_acl_apply_mode right
+# after, called together with this from the same request.
+nikki_acl_rebuild() {
+	_i=0
+	while uci -q get "nikki.@lan_access_control[$_i]" >/dev/null 2>&1; do
+		if [ -n "$(uci -q get "nikki.@lan_access_control[$_i].mac")" ]; then
+			uci delete "nikki.@lan_access_control[$_i]"; _i=0; continue   # indices shift → rescan
+		fi
+		_i=$((_i + 1))
+	done
+	for _m in $1; do
+		uci add nikki lan_access_control >/dev/null
+		uci set "nikki.@lan_access_control[-1].mac=$_m"
+		uci set "nikki.@lan_access_control[-1].dns=0"
+		uci set "nikki.@lan_access_control[-1].enabled=1"
+	done
+}
 
-# ---- per-client zapret2 bypass (keep a device's traffic OFF the desync) --------------------
+# ---- per-client zapret2 bypass (keep a device's traffic OFF — or, in 'only' mode, ON — the desync) -
 # zapret2 CANNOT filter by client on its own: its queue hook sits at postrouting srcnat+1 — AFTER NAT —
 # so every LAN source IP is already rewritten to the WAN address by then, and MODE_FILTER=hostlist means
 # nfqws2 decides purely by SNI, whoever sent it. (The @zapret_clients set some setups carry only gates a
 # QUIC block, never the desync.) The one usable seam is DESYNC_MARK: zapret2 skips any packet already
 # carrying it ("generated by nfqws2, don't touch"). So we mark the client in prerouting — BEFORE NAT,
-# where the source IP is still visible — and zapret2 leaves that traffic alone.
+# where the source IP/MAC are still visible — and zapret2 leaves that traffic alone.
+# Identified by MAC for the same reason as nikki's side (see above) — IP drifts without a reservation.
 Z2_BYPASS_HOOK="/opt/zapret2/init.d/openwrt/custom.d/50-nipret-bypass"
-z2_bypass_ips() { uci -q get nikki-unblock.config.z2_bypass_ip 2>/dev/null; }
+z2_bypass_macs() { uci -q get nikki-unblock.config.z2_bypass_mac 2>/dev/null; }
+z2_device_mode() { _m=$(uci -q get nikki-unblock.config.z2_device_mode 2>/dev/null); [ "$_m" = "only" ] && printf only || printf exclude; }
 # DESYNC_MARK belongs to zapret2, not to us — read it instead of hardcoding 0x40000000, so an upstream
 # change turns into a wrong-but-visible mark rather than a silently dead bypass.
 z2_desync_mark() {
@@ -1011,30 +1078,47 @@ z2_desync_mark() {
 	[ -n "$_m" ] && printf '%s' "$_m" || printf '0x40000000'
 }
 # zapret2 re-runs custom.d on every firewall apply (so: on boot, and after any restart), and calls the
-# _flush half on stop. The hook reads the IP list from UCI itself — one source of truth, no generated
-# copy to drift.
+# _flush half on stop. The hook reads the MAC list AND the mode from UCI itself — one source of truth,
+# no generated copy to drift, and it must be self-contained since zapret2 invokes this function directly
+# on boot/restart, when our own CGI process (and any env var it could have set) is long gone.
 z2_bypass_write_hook() {
 	zapret2_present || return 1
 	[ -d "${Z2_BYPASS_HOOK%/*}" ] || return 1
 	cat > "$Z2_BYPASS_HOOK" <<'NIPRET_EOF'
-# Managed by Nipret — do not edit by hand; regenerated on every device add/remove.
-# Marks a bypassed client's traffic with DESYNC_MARK in prerouting (pre-NAT, where the source IP is
-# still visible) so zapret2's postnat hook skips it. zapret2 can't filter by client itself: its queue
-# runs after NAT and nfqws2 matches by SNI only. $DESYNC_MARK comes from zapret2's own environment.
+# Managed by Nipret — do not edit by hand; regenerated on every device add/remove/mode change.
+# Marks a client's traffic with DESYNC_MARK in prerouting (pre-NAT) so zapret2's postnat hook skips it.
+# Two modes, read live from UCI (not baked in — zapret2 itself re-runs this on boot/restart):
+#   exclude: listed MACs bypass zapret2, everyone else is desynced — the original/default behavior.
+#   only:    ONLY listed MACs get desynced, everyone else bypasses — needs `!=` on the set, which is
+#            why iifname is mandatory below: without it, `!=` also matches WAN-inbound response
+#            traffic (no LAN MAC ever equals a client MAC there), silently killing desync router-wide.
 zapret_custom_firewall_nft()
 {
-	local ip n=0
+	local mac n=0 mode
+	mode=$(uci -q get nikki-unblock.config.z2_device_mode 2>/dev/null); [ "$mode" = "only" ] || mode=exclude
+	# Full rebuild every time, not add+flush: nft refuses to redeclare an existing set with a different
+	# type (`ipv4_addr` from a pre-MAC install), and add/element into a mistyped set fails silently
+	# under 2>/dev/null — the table would go quietly inert on any upgrade. Deleting first makes the
+	# set/chain types unconditionally match this hook's version.
+	nft delete table inet nipret_bypass 2>/dev/null
 	nft add table inet nipret_bypass 2>/dev/null || return 0
-	nft add set inet nipret_bypass bypass_clients '{ type ipv4_addr; }' 2>/dev/null
-	nft flush set inet nipret_bypass bypass_clients 2>/dev/null
-	for ip in $(uci -q get nikki-unblock.config.z2_bypass_ip 2>/dev/null); do
-		nft add element inet nipret_bypass bypass_clients "{ $ip }" 2>/dev/null && n=$((n + 1))
+	nft add set inet nipret_bypass bypass_clients '{ type ether_addr; }' 2>/dev/null
+	for mac in $(uci -q get nikki-unblock.config.z2_bypass_mac 2>/dev/null); do
+		nft add element inet nipret_bypass bypass_clients "{ $mac }" 2>/dev/null && n=$((n + 1))
 	done
 	nft add chain inet nipret_bypass prerouting '{ type filter hook prerouting priority -150; policy accept; }' 2>/dev/null
-	nft flush chain inet nipret_bypass prerouting 2>/dev/null
-	[ "$n" = 0 ] && return 0   # empty set: leave the table bare rather than match nothing every packet
-	nft add rule inet nipret_bypass prerouting ip saddr @bypass_clients \
-		meta mark set meta mark or "$DESYNC_MARK" 2>/dev/null
+	# Empty list means "mark nobody" in BOTH modes: exclude has nothing to bypass; only with zero
+	# selected devices means the allowlist is empty, so zapret2 must protect everyone — never render a
+	# bare `!=`, which on an empty set is vacuously true for every packet (would mark all LAN traffic
+	# bypassed and silently turn desync off network-wide).
+	[ "$n" = 0 ] && return 0
+	if [ "$mode" = "only" ]; then
+		nft add rule inet nipret_bypass prerouting iifname "br-lan" ether saddr != @bypass_clients \
+			meta mark set meta mark or "$DESYNC_MARK" 2>/dev/null
+	else
+		nft add rule inet nipret_bypass prerouting iifname "br-lan" ether saddr @bypass_clients \
+			meta mark set meta mark or "$DESYNC_MARK" 2>/dev/null
+	fi
 	return 0
 }
 zapret_custom_firewall_nft_flush()
@@ -1054,6 +1138,55 @@ z2_bypass_apply() {
 	DESYNC_MARK=$(z2_desync_mark)
 	. "$Z2_BYPASS_HOOK" 2>/dev/null || return 1
 	zapret_custom_firewall_nft >/dev/null 2>&1
+	return 0
+}
+
+# ---- one-time migration: IP-keyed device selections → MAC-keyed --------------------------------
+# Pre-v2.11 installs identified devices by IP (nikki lan_access_control.ip, nikki-unblock's
+# z2_bypass_ip). Resolve each stored IP to its CURRENT MAC via the live DHCP snapshot and rewrite in
+# place; an entry that can't be resolved (device offline, no reservation, never seen since) is dropped
+# rather than kept as a dangling IP — after migration the invariant is "only .mac/z2_bypass_mac exist",
+# no mixed state. Gated by dev_mac_migrated so this is a single cheap `uci get` on every later request.
+migrate_dev_ip_to_mac() {
+	[ "$(uci -q get nikki-unblock.config.dev_mac_migrated 2>/dev/null)" = 1 ] && return 0
+	_dt="/tmp/nu-migrate.$$"; lan_devices_by_mac > "$_dt" 2>/dev/null
+	_changed=0; _i=0
+	while uci -q get "nikki.@lan_access_control[$_i]" >/dev/null 2>&1; do
+		_oip=$(uci -q get "nikki.@lan_access_control[$_i].ip")
+		if [ -n "$_oip" ]; then
+			_m=$(awk -F'\t' -v ip="$_oip" '$2==ip{print $1; exit}' "$_dt")
+			if [ -n "$_m" ]; then
+				uci set "nikki.@lan_access_control[$_i].mac=$_m"; uci delete "nikki.@lan_access_control[$_i].ip" 2>/dev/null
+				logger -t nikki-unblock "migrate: nikki device $_oip -> $_m"
+				_i=$((_i + 1))
+			else
+				uci delete "nikki.@lan_access_control[$_i]"
+				logger -t nikki-unblock "migrate: dropped unresolvable nikki device $_oip (no current lease)"
+				_i=0; continue   # indices shift after delete → rescan, same pattern as nikkidevoff
+			fi
+			_changed=1
+		else
+			_i=$((_i + 1))
+		fi
+	done
+	[ "$_changed" = 1 ] && uci commit nikki
+	_zchanged=0
+	for _oip in $(uci -q get nikki-unblock.config.z2_bypass_ip 2>/dev/null); do
+		_m=$(awk -F'\t' -v ip="$_oip" '$2==ip{print $1; exit}' "$_dt")
+		if [ -n "$_m" ]; then
+			uci add_list "nikki-unblock.config.z2_bypass_mac=$_m"; logger -t nikki-unblock "migrate: zapret2 device $_oip -> $_m"
+		else
+			logger -t nikki-unblock "migrate: dropped unresolvable zapret2 device $_oip (no current lease)"
+		fi
+		_zchanged=1
+	done
+	if [ "$_zchanged" = 1 ]; then
+		uci delete nikki-unblock.config.z2_bypass_ip 2>/dev/null; uci commit nikki-unblock
+		zapret2_present && { z2_bypass_write_hook; z2_bypass_apply; }
+	fi
+	rm -f "$_dt"
+	uci set nikki-unblock.config.dev_mac_migrated=1; uci commit nikki-unblock
+	[ "$_changed" = 1 ] && nikki_present && { nikki_acl_fix_order; apply_nikki; }
 	return 0
 }
 # resolve a host to IPv4(s); if it's already an IP, echo it as-is
@@ -1089,12 +1222,24 @@ protect_all_nodes() {
 }
 
 # ---- zapret2 management (feature #1) ----------------------------------------
-z2_running() { pgrep -f nfqws2 >/dev/null 2>&1; }
+# Detect the daemon via procd's pidfiles, NOT `pgrep -f nfqws2`: the latter matches the full command
+# line, so it false-positives on any shell that merely mentions the nfqws2 path (zapret2's own fw
+# teardown scripts, this CGI, the watchdog) — which made a stopped service read as "running". procd
+# writes /var/run/nfqws2_<N>.pid per daemon and removes them on stop, so a live pid there is the truth.
+z2_daemon_pid() {   # echoes the first live nfqws2 daemon PID, empty if none
+	for _pf in /var/run/nfqws2_*.pid; do
+		[ -e "$_pf" ] || continue
+		_p=$(cat "$_pf" 2>/dev/null)
+		[ -n "$_p" ] && [ -d "/proc/$_p" ] && { printf '%s' "$_p"; return 0; }
+	done
+	return 1
+}
+z2_running() { z2_daemon_pid >/dev/null 2>&1; }
 z2_autohostlist() { grep -qE '^[[:space:]]*MODE_FILTER=["'\'']?autohostlist' "$Z2_CONFIG" 2>/dev/null; }
 # Adding a domain to the user hostlist: reload (SIGHUP) if the running daemon already references it,
 # else restart to wire --hostlist= into its args (the file didn't exist at launch). See list.sh.
 z2_apply_hosts() {
-	_p=$(pgrep -f nfqws2 2>/dev/null | head -1)
+	_p=$(z2_daemon_pid)
 	if [ -n "$_p" ] && tr '\000' '\n' < "/proc/$_p/cmdline" 2>/dev/null | grep -qF "$Z2_USER"; then
 		/etc/init.d/zapret2 reload >/dev/null 2>&1
 	else
@@ -1104,7 +1249,7 @@ z2_apply_hosts() {
 # apply Z2_MAIN: reload if it's already wired into the running nfqws2; restart if it was just created or
 # removed (its --hostlist= arg set changes, which only takes effect on a full restart).
 z2_apply_main() {
-	_p=$(pgrep -f nfqws2 2>/dev/null | head -1)
+	_p=$(z2_daemon_pid)
 	if [ -f "$Z2_MAIN" ] && [ -n "$_p" ] && tr '\000' '\n' < "/proc/$_p/cmdline" 2>/dev/null | grep -qF "$Z2_MAIN"; then
 		/etc/init.d/zapret2 reload >/dev/null 2>&1
 	else
@@ -1210,7 +1355,7 @@ z2_list_json() {
 # bypassing") — same check as the watchdog: the zapret2 postnat chain must queue to nfqws2
 z2_desync_ok() {
 	[ "$(nft list chain inet zapret2 postnat 2>/dev/null | grep -c queue)" -gt 0 ] \
-		&& pgrep -f nfqws2 >/dev/null 2>&1
+		&& z2_running
 }
 # installed zapret2 version, e.g. "v1.0.2" (from the nfqws2 binary itself)
 z2_cur_ver() {
@@ -1602,7 +1747,7 @@ z2_restore_backup() {
 	}
 	_z2_apply "$1"
 	/etc/init.d/zapret2 restart >/dev/null 2>&1; sleep 3
-	if ! pgrep -f nfqws2 >/dev/null 2>&1; then
+	if ! z2_running; then
 		_pr="/tmp/nu-z2pr.$$"; rm -rf "$_pr"; mkdir -p "$_pr"; tar -xzf /tmp/nu-z2-prerestore.tar.gz -C "$_pr" 2>/dev/null
 		_z2_apply "$_pr"; /etc/init.d/zapret2 restart >/dev/null 2>&1; rm -rf "$_pr"
 		return 2
@@ -1775,6 +1920,8 @@ NIKKI_PRESNAP="/tmp/nu-preupd-nikki.tgz"
 
 # ---- API -------------------------------------------------------------------
 
+migrate_dev_ip_to_mac
+
 API=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^api=' | head -1 | cut -d= -f2-)
 
 # ---- backup download (GET): stream the tar.gz with attachment headers ------
@@ -1835,7 +1982,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 	# nosnap=1 lets a multi-step UI action (e.g. a hybrid preset = geosite + list) skip the 2nd+ snapshot,
 	# so one user click produces ONE undo point (the first sub-action already captured the pre-click state)
 	case "$action" in
-		z2strat|z2quic|z2ipv6|z2autotoggle|mssclamp)
+		z2strat|z2quic|z2ipv6|z2autotoggle|mssclamp|devicesapply)
 			[ "$(get_param nosnap)" = 1 ] || undo_push "$action" ;;
 	esac
 
@@ -2060,58 +2207,34 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		json_header; printf '{"ok":true}'; exit 0
 
 		;;
-	devexclude)
-		dip=$(clean_ip "$(get_param ip)" | sed 's#/.*##')   # single source IP, no CIDR
-		case "$dip" in *.*|*:*) ;; *) json_header; printf '{"ok":false,"error":"bad ip"}'; exit 0 ;; esac
-		i=0; dup=0
-		while uci -q get "nikki.@lan_access_control[$i]" >/dev/null 2>&1; do
-			[ "$(uci -q get "nikki.@lan_access_control[$i].ip")" = "$dip" ] && [ "$(uci -q get "nikki.@lan_access_control[$i].proxy")" = 0 ] && dup=1
-			i=$((i + 1))
+	devicesapply)
+		# One request commits everything on the merged devices tab at once (both modes, both engines'
+		# full checkbox state) — the panel builds one working copy client-side and sends it as a whole,
+		# rather than a call per checkbox toggle.
+		nmode=$(get_param nikkiMode); case "$nmode" in exclude|only) ;; *) nmode=exclude ;; esac
+		zmode=$(get_param z2Mode); case "$zmode" in exclude|only) ;; *) zmode=exclude ;; esac
+		nlist=""; for m in $(printf '%s' "$(get_param nikkiMacs)" | tr ',' ' '); do
+			m=$(clean_mac "$m"); valid_mac "$m" || continue
+			case " $nlist " in *" $m "*) ;; *) nlist="$nlist $m" ;; esac
 		done
-		if [ "$dup" = 0 ]; then
-			uci add nikki lan_access_control >/dev/null
-			uci set "nikki.@lan_access_control[-1].ip=$dip"
-			uci set "nikki.@lan_access_control[-1].proxy=0"
-			uci set "nikki.@lan_access_control[-1].dns=0"
-			uci set "nikki.@lan_access_control[-1].enabled=1"
+		zlist=""; for m in $(printf '%s' "$(get_param z2Macs)" | tr ',' ' '); do
+			m=$(clean_mac "$m"); valid_mac "$m" || continue
+			case " $zlist " in *" $m "*) ;; *) zlist="$zlist $m" ;; esac
+		done
+		if nikki_present; then
+			uci set "nikki-unblock.config.nikki_device_mode=$nmode"; uci commit nikki-unblock
+			nikki_acl_rebuild "$nlist"
+			nikki_acl_apply_mode "$nmode"
+			nikki_acl_fix_order
+			uci commit nikki; apply_nikki
 		fi
-		# `uci add` appends — i.e. BELOW the catch-all, where the exclusion would never match. Always
-		# re-sort; this also repairs exclusions left dead by older versions, hence the run even on dup.
-		if nikki_acl_fix_order || [ "$dup" = 0 ]; then uci commit nikki; apply_nikki; fi
-		json_header; printf '{"ok":true,"dup":%s}' "$([ "$dup" = 1 ] && echo true || echo false)"; exit 0
-
-		;;
-	devinclude)
-		dip=$(clean_ip "$(get_param ip)" | sed 's#/.*##')
-		changed=0; i=0
-		while uci -q get "nikki.@lan_access_control[$i]" >/dev/null 2>&1; do
-			if [ "$(uci -q get "nikki.@lan_access_control[$i].ip")" = "$dip" ] && [ "$(uci -q get "nikki.@lan_access_control[$i].proxy")" = 0 ]; then
-				uci delete "nikki.@lan_access_control[$i]"; changed=1; i=0; continue   # indices shift → rescan
-			fi
-			i=$((i + 1))
-		done
-		[ "$changed" = 1 ] && { uci commit nikki; apply_nikki; }
-		json_header; printf '{"ok":true}'; exit 0
-
-		;;
-	z2devexclude)
-		# IPv4 only: the nft set is ipv4_addr, and zapret2 ships DISABLE_IPV6=1 by default.
-		dip=$(clean_ip "$(get_param ip)" | sed 's#/.*##')
-		case "$dip" in *.*) ;; *) json_header; printf '{"ok":false,"error":"bad ip"}'; exit 0 ;; esac
-		zapret2_present || { json_header; printf '{"ok":false,"error":"no zapret2"}'; exit 0; }
-		dup=0
-		for e in $(z2_bypass_ips); do [ "$e" = "$dip" ] && dup=1; done
-		if [ "$dup" = 0 ]; then
-			uci add_list "nikki-unblock.config.z2_bypass_ip=$dip"; uci commit nikki-unblock
+		if zapret2_present; then
+			uci -q delete nikki-unblock.config.z2_bypass_mac 2>/dev/null
+			for m in $zlist; do uci add_list "nikki-unblock.config.z2_bypass_mac=$m"; done
+			uci set "nikki-unblock.config.z2_device_mode=$zmode"
+			uci commit nikki-unblock
 			z2_bypass_write_hook; z2_bypass_apply
 		fi
-		json_header; printf '{"ok":true,"dup":%s}' "$([ "$dup" = 1 ] && echo true || echo false)"; exit 0
-
-		;;
-	z2devinclude)
-		dip=$(clean_ip "$(get_param ip)" | sed 's#/.*##')
-		uci del_list "nikki-unblock.config.z2_bypass_ip=$dip" >/dev/null 2>&1; uci commit nikki-unblock
-		z2_bypass_apply
 		json_header; printf '{"ok":true}'; exit 0
 
 		;;
@@ -2121,9 +2244,12 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			# On OpenWrt fw4 a bare `start` brings up nfqws2 but does NOT rebuild the desync nft rules
 			# (they come from the firewall include, applied on a full restart / fw reload) — so the
 			# service reads "running" yet nothing is bypassed. Use `restart` for the on-toggle so the
-			# firewall is actually (re)built.
-			start) /etc/init.d/zapret2 restart >/dev/null 2>&1 ;;
-			stop|restart|reload|enable|disable) /etc/init.d/zapret2 "$op" >/dev/null 2>&1 ;;
+			# firewall is actually (re)built. Any "should be running" op clears the user-stop marker so
+			# the watchdog resumes healing; `stop` sets it so the watchdog leaves a deliberate stop alone.
+			start) rm -f "$Z2_USERSTOP"; /etc/init.d/zapret2 restart >/dev/null 2>&1 ;;
+			restart|reload) rm -f "$Z2_USERSTOP"; /etc/init.d/zapret2 "$op" >/dev/null 2>&1 ;;
+			stop) touch "$Z2_USERSTOP"; /etc/init.d/zapret2 stop >/dev/null 2>&1 ;;
+			enable|disable) /etc/init.d/zapret2 "$op" >/dev/null 2>&1 ;;
 			*) json_header; printf '{"ok":false,"error":"bad op"}'; exit 0 ;;
 		esac
 		case "$op" in start|stop|restart|reload) sleep 2 ;; esac
@@ -2141,7 +2267,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		cp "$Z2_CONFIG" "$Z2_CONFIG.strat.bak"
 		printf '%s' "$body" | z2_write_opt
 		/etc/init.d/zapret2 restart >/dev/null 2>&1; sleep 4
-		if pgrep -f nfqws2 >/dev/null 2>&1 && { [ "$was" = 0 ] || z2_desync_ok; }; then
+		if z2_running && { [ "$was" = 0 ] || z2_desync_ok; }; then
 			rm -f "$Z2_CONFIG.strat.bak"
 			json_header; printf '{"ok":true,"strategy":"%s"}' "$id"; exit 0
 		fi
@@ -2552,64 +2678,44 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 	json_header; printf '{"ok":false,"error":"unknown action"}'; exit 0
 fi
 
-# ---- LAN device exclusions (keep a device's traffic OFF the tunnel, by source IP) ----------
-# Uses nikki's `lan_access_control` (matches by IP only, no MAC): an entry with proxy=0 excludes
-# that device. Device names come from DHCP leases + static hosts so the UI can offer a picker.
-lan_devices() {   # prints "ip<TAB>mac<TAB>name" per known LAN device (static names win)
-	{
-		j=0
-		while uci -q get "dhcp.@host[$j]" >/dev/null 2>&1; do
-			hip=$(uci -q get "dhcp.@host[$j].ip"); hmac=$(uci -q get "dhcp.@host[$j].mac"); hnm=$(uci -q get "dhcp.@host[$j].name")
-			[ -n "$hip" ] && printf '%s\t%s\t%s\n' "$hip" "$hmac" "$hnm"
-			j=$((j + 1))
-		done
-		awk '{ h=$4; if (h=="*") h=""; printf "%s\t%s\t%s\n", $3, $2, h }' /tmp/dhcp.leases 2>/dev/null
-	} | awk -F'\t' '$1!="" && !seen[$1]++'
-}
-devices_json() {
+# ---- LAN device table (merged Nikki + Zapret2, by MAC) --------------------------------------
+# One row per known device, cross-referenced against both engines' selection lists so the panel
+# can render two independent checkboxes per device under a single "Общее → Устройства" tab.
+devicesall_json() {
 	json_header
-	_dt="/tmp/nu-dev.$$"; lan_devices > "$_dt" 2>/dev/null
-	exips=" "; exc=""; i=0
+	nk=0; nikki_present && nk=1
+	z2=0; zapret2_present && z2=1
+	_dt="/tmp/nu-devall.$$"; lan_devices_by_mac > "$_dt" 2>/dev/null
+	nsel=" "; i=0
 	while uci -q get "nikki.@lan_access_control[$i]" >/dev/null 2>&1; do
-		dip=$(uci -q get "nikki.@lan_access_control[$i].ip"); dpx=$(uci -q get "nikki.@lan_access_control[$i].proxy")
-		if [ -n "$dip" ] && [ "$dpx" = 0 ]; then
-			exips="$exips$dip "
-			dnm=$(awk -F'\t' -v ip="$dip" '$1==ip{print $3; exit}' "$_dt")
-			exc="$exc${exc:+,}{\"ip\":\"$(json_esc "$dip")\",\"name\":\"$(json_esc "$dnm")\"}"
-		fi
+		m=$(uci -q get "nikki.@lan_access_control[$i].mac"); [ -n "$m" ] && nsel="$nsel$m "
 		i=$((i + 1))
 	done
-	known=""
-	while IFS=$(printf '\t') read -r kip kmac knm; do
-		case "$exips" in *" $kip "*) continue ;; esac
-		known="$known${known:+,}{\"ip\":\"$(json_esc "$kip")\",\"mac\":\"$(json_esc "$kmac")\",\"name\":\"$(json_esc "$knm")\"}"
+	zsel=" "; for m in $(z2_bypass_macs); do zsel="$zsel$m "; done
+	rows=""; seen=" "
+	while IFS=$(printf '\t') read -r kmac kip knm; do
+		seen="$seen$kmac "
+		ns=false; case "$nsel" in *" $kmac "*) ns=true ;; esac
+		zs=false; case "$zsel" in *" $kmac "*) zs=true ;; esac
+		rows="$rows${rows:+,}{\"mac\":\"$(json_esc "$kmac")\",\"ip\":\"$(json_esc "$kip")\",\"name\":\"$(json_esc "$knm")\",\"nikki\":$ns,\"zapret2\":$zs}"
 	done < "$_dt"
-	rm -f "$_dt"
-	printf '{"excluded":[%s],"known":[%s]}' "$exc" "$known"
-}
-# Same shape as devices_json, but the list lives in our own UCI (zapret2 has nowhere to keep it).
-z2devices_json() {
-	json_header
-	_dt="/tmp/nu-z2dev.$$"; lan_devices > "$_dt" 2>/dev/null
-	exips=" "; exc=""
-	for dip in $(z2_bypass_ips); do
-		exips="$exips$dip "
-		dnm=$(awk -F'\t' -v ip="$dip" '$1==ip{print $3; exit}' "$_dt")
-		exc="$exc${exc:+,}{\"ip\":\"$(json_esc "$dip")\",\"name\":\"$(json_esc "$dnm")\"}"
+	# a selected MAC that dropped out of DHCP (stale lease / deleted static host) must still show up,
+	# else it's stuck selected with no UI control left to clear it — counters tell the truth, so must the list
+	for m in $nsel $zsel; do
+		case "$seen" in *" $m "*) continue ;; esac
+		seen="$seen$m "
+		ns=false; case "$nsel" in *" $m "*) ns=true ;; esac
+		zs=false; case "$zsel" in *" $m "*) zs=true ;; esac
+		rows="$rows${rows:+,}{\"mac\":\"$(json_esc "$m")\",\"ip\":\"\",\"name\":\"\",\"nikki\":$ns,\"zapret2\":$zs}"
 	done
-	known=""
-	while IFS=$(printf '\t') read -r kip kmac knm; do
-		case "$exips" in *" $kip "*) continue ;; esac
-		known="$known${known:+,}{\"ip\":\"$(json_esc "$kip")\",\"mac\":\"$(json_esc "$kmac")\",\"name\":\"$(json_esc "$knm")\"}"
-	done < "$_dt"
 	rm -f "$_dt"
-	printf '{"excluded":[%s],"known":[%s]}' "$exc" "$known"
+	printf '{"nikki":{"present":%d,"mode":"%s"},"zapret2":{"present":%d,"mode":"%s"},"devices":[%s]}' \
+		"$nk" "$(nikki_device_mode)" "$z2" "$(z2_device_mode)" "$rows"
 }
 
 [ "$API" = "list" ] && { list_json; exit 0; }
 [ "$API" = "iplist" ] && { iplist_json; exit 0; }
-[ "$API" = "devices" ] && { devices_json; exit 0; }
-[ "$API" = "z2devices" ] && { z2devices_json; exit 0; }
+[ "$API" = "devicesall" ] && { devicesall_json; exit 0; }
 [ "$API" = "z2status" ] && { z2status_json; exit 0; }
 [ "$API" = "ytdiag" ] && { ytdiag_json; exit 0; }
 [ "$API" = "z2hosts" ] && { z2hosts_json; exit 0; }

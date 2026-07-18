@@ -17,8 +17,18 @@ config nikki-unblock 'config'
 	# Auto-refresh tracked link-subscriptions on a schedule (on by default; cron created once a sub exists).
 	option subauto '1'
 	option subauto_interval '24h'
-	# LAN devices (IPv4) whose traffic skips the zapret2 desync — managed from the panel's
-	# zapret2 → Devices tab. zapret2 can't filter by client itself (its hook runs after NAT), so
-	# the panel marks these source IPs pre-NAT with DESYNC_MARK, which makes zapret2 skip them.
-	# Useful for a dev router that must see the raw, un-bypassed internet.
-	#   list z2_bypass_ip '192.168.1.169'
+	# Device list mode for each engine — managed from the panel's Общее → Устройства tab.
+	# 'exclude' (default): listed devices bypass the engine, everyone else goes through it.
+	# 'only': the engine applies ONLY to listed devices, everyone else bypasses it.
+	option nikki_device_mode 'exclude'
+	option z2_device_mode 'exclude'
+	# Devices are identified by MAC (not IP) since IP drifts without a DHCP reservation, which most
+	# friends never set up. A stale exclusion by IP silently starts matching the wrong device.
+	#
+	# LAN devices whose traffic skips the zapret2 desync (or, in 'only' mode, are the only ones
+	# desynced). zapret2 can't filter by client itself (its hook runs after NAT), so the panel marks
+	# these MACs pre-NAT with DESYNC_MARK, which makes zapret2 skip (or, inverted, target) them.
+	#   list z2_bypass_mac 'aa:bb:cc:dd:ee:ff'
+	# One-time marker: has the old IP-keyed z2_bypass_ip / nikki lan_access_control.ip data already
+	# been migrated to MAC? Set by the panel itself on first request after upgrade; don't hand-edit.
+	option dev_mac_migrated '0'

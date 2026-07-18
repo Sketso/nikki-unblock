@@ -6,11 +6,34 @@
 # leaves NO desync rules. Symptom: the service reads "running" yet nothing is bypassed (video/googlevideo
 # breaks). This watchdog notices that state (zapret2 enabled, but its desync queue absent or nfqws2 down)
 # and does a full restart, which rebuilds both. Runs from cron every few minutes; only acts when zapret2
-# is ENABLED — to keep it off for testing, `disable` zapret2 (not just stop).
+# is ENABLED. A deliberate Stop from the panel is honored via the marker below.
 [ -x /etc/init.d/zapret2 ] || exit 0
 /etc/init.d/zapret2 enabled 2>/dev/null || exit 0
+
+# Detect the daemon via procd's pidfiles, NOT `pgrep -f nfqws2`: the latter matches the full command
+# line, so it false-positives on any shell that merely mentions the nfqws2 path (zapret2's own fw
+# teardown scripts, this watchdog, the CGI). procd writes /var/run/nfqws2_<N>.pid and removes them on
+# stop, so a live pid there is the truth. (Mirror of z2_daemon_pid in the CGI.)
+z2_up() {
+	for _pf in /var/run/nfqws2_*.pid; do
+		[ -e "$_pf" ] || continue
+		_p=$(cat "$_pf" 2>/dev/null)
+		[ -n "$_p" ] && [ -d "/proc/$_p" ] && return 0
+	done
+	return 1
+}
+
+# The panel drops this marker on a deliberate Stop (see z2svc in the CGI). While it's present AND the
+# service is genuinely down, honor the user's intent and don't resurrect it — otherwise "Stop" would
+# just bounce back within one cron tick. If something started zapret2 again anyway (a strategy change,
+# a preset apply, …), the intent is reconciled: clear the marker and resume normal self-healing.
+USERSTOP="/tmp/nikki-unblock-z2-userstop"
+if [ -f "$USERSTOP" ]; then
+	z2_up || exit 0
+	rm -f "$USERSTOP"
+fi
 q=$(nft list chain inet zapret2 postnat 2>/dev/null | grep -c 'queue')
-r=0; pgrep -f nfqws2 >/dev/null 2>&1 && r=1
+r=0; z2_up && r=1
 if [ "$q" = 0 ] || [ "$r" = 0 ]; then
 	logger -t nikki-unblock-z2wd "zapret2 desync missing (queue=$q running=$r) -> restart"
 	/etc/init.d/zapret2 restart

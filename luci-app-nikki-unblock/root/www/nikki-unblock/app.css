@@ -135,6 +135,14 @@
   }
   li select.edit { flex: 0 0 auto; font-size: .72rem; padding: .2rem .3rem; border-radius: 6px; border: 1px solid #8884; background: #8881; color: inherit; }
   li .ms { font-size: .72rem; opacity: .7; min-width: 3.4rem; text-align: right; font-variant-numeric: tabular-nums; }
+  .modecards { display: grid; grid-template-columns: 1fr; gap: .75rem; margin: .8rem 0 1.2rem; }
+  @media (min-width: 600px) { .modecards { grid-template-columns: 1fr 1fr; } }
+  .modecard { background: #8881; border: 1px solid #8884; border-radius: 12px; padding: .8rem 1rem; }
+  .modecard h3 { margin: 0 0 .5rem; font-size: .95rem; }
+  .modecard select { width: 100%; padding: .55rem .6rem; font-size: .9rem; border-radius: 8px; border: 1px solid #8884; background: #8881; color: inherit; }
+  .modecard .hint { margin: .5rem 0 0; }
+  .applybar { display: flex; align-items: center; gap: .8rem; margin-top: 1rem; padding-top: .8rem; border-top: 1px solid #8882; }
+  .applybar .msg { margin: 0; }
   .svc { display: flex; flex-direction: column; gap: .8rem; max-width: 440px; }
   .svc .st { font-size: 1rem; font-weight: 600; }
   .svc .dot { display: inline-block; width: .62rem; height: .62rem; border-radius: 50%; margin-right: .45rem; vertical-align: middle; background: #8886; }
@@ -194,6 +202,9 @@
   #rpDesc { width: 100%; min-height: 4rem; padding: .5rem .6rem; font-size: .9rem; border-radius: 8px; border: 1px solid #8884; background: #8881; color: inherit; box-sizing: border-box; }
   #rpFull { width: 100%; min-height: 6rem; margin-top: .4rem; padding: .5rem .6rem; font-family: ui-monospace, monospace; font-size: .78rem; border-radius: 8px; border: 1px solid #8884; background: #8881; color: inherit; box-sizing: border-box; }
   li .pick { flex: 0 0 auto; }
+  .devrow .dom { display: flex; flex-direction: column; align-items: flex-start; gap: .1rem; font-family: inherit; }
+  .devrow .dom .meta { font-family: ui-monospace, monospace; }
+  .devchk { display: inline-flex; align-items: center; gap: .3rem; flex: 0 0 auto; font-size: .82rem; opacity: .85; cursor: pointer; white-space: nowrap; }
   .strow { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin: .3rem 0; }
   .strow select { flex: 1; min-width: 10rem; padding: .5rem .6rem; font-size: .9rem; border-radius: 8px; border: 1px solid #8884; background: #8881; color: inherit; }
   .ytresult { margin: .4rem 0; display: flex; flex-direction: column; gap: .35rem; }

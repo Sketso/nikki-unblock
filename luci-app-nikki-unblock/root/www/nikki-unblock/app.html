@@ -31,14 +31,13 @@
   <div class="tabs tabs-sub">
     <button class="tab active" data-view="domains" data-engine="nikki" data-i18n="tabDomains"></button>
     <button class="tab" data-view="ips" data-engine="nikki" data-i18n="tabIps"></button>
-    <button class="tab" data-view="devices" data-engine="nikki" data-i18n="tabDevices"></button>
     <button class="tab" data-view="nodes" data-engine="nikki" data-i18n="tabNodes"></button>
     <button class="tab" data-view="mgmt" data-engine="nikki" data-i18n="tabMgmt"></button>
     <button class="tab" data-view="z2domains" data-engine="zapret2" data-i18n="z2TabDomains"></button>
     <button class="tab" data-view="z2auto" data-engine="zapret2" data-i18n="z2TabAuto"></button>
     <button class="tab" data-view="z2exclude" data-engine="zapret2" data-i18n="z2TabExclude"></button>
-    <button class="tab" data-view="z2devices" data-engine="zapret2" data-i18n="z2TabDevices"></button>
     <button class="tab" data-view="z2svc" data-engine="zapret2" data-i18n="z2TabSvc"></button>
+    <button class="tab" data-view="devices" data-engine="common" data-i18n="tabDevices"></button>
     <button class="tab" data-view="common" data-engine="common" data-i18n="tabCommon"></button>
   </div>
 
@@ -124,19 +123,6 @@
     <div class="msg" id="ipMsg"></div>
     <h3><span data-i18n="exclusions"></span> <span class="count" id="ipCount"></span></h3>
     <ul id="ipList"></ul>
-  </section>
-
-  <!-- ================= DEVICES ================= -->
-  <section class="view" id="view-devices">
-    <div class="hint" data-i18n="devHint"></div>
-    <div class="add">
-      <select id="devPick"><option value="" data-i18n="devPickDefault"></option></select>
-      <input id="devIp" placeholder="192.168.1.50" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
-      <button type="button" id="devBtn" data-i18n="add"></button>
-    </div>
-    <div class="msg" id="devMsg"></div>
-    <h3><span data-i18n="devExcluded"></span> <span class="count" id="devCount"></span></h3>
-    <ul id="devList"></ul>
   </section>
 
   <!-- ================= VPN NODES ================= -->
@@ -241,18 +227,6 @@
     <div class="msg" id="z2ExMsg"></div>
   </section>
 
-  <section class="view" id="view-z2devices">
-    <div class="hint" data-i18n="z2DevHint"></div>
-    <div class="add">
-      <select id="z2DevPick"><option value="" data-i18n="devPickDefault"></option></select>
-      <input id="z2DevIp" placeholder="192.168.1.50" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
-      <button type="button" id="z2DevBtn" data-i18n="add"></button>
-    </div>
-    <div class="msg" id="z2DevMsg"></div>
-    <h3><span data-i18n="z2DevExcluded"></span> <span class="count" id="z2DevCount"></span></h3>
-    <ul id="z2DevList"></ul>
-  </section>
-
   <!-- ============ ZAPRET2 · SERVICE ============ -->
   <section class="view" id="view-z2svc">
     <div class="banner" id="z2Health" hidden data-i18n="z2HealthWarn"></div>
@@ -322,6 +296,39 @@
         <button type="button" class="ghost" id="svcReload" data-i18n="svcReload"></button>
       </div>
       <div class="msg" id="svcMsg"></div>
+    </div>
+  </section>
+
+  <!-- ================= УСТРОЙСТВА (общие исключения для Nikki + Zapret2) ================= -->
+  <section class="view" id="view-devices">
+    <div class="hint" data-i18n="devHint"></div>
+
+    <div class="modecards">
+      <div class="modecard" id="nikkiModeCard">
+        <h3 data-i18n="nikkiModeTitle"></h3>
+        <select id="nikkiMode">
+          <option value="exclude" data-i18n="modeExclude"></option>
+          <option value="only" data-i18n="modeOnly"></option>
+        </select>
+        <div class="hint" id="nikkiModeHint"></div>
+      </div>
+      <div class="modecard" id="z2ModeCard">
+        <h3 data-i18n="z2ModeTitle"></h3>
+        <select id="z2Mode">
+          <option value="exclude" data-i18n="modeExclude"></option>
+          <option value="only" data-i18n="modeOnly"></option>
+        </select>
+        <div class="hint" id="z2ModeHint"></div>
+      </div>
+    </div>
+
+    <h3><span data-i18n="devTableTitle"></span> <span class="count" id="devCount"></span></h3>
+    <ul id="devList" class="devtable"></ul>
+    <div class="hint" id="devSummary"></div>
+
+    <div class="applybar">
+      <button type="button" id="devApplyBtn" data-i18n="apply"></button>
+      <div class="msg" id="devMsg"></div>
     </div>
   </section>
 

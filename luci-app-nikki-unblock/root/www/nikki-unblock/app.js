@@ -8,8 +8,9 @@ const I18N = {
     engNikki: "VPN (Nikki)", engZapret2: "Обход DPI (Zapret2)", engCommon: "Общее",
     engCommonHint: "Обновления сервиса и движков + резервная копия настроек — общее для всего Nipret.",
     tabCommon: "Общее",
-    tabDomains: "Домены в туннель", tabIps: "IP-исключения", tabDevices: "Устройства",
-    z2TabDomains: "Домены", z2TabAuto: "Автообучение", z2TabExclude: "Исключения", z2TabDevices: "Устройства", z2TabSvc: "Управление",
+    tabDomains: "Домены в туннель", tabIps: "IP-исключения",
+    z2TabDomains: "Домены", z2TabAuto: "Автообучение", z2TabExclude: "Исключения", z2TabSvc: "Управление",
+    tabDevices: "Устройства",
     engNikkiHint: "Nikki (Mihomo) заворачивает выбранные сайты в VPN/прокси — для того, что блокируют «снаружи» (гео-блок, блок по IP): ChatGPT, Instagram, Telegram и т.п. Управляй доменами, нодами и устройствами.",
     engZapret2Hint: "Zapret2 обходит блокировки провайдера на уровне DPI (без VPN) — для сайтов, которые режут «изнутри» (YouTube и т.п.). Управляй сервисом и списком доменов для обхода.",
     z2On: "zapret2 работает", z2Off: "zapret2 остановлен",
@@ -54,10 +55,15 @@ const I18N = {
     z2Ipv6Confirm: "Отключить IPv6 на всём роутере? Сеть кратко переприменится, устройства перейдут на IPv4. Это обратимо тем же тумблером.",
     z2Excluded: "Исключения (не пробивать)", z2ExHint: "Домены, которые zapret2 НИКОГДА не трогает (проверяются первыми). Сюда попадают твои «баны» из автолиста и авто-защита серверов VPN-нод (её удалить нельзя).",
     noEngines: "Ни nikki (VPN), ни zapret2 не установлены — управлять нечем. Поставь хотя бы один.",
-    devHint: "Устройства из этого списка ходят в интернет мимо VPN (напрямую). Выбери устройство из списка или впиши его IP. Исключение по IP — чтобы оно не «слетало», закрепи за устройством постоянный адрес (статический DHCP-лиз).",
-    devPickDefault: "— выбрать устройство —", devExcluded: "Мимо VPN (напрямую)",
-    z2DevHint: "Устройства из этого списка получают интернет БЕЗ обхода DPI — ровно такой, какой даёт провайдер, со всеми блокировками. Нужно, если за роутером стоит второй роутер со своим zapret2 (иначе он «работает» за счёт этого роутера, и проверить его нельзя). Только IPv4; закрепи за устройством статический DHCP-лиз, чтобы исключение не слетело.",
-    z2DevExcluded: "Без обхода DPI (чистый интернет)",
+    devHint: "Устройства выбираются по MAC-адресу — он не меняется при смене IP, в отличие от адреса, который не закреплён статическим DHCP-лизом. Отметь галочками нужные устройства и выбери режим для каждого движка, затем нажми «Применить» — изменения применяются одним разом.",
+    devTableTitle: "Устройства",
+    nikkiModeTitle: "Режим VPN для устройств", z2ModeTitle: "Режим обхода DPI для устройств",
+    modeExclude: "Исключать выбранные", modeOnly: "Пускать только выбранные",
+    nikkiHintExclude: "Отмеченные устройства идут мимо VPN, напрямую.", nikkiHintOnly: "Через VPN идут только отмеченные устройства, остальные — напрямую.",
+    z2HintExclude: "Отмеченные устройства без обхода DPI — чистый интернет провайдера.", z2HintOnly: "Обход DPI работает только для отмеченных устройств, остальным — чистый интернет.",
+    devSummaryNikkiExclude: n => n + " устройств мимо VPN, остальные через VPN", devSummaryNikkiOnly: n => "через VPN только " + n + " устройств",
+    devSummaryZ2Exclude: n => n + " устройств без обхода DPI, остальным — обход", devSummaryZ2Only: n => "обход DPI только для " + n + " устройств",
+    devUnsaved: "Есть неприменённые изменения",
     add: "Добавить", tType: "тип условия", nAction: "действие",
     tSuffix: "домен+поддомены", tDomain: "точный домен", tKeyword: "подстрока",
     nProxy: "→ VPN", nDirect: "→ напрямую", nReject: "→ блок", nProxyProfile: "→ VPN (профиль)",
@@ -115,6 +121,7 @@ const I18N = {
     undoTitle: "Откат изменений", undoHint: "Перед каждым переключением (стратегия, QUIC, IPv6, автообучение, пресеты) сохраняется снимок обоих движков. Если что-то сломалось после изменения — верни как было.",
     undoBtn: "↩ Вернуть как было", undoThis: "Откатить сюда", undoLast: "Вернуть последнее изменение", redoLast: "Вернуть отменённое", undoEmpty: "Пока нет изменений для отката", undoConfirm: "Откатить к состоянию до этого изменения? Настройки обоих движков вернутся к тому моменту.",
     act_z2strat: "стратегия zapret2", act_z2quic: "тумблер QUIC", act_z2ipv6: "тумблер IPv6", act_z2autotoggle: "автообучение zapret2",
+    act_devicesapply: "исключения устройств",
     act_preset: "пресет", presetFail: "не применилось полностью", presetBusy: "Дождись окончания текущего применения",
     act_z2preset: "пресет zapret2", act_z2preset_on: "пресет zapret2 вкл", act_z2preset_off: "пресет zapret2 выкл", act_geosite_on: "гео-пресет вкл", act_geosite_off: "гео-пресет выкл",
     act_preset_sync: "пресет доменов вкл", act_preset_off: "пресет доменов выкл", act_mssclamp: "MSS-clamp", act_auto: "авто-бэкап",
@@ -140,8 +147,9 @@ const I18N = {
     engNikki: "VPN (Nikki)", engZapret2: "DPI bypass (Zapret2)", engCommon: "General",
     engCommonHint: "Service & engine updates + config backup — shared across Nipret.",
     tabCommon: "General",
-    tabDomains: "Domains via VPN", tabIps: "IP exclusions", tabDevices: "Devices",
-    z2TabDomains: "Domains", z2TabAuto: "Auto-learn", z2TabExclude: "Exclusions", z2TabDevices: "Devices", z2TabSvc: "Service",
+    tabDomains: "Domains via VPN", tabIps: "IP exclusions",
+    z2TabDomains: "Domains", z2TabAuto: "Auto-learn", z2TabExclude: "Exclusions", z2TabSvc: "Service",
+    tabDevices: "Devices",
     engNikkiHint: "Nikki (Mihomo) routes chosen sites through a VPN/proxy — for services blocked \"from outside\" (geo-blocks, IP blocks): ChatGPT, Instagram, Telegram, etc. Manage domains, nodes and devices.",
     engZapret2Hint: "Zapret2 defeats ISP DPI blocking (no VPN) — for sites throttled/blocked \"from inside\" (YouTube, etc.). Control the service and the list of domains to bypass.",
     z2On: "zapret2 running", z2Off: "zapret2 stopped",
@@ -186,10 +194,15 @@ const I18N = {
     z2Ipv6Confirm: "Disable IPv6 on the whole router? The network re-applies briefly and devices switch to IPv4. Reversible with the same toggle.",
     z2Excluded: "Exclusions (never bypass)", z2ExHint: "Domains zapret2 NEVER touches (checked first). This holds your \"bans\" from the auto-list plus the automatic protection of your VPN-node servers (which you can't remove).",
     noEngines: "Neither nikki (VPN) nor zapret2 is installed — nothing to manage. Install at least one.",
-    devHint: "Devices in this list reach the internet directly, bypassing the VPN. Pick a device or type its IP. Exclusion is by IP — give the device a fixed address (static DHCP lease) so it doesn't drift.",
-    devPickDefault: "— pick a device —", devExcluded: "Bypass VPN (direct)",
-    z2DevHint: "Devices in this list get the internet WITHOUT the DPI bypass — exactly as your ISP serves it, blocks and all. Needed when a second router with its own zapret2 sits behind this one (otherwise it \"works\" thanks to this router and can't be tested). IPv4 only; give the device a static DHCP lease so the exclusion doesn't drift.",
-    z2DevExcluded: "No DPI bypass (raw internet)",
+    devHint: "Devices are picked by MAC address — it doesn't change when the IP does, unlike an address with no static DHCP lease. Check the devices you want and pick a mode for each engine, then hit Apply — changes take effect all at once.",
+    devTableTitle: "Devices",
+    nikkiModeTitle: "VPN device mode", z2ModeTitle: "DPI-bypass device mode",
+    modeExclude: "Exclude selected", modeOnly: "Allow only selected",
+    nikkiHintExclude: "Checked devices bypass the VPN, going out directly.", nikkiHintOnly: "Only checked devices go through the VPN, everyone else goes direct.",
+    z2HintExclude: "Checked devices skip the DPI bypass — raw ISP internet.", z2HintOnly: "The DPI bypass applies only to checked devices, everyone else gets raw internet.",
+    devSummaryNikkiExclude: n => n + " device(s) bypass the VPN, the rest go through it", devSummaryNikkiOnly: n => "only " + n + " device(s) go through the VPN",
+    devSummaryZ2Exclude: n => n + " device(s) skip the DPI bypass, the rest are bypassed", devSummaryZ2Only: n => "DPI bypass applies to only " + n + " device(s)",
+    devUnsaved: "You have unapplied changes",
     add: "Add", tType: "match type", nAction: "action",
     tSuffix: "domain + subdomains", tDomain: "exact domain", tKeyword: "keyword",
     nProxy: "→ VPN", nDirect: "→ direct", nReject: "→ block", nProxyProfile: "→ VPN (profile)",
@@ -247,6 +260,7 @@ const I18N = {
     undoTitle: "Undo changes", undoHint: "Before each toggle (strategy, QUIC, IPv6, auto-learn, presets) a snapshot of both engines is saved. If something broke after a change — put it back.",
     undoBtn: "↩ Undo last change", undoThis: "Revert to here", undoLast: "Undo last change", redoLast: "Redo undone change", undoEmpty: "No changes to undo yet", undoConfirm: "Revert to the state before this change? Both engines' settings return to that point.",
     act_z2strat: "zapret2 strategy", act_z2quic: "QUIC toggle", act_z2ipv6: "IPv6 toggle", act_z2autotoggle: "zapret2 auto-learn",
+    act_devicesapply: "device exclusions",
     act_preset: "preset", presetFail: "didn't fully apply", presetBusy: "Wait for the current apply to finish",
     act_z2preset: "zapret2 preset", act_z2preset_on: "zapret2 preset on", act_z2preset_off: "zapret2 preset off", act_geosite_on: "geo preset on", act_geosite_off: "geo preset off",
     act_preset_sync: "domain preset on", act_preset_off: "domain preset off", act_mssclamp: "MSS clamp", act_auto: "auto-backup",
@@ -335,7 +349,6 @@ document.querySelectorAll(".tab").forEach(tb => tb.addEventListener("click", () 
   else if (tb.dataset.view === "mgmt") loadSvc();
   else if (tb.dataset.view === "common") { loadVersions(); loadUpdCheck(); loadBackup(); loadUndo(); }   // Общее: updates + backup
   else if (tb.dataset.view === "devices") loadDevices();
-  else if (tb.dataset.view === "z2devices") loadZ2Devices();
   else if (tb.dataset.view.indexOf("z2") === 0) { loadZapret2(); z2PresetOp.ensure(); }   // any zapret2 sub-view
 }));
 /* top-level engine selector — shows only that engine's sub-tabs, opens the first */
@@ -706,82 +719,88 @@ $("#ipList").addEventListener("click", async e => {
   else { setMsg($("#ipMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
 });
 
-/* ---------- devices excluded from the tunnel ---------- */
-let DEVICES = { excluded: [], known: [] };
+/* ---------- devices: merged Nikki + Zapret2 selection, by MAC ---------- */
+// The whole tab is one draft: checkboxes and mode selects only mutate local state (DEVROWS/the
+// <select> values) until Apply sends it all in a single devicesapply request. DEVCOMMITTED is a
+// snapshot of the last known-applied state, used purely to enable/disable the Apply button and show
+// the "unsaved changes" hint — never sent anywhere itself.
+let DEVROWS = [];
+let DEVMETA = { nikki: { present: 0, mode: "exclude" }, zapret2: { present: 0, mode: "exclude" } };
+let DEVCOMMITTED = null;
+
+function devSnapshot(){
+  return JSON.stringify({
+    nikkiMode: $("#nikkiMode").value, z2Mode: $("#z2Mode").value,
+    rows: DEVROWS.map(d => [d.mac, !!d.nikki, !!d.zapret2])
+  });
+}
+function devDirty(){ return DEVCOMMITTED !== null && devSnapshot() !== DEVCOMMITTED; }
+
 async function loadDevices(){
-  try { DEVICES = await (await fetch("?api=devices")).json(); } catch(e){ DEVICES = { excluded: [], known: [] }; }
+  let d; try { d = await (await fetch("?api=devicesall")).json(); } catch(e){ d = null; }
+  DEVMETA.nikki = (d && d.nikki) || { present: 0, mode: "exclude" };
+  DEVMETA.zapret2 = (d && d.zapret2) || { present: 0, mode: "exclude" };
+  DEVROWS = (d && d.devices) || [];
   renderDevices();
+  DEVCOMMITTED = devSnapshot();
+  updateApplyState();
 }
 function renderDevices(){
-  const pick = $("#devPick");
-  pick.innerHTML = '<option value="">' + escH(t("devPickDefault")) + '</option>' +
-    (DEVICES.known || []).map(d => '<option value="' + escH(d.ip) + '">' +
-      escH((d.name ? d.name + " — " : "") + d.ip + (d.mac ? " · " + d.mac : "")) + '</option>').join("");
+  $("#nikkiModeCard").hidden = !CAPS.nikki;
+  $("#z2ModeCard").hidden = !CAPS.zapret2;
+  $("#nikkiMode").value = DEVMETA.nikki.mode || "exclude";
+  $("#z2Mode").value = DEVMETA.zapret2.mode || "exclude";
   const ul = $("#devList"); ul.innerHTML = "";
-  const exc = DEVICES.excluded || [];
-  $("#devCount").textContent = "(" + exc.length + ")";
-  exc.forEach(d => {
-    const li = document.createElement("li");
-    li.innerHTML = '<span class="dom">' + escH(d.name || d.ip) + (d.name ? ' <span class="meta">' + escH(d.ip) + '</span>' : '') + '</span>' +
-      '<button class="ghost" data-devip="' + escH(d.ip) + '">✕</button>';
-    ul.appendChild(li);
-  });
+  $("#devCount").textContent = "(" + DEVROWS.length + ")";
+  DEVROWS.forEach(d => ul.appendChild(devRow(d)));
+  updateHints(); updateSummary();
 }
-$("#devPick").addEventListener("change", e => { if (e.target.value) $("#devIp").value = e.target.value; });
-$("#devBtn").addEventListener("click", async () => {
-  const ip = $("#devIp").value.trim(); if (!ip) return;
-  $("#devBtn").disabled = true; setMsg($("#devMsg"), t("applying")); showOverlay(t("applying"));
-  const res = await api("devexclude", { ip });
-  $("#devBtn").disabled = false; hideOverlay();
-  if (res.ok){ setMsg($("#devMsg"), res.dup ? t("dup") : t("done")); $("#devIp").value = ""; $("#devPick").value = ""; loadDevices(); }
-  else setMsg($("#devMsg"), t("errP") + (res.error || "?"), false);
+function devRow(d){
+  const li = document.createElement("li"); li.className = "devrow";
+  li.innerHTML =
+    '<span class="dom">' + escH(d.name || d.mac) + '<span class="meta">' + escH(d.mac + (d.ip ? " · " + d.ip : "")) + '</span></span>' +
+    (CAPS.nikki ? '<label class="devchk"><input type="checkbox" data-eng="nikki" data-mac="' + escH(d.mac) + '"' + (d.nikki ? " checked" : "") + '><span>' + escH(t("engNikki")) + '</span></label>' : "") +
+    (CAPS.zapret2 ? '<label class="devchk"><input type="checkbox" data-eng="zapret2" data-mac="' + escH(d.mac) + '"' + (d.zapret2 ? " checked" : "") + '><span>' + escH(t("engZapret2")) + '</span></label>' : "");
+  return li;
+}
+function updateHints(){
+  $("#nikkiModeHint").textContent = t($("#nikkiMode").value === "only" ? "nikkiHintOnly" : "nikkiHintExclude");
+  $("#z2ModeHint").textContent = t($("#z2Mode").value === "only" ? "z2HintOnly" : "z2HintExclude");
+}
+function updateSummary(){
+  const nk = DEVROWS.filter(d => d.nikki).length, z2 = DEVROWS.filter(d => d.zapret2).length;
+  const parts = [];
+  if (CAPS.nikki) parts.push(t($("#nikkiMode").value === "only" ? "devSummaryNikkiOnly" : "devSummaryNikkiExclude")(nk));
+  if (CAPS.zapret2) parts.push(t($("#z2Mode").value === "only" ? "devSummaryZ2Only" : "devSummaryZ2Exclude")(z2));
+  $("#devSummary").textContent = parts.join(" · ");
+}
+// Only touches #devMsg when there's no pending applying/success/error text to preserve — the Apply
+// handler manages that itself via setMsg. Checking a box never pops a toast; only Apply does.
+function updateApplyState(){
+  const dirty = devDirty();
+  $("#devApplyBtn").disabled = !dirty;
+  const el = $("#devMsg"); el.textContent = dirty ? t("devUnsaved") : ""; el.style.color = "";
+}
+$("#devList").addEventListener("change", e => {
+  const cb = e.target.closest('input[type="checkbox"]'); if (!cb) return;
+  const row = DEVROWS.find(d => d.mac === cb.dataset.mac); if (!row) return;
+  row[cb.dataset.eng] = cb.checked;
+  updateSummary(); updateApplyState();
 });
-$("#devList").addEventListener("click", async e => {
-  const b = e.target.closest("button"); if (!b) return;
-  b.disabled = true; setMsg($("#devMsg"), t("removing")); showOverlay(t("removing"));
-  const res = await api("devinclude", { ip: b.dataset.devip });
+$("#nikkiMode").addEventListener("change", () => { updateHints(); updateSummary(); updateApplyState(); });
+$("#z2Mode").addEventListener("change", () => { updateHints(); updateSummary(); updateApplyState(); });
+$("#devApplyBtn").addEventListener("click", async () => {
+  const btn = $("#devApplyBtn"); btn.disabled = true;
+  showOverlay(t("applying")); setMsg($("#devMsg"), t("applying"));
+  const params = {
+    nikkiMode: $("#nikkiMode").value, z2Mode: $("#z2Mode").value,
+    nikkiMacs: DEVROWS.filter(d => d.nikki).map(d => d.mac).join(","),
+    z2Macs: DEVROWS.filter(d => d.zapret2).map(d => d.mac).join(",")
+  };
+  let res; try { res = await api("devicesapply", params); } catch(e){ res = {}; }
   hideOverlay();
-  if (res.ok){ setMsg($("#devMsg"), t("done")); loadDevices(); }
-  else { setMsg($("#devMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
-});
-
-/* ---------- devices excluded from the zapret2 desync ---------- */
-let Z2DEVICES = { excluded: [], known: [] };
-async function loadZ2Devices(){
-  try { Z2DEVICES = await (await fetch("?api=z2devices")).json(); } catch(e){ Z2DEVICES = { excluded: [], known: [] }; }
-  renderZ2Devices();
-}
-function renderZ2Devices(){
-  const pick = $("#z2DevPick");
-  pick.innerHTML = '<option value="">' + escH(t("devPickDefault")) + '</option>' +
-    (Z2DEVICES.known || []).map(d => '<option value="' + escH(d.ip) + '">' +
-      escH((d.name ? d.name + " — " : "") + d.ip + (d.mac ? " · " + d.mac : "")) + '</option>').join("");
-  const ul = $("#z2DevList"); ul.innerHTML = "";
-  const exc = Z2DEVICES.excluded || [];
-  $("#z2DevCount").textContent = "(" + exc.length + ")";
-  exc.forEach(d => {
-    const li = document.createElement("li");
-    li.innerHTML = '<span class="dom">' + escH(d.name || d.ip) + (d.name ? ' <span class="meta">' + escH(d.ip) + '</span>' : '') + '</span>' +
-      '<button class="ghost" data-z2devip="' + escH(d.ip) + '">✕</button>';
-    ul.appendChild(li);
-  });
-}
-$("#z2DevPick").addEventListener("change", e => { if (e.target.value) $("#z2DevIp").value = e.target.value; });
-$("#z2DevBtn").addEventListener("click", async () => {
-  const ip = $("#z2DevIp").value.trim(); if (!ip) return;
-  $("#z2DevBtn").disabled = true; setMsg($("#z2DevMsg"), t("applying")); showOverlay(t("applying"));
-  const res = await api("z2devexclude", { ip });
-  $("#z2DevBtn").disabled = false; hideOverlay();
-  if (res.ok){ setMsg($("#z2DevMsg"), res.dup ? t("dup") : t("done")); $("#z2DevIp").value = ""; $("#z2DevPick").value = ""; loadZ2Devices(); }
-  else setMsg($("#z2DevMsg"), t("errP") + (res.error || "?"), false);
-});
-$("#z2DevList").addEventListener("click", async e => {
-  const b = e.target.closest("button"); if (!b) return;
-  b.disabled = true; setMsg($("#z2DevMsg"), t("removing")); showOverlay(t("removing"));
-  const res = await api("z2devinclude", { ip: b.dataset.z2devip });
-  hideOverlay();
-  if (res.ok){ setMsg($("#z2DevMsg"), t("done")); loadZ2Devices(); }
-  else { setMsg($("#z2DevMsg"), t("errP") + (res.error || "?"), false); b.disabled = false; }
+  if (res && res.ok) { setMsg($("#devMsg"), t("done")); await loadDevices(); }
+  else { setMsg($("#devMsg"), t("errP") + ((res && res.error) || "?"), false); btn.disabled = false; }
 });
 
 /* ---------- combine capability gating (nikki / zapret2 present?) ---------- */
@@ -1582,8 +1601,9 @@ $("#updAll").addEventListener("click", () => doUpdate("all"));
   // essentials first (presets is the slow fetch); drop the overlay once the Domains view is ready
   if (CAPS.nikki) await Promise.allSettled([loadDomains(), loadPresets()]);
   hideOverlay();
-  if (CAPS.nikki){ loadIps(); loadDevices(); loadAutosync(); loadNodes(); loadSvc(); presetOp.ensure(); }
-  if (CAPS.zapret2){ loadZ2Devices(); z2PresetOp.ensure(); }   // resume a z2-preset spinner if one is applying
+  if (CAPS.nikki){ loadIps(); loadAutosync(); loadNodes(); loadSvc(); presetOp.ensure(); }
+  if (CAPS.zapret2) z2PresetOp.ensure();   // resume a z2-preset spinner if one is applying
+  if (CAPS.nikki || CAPS.zapret2) loadDevices();
   loadVersions(); loadUpdCheck(); loadBackup(); loadUndo();   // one availability check per session (cached)
   // resume the log view if an update is already running (started from another tab/session)
   try { const s = await (await fetch("?api=updatestatus")).json(); if (s && s.running) pollUpdate(); } catch(e){}
