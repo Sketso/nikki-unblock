@@ -49,8 +49,8 @@
     <button class="tab adv" data-view="z2auto" data-engine="zapret2" data-i18n="z2TabAuto"></button>
     <button class="tab adv" data-view="z2exclude" data-engine="zapret2" data-i18n="z2TabExclude"></button>
     <button class="tab adv" data-view="z2svc" data-engine="zapret2" data-i18n="z2TabSvc"></button>
-    <button class="tab adv" data-view="devices" data-engine="common" data-i18n="tabDevices"></button>
     <button class="tab" data-view="common" data-engine="common" data-i18n="tabCommon"></button>
+    <button class="tab adv" data-view="devices" data-engine="common" data-i18n="tabDevices"></button>
   </div>
 
   <!-- ================= DOMAINS ================= -->
@@ -361,6 +361,24 @@
       </div>
       <pre class="uplog" id="updLog" hidden></pre>
       <div class="msg" id="updMsg"></div>
+    </div>
+
+    <div class="svc upd adv" id="secBlock">
+      <h3 data-i18n="secTitle"></h3>
+      <div class="hint" data-i18n="secHint"></div>
+      <div class="swrow">
+        <span class="swlabel" data-i18n="secRequire"></span>
+        <label class="sw"><input type="checkbox" id="authOn"><span class="sl"></span></label>
+      </div>
+      <div class="secstatus" id="authStatus"></div>
+      <div class="strow" id="authPinRow">
+        <input id="authPin" type="password" inputmode="numeric" autocomplete="new-password" data-i18n-ph="secPinPh" style="flex:1">
+        <button type="button" id="authApply"></button>
+      </div>
+      <div class="btns">
+        <button type="button" class="ghost" id="authLogout" data-i18n="secLogout" hidden></button>
+      </div>
+      <div class="msg" id="secMsg"></div>
     </div>
 
     <div class="bkgroup adv">

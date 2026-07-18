@@ -337,8 +337,10 @@ config_json() {
 	lang=$(uci -q get nikki-unblock.config.lang 2>/dev/null); [ -z "$lang" ] && lang=ru
 	nk=0; nikki_present && nk=1
 	z2=0; zapret2_present && z2=1
-	printf '{"lang":"%s","applist":"%s","exit_group":"%s","nikki":%d,"zapret2":%d}' \
-		"$lang" "$APPLIST_URL" "$EXIT_GROUP" "$nk" "$z2"
+	ae=0; auth_enabled && ae=1
+	ps=0; [ -n "$(uci -q get nikki-unblock.config.pin_hash 2>/dev/null)" ] && ps=1
+	printf '{"lang":"%s","applist":"%s","exit_group":"%s","nikki":%d,"zapret2":%d,"auth_enabled":%d,"pin_set":%d}' \
+		"$lang" "$APPLIST_URL" "$EXIT_GROUP" "$nk" "$z2" "$ae" "$ps"
 }
 
 apply_nikki() { /etc/init.d/nikki reload >/dev/null 2>&1; }
@@ -1966,11 +1968,97 @@ NIKKI_PRESNAP="/tmp/nu-preupd-nikki.tgz"
 	exit 0
 }
 
+# ---- optional PIN authentication (opt-in; OFF by default) -------------------
+# A self-contained PIN gate so the owner can hand out /unblock (or the whole panel) to non-technical
+# users behind a simple shared code — WITHOUT the router admin password. Threat model: keep casual /
+# guest LAN users out. Over plain http the PIN and cookie travel in the clear, so this is NOT defence
+# against someone sniffing the LAN. The PIN itself is stored only as a salted sha256 hash.
+AUTH_SESS="/tmp/nikki-unblock-sessions"   # lines: "<token> <expiry_epoch>"
+AUTH_FAIL="/tmp/nikki-unblock-authfail"   # epoch per failed attempt (rolling window, brute-force brake)
+AUTH_TTL=604800                           # session lifetime — 7 days
+AUTH_FAIL_WINDOW=300                       # 5-minute window
+AUTH_FAIL_MAX=8                            # this many fails in the window → temporary lockout
+auth_enabled() { [ "$(uci -q get nikki-unblock.config.auth_enabled 2>/dev/null)" = 1 ]; }
+auth_rand() { head -c 24 /dev/urandom 2>/dev/null | md5sum 2>/dev/null | cut -c1-32; }
+auth_hash() { printf '%s' "$1$2" | sha256sum 2>/dev/null | cut -d' ' -f1; }   # $1=salt $2=pin
+auth_cookie_token() { printf '%s' "${HTTP_COOKIE:-}" | tr ';' '\n' | sed -n 's/^[[:space:]]*nipret_sess=//p' | head -1 | tr -cd 'a-f0-9'; }
+# prune expired sessions in place; return 0 iff $1 is a live token
+auth_session_valid() {
+	[ -n "$1" ] && [ -f "$AUTH_SESS" ] || return 1
+	_now=$(date +%s); _tmp="$AUTH_SESS.$$"; : > "$_tmp"; _found=1
+	while read -r _tk _exp; do
+		[ -n "$_tk" ] || continue
+		[ "$_exp" -gt "$_now" ] 2>/dev/null || continue
+		printf '%s %s\n' "$_tk" "$_exp" >> "$_tmp"
+		[ "$_tk" = "$1" ] && _found=0
+	done < "$AUTH_SESS"
+	mv "$_tmp" "$AUTH_SESS" 2>/dev/null
+	return "$_found"
+}
+auth_session_new() {   # echoes a fresh token, records it
+	_t=$(auth_rand); [ -n "$_t" ] || return 1
+	printf '%s %s\n' "$_t" "$(( $(date +%s) + AUTH_TTL ))" >> "$AUTH_SESS"
+	printf '%s' "$_t"
+}
+auth_locked() {   # 0 iff too many recent failures
+	[ -f "$AUTH_FAIL" ] || return 1
+	_cut=$(( $(date +%s) - AUTH_FAIL_WINDOW )); _n=0
+	while read -r _e; do [ "$_e" -gt "$_cut" ] 2>/dev/null && _n=$((_n + 1)); done < "$AUTH_FAIL"
+	[ "$_n" -ge "$AUTH_FAIL_MAX" ]
+}
+# minimal standalone PIN page — its own tiny inline CSS (app.css is a separate, ungated asset)
+auth_login_page() {
+	printf 'Status: 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\n\r\n'
+	cat <<'LOGIN_EOF'
+<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nipret</title>
+<style>body{font-family:system-ui,sans-serif;max-width:20rem;margin:16vh auto;padding:0 1rem;text-align:center}
+input{width:100%;font-size:1.3rem;text-align:center;letter-spacing:.25em;padding:.6rem;margin:.9rem 0;border:1px solid #8886;border-radius:8px;background:#8881;color:inherit;box-sizing:border-box}
+button{width:100%;padding:.7rem;font-size:1rem;border:0;border-radius:8px;background:#2563eb;color:#fff;cursor:pointer}
+.m{color:#dc2626;font-size:.85rem;min-height:1.2em;margin-top:.4rem}
+@media(prefers-color-scheme:dark){body{background:#111;color:#eee}}</style>
+<h2>Nipret</h2><p>Введите PIN · Enter PIN</p>
+<form id="f"><input id="pin" type="password" inputmode="numeric" autocomplete="off" autofocus>
+<button type="submit">OK</button><div class="m" id="m"></div></form>
+<script>
+document.getElementById("f").addEventListener("submit",async function(e){e.preventDefault();
+var m=document.getElementById("m"),pin=document.getElementById("pin");m.textContent="";
+var r=await fetch("?api=login",{method:"POST",body:new URLSearchParams({pin:pin.value})});
+var j=await r.json().catch(function(){return{}});
+if(j.ok){location.reload();}else{m.textContent=(j.error==="locked")?"Много попыток, подождите · Too many tries":"Неверный PIN · Wrong PIN";pin.value="";pin.focus();}});
+</script>
+LOGIN_EOF
+}
+
 # ---- API -------------------------------------------------------------------
 
 migrate_dev_ip_to_mac
 
 API=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^api=' | head -1 | cut -d= -f2-)
+
+# ---- PIN gate ---------------------------------------------------------------
+# login is the ONLY endpoint reachable without a session, detected by its query param so the gate
+# never has to peek a POST body (restore/z2restore stream theirs and must not be pre-read).
+if [ "$API" = "login" ] && [ "$REQUEST_METHOD" = "POST" ]; then
+	if auth_locked; then
+		printf 'Status: 200 OK\r\nContent-Type: application/json\r\n\r\n{"ok":false,"error":"locked"}'; exit 0
+	fi
+	DATA=$(head -c "${CONTENT_LENGTH:-0}"); pin=$(get_param pin)
+	_want=$(uci -q get nikki-unblock.config.pin_hash 2>/dev/null)
+	if [ -n "$pin" ] && [ -n "$_want" ] && [ "$(auth_hash "$(uci -q get nikki-unblock.config.pin_salt 2>/dev/null)" "$pin")" = "$_want" ]; then
+		rm -f "$AUTH_FAIL" 2>/dev/null; _tok=$(auth_session_new)
+		printf 'Status: 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: nipret_sess=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%s\r\n\r\n{"ok":true}' "$_tok" "$AUTH_TTL"; exit 0
+	fi
+	printf '%s\n' "$(date +%s)" >> "$AUTH_FAIL"   # record the miss for the brute-force brake
+	printf 'Status: 200 OK\r\nContent-Type: application/json\r\n\r\n{"ok":false,"error":"bad pin"}'; exit 0
+fi
+# everything else is blocked without a live session (when auth is on)
+if auth_enabled && ! auth_session_valid "$(auth_cookie_token)"; then
+	if [ -n "$API" ] || [ "$REQUEST_METHOD" = "POST" ]; then
+		printf 'Status: 401 Unauthorized\r\nContent-Type: application/json\r\nCache-Control: no-store\r\n\r\n{"ok":false,"error":"auth"}'; exit 0
+	fi
+	auth_login_page; exit 0   # a bare page load (panel or ?page=unblock) → serve the PIN screen
+fi
 
 # ---- backup download (GET): stream the tar.gz with attachment headers ------
 [ "$API" = "backup" ] && [ "$REQUEST_METHOD" != "POST" ] && {
@@ -2740,6 +2828,38 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		z2_backupauto_set "$on"
 		[ "$on" = 1 ] && z2_backup_auto_run   # write one immediately so there's something to restore
 		json_header; printf '{"ok":true,"enabled":%s}' "$([ "$on" = 1 ] && echo true || echo false)"; exit 0
+
+		;;
+	authset)
+		# Enable/disable the PIN gate and set/change the PIN. Reachable while auth is OFF (gate open) so
+		# first-time setup works; once ON, this sits behind the gate like any other mutation.
+		en=$(get_param enabled | tr -cd '01' | cut -c1)
+		pin=$(get_param pin)
+		if [ "$en" = 1 ]; then
+			if [ -n "$pin" ]; then
+				[ "${#pin}" -lt 4 ] && { json_header; printf '{"ok":false,"error":"short"}'; exit 0; }
+				_salt=$(auth_rand)
+				uci set nikki-unblock.config.pin_salt="$_salt"
+				uci set nikki-unblock.config.pin_hash="$(auth_hash "$_salt" "$pin")"
+				rm -f "$AUTH_SESS" 2>/dev/null   # a new PIN invalidates every existing session
+			elif [ -z "$(uci -q get nikki-unblock.config.pin_hash 2>/dev/null)" ]; then
+				json_header; printf '{"ok":false,"error":"nopin"}'; exit 0
+			fi
+			uci set nikki-unblock.config.auth_enabled=1; uci commit nikki-unblock
+			_tok=$(auth_session_new)   # keep the caller logged in so enabling doesn't lock them out
+			printf 'Status: 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: nipret_sess=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%s\r\n\r\n{"ok":true,"enabled":true}' "$_tok" "$AUTH_TTL"; exit 0
+		else
+			uci set nikki-unblock.config.auth_enabled=0; uci commit nikki-unblock
+			rm -f "$AUTH_SESS" 2>/dev/null
+			json_header; printf '{"ok":true,"enabled":false}'; exit 0
+		fi
+
+		;;
+	logout)
+		# drop every session so it logs out on all devices (matches the button label); the gate then
+		# serves the PIN screen on the next request. Sends its own headers to clear the cookie.
+		rm -f "$AUTH_SESS" 2>/dev/null
+		printf 'Status: 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: nipret_sess=; Path=/; Max-Age=0\r\n\r\n{"ok":true}'; exit 0
 
 		;;
 	mssclamp)

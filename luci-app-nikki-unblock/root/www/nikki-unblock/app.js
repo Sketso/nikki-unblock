@@ -9,6 +9,11 @@ const I18N = {
     modeSimple: "Простой", modeAdvanced: "Расширенный",
     kioskTitle: "Разблокировать сайт", kioskHint: "Впиши адрес сайта, который не открывается, и нажми «Добавить» — он пойдёт через VPN. Ниже можно развернуть список добавленных и готовые наборы (YouTube, Instagram и др.). Страница доступна с любого устройства в домашней сети.",
     kioskCopy: "Скопировать ссылку на страницу", kioskCopied: "Ссылка скопирована", kioskNoNikki: "VPN (nikki) не установлен — разблокировка через VPN недоступна.",
+    secTitle: "Безопасность", secHint: "Закрыть панель и страницу /unblock PIN-кодом. Даёшь семье ссылку + PIN — и никто чужой из сети не меняет настройки. По умолчанию выключено. Хранится только хэш PIN. Важно: по обычному http (без https) PIN защищает от случайных/гостей, но не от того, кто целенаправленно перехватывает трафик в сети.",
+    secRequire: "Требовать PIN", secPinPh: "PIN (мин. 4 символа)", secPinChange: "Новый PIN (чтобы сменить)",
+    secLogout: "Выйти на всех устройствах", secNeedPin: "Сначала задай PIN ниже", secShort: "PIN слишком короткий (мин. 4)",
+    secPinSet: "PIN задан", secPinNone: "PIN ещё не задан", secSetOn: "Задать PIN", secChange: "Сменить PIN",
+    secOn: "PIN включён", secOff: "PIN выключен", secPinSaved: "PIN сохранён и включён",
     engCommonHint: "Обновления сервиса и движков + резервная копия настроек — общее для всего Nipret.",
     tabCommon: "Общее",
     tabDomains: "Домены в туннель", tabIps: "IP-исключения",
@@ -153,6 +158,11 @@ const I18N = {
     modeSimple: "Simple", modeAdvanced: "Advanced",
     kioskTitle: "Unblock a site", kioskHint: "Type the address of a site that won't open and hit “Add” — it will go through the VPN. Below you can expand the added list and ready-made bundles (YouTube, Instagram, etc.). This page works from any device on the home network.",
     kioskCopy: "Copy link to this page", kioskCopied: "Link copied", kioskNoNikki: "VPN (nikki) isn't installed — VPN unblocking is unavailable.",
+    secTitle: "Security", secHint: "Lock the panel and the /unblock page behind a PIN. Hand out the link + PIN to your family so no stranger on the network changes settings. Off by default. Only a hash of the PIN is stored. Note: over plain http (no https) a PIN keeps casual/guest users out, but not someone deliberately sniffing the network.",
+    secRequire: "Require a PIN", secPinPh: "PIN (min. 4 chars)", secPinChange: "New PIN (to change it)",
+    secLogout: "Log out on all devices", secNeedPin: "Set a PIN below first", secShort: "PIN too short (min. 4)",
+    secPinSet: "PIN is set", secPinNone: "No PIN set yet", secSetOn: "Set PIN", secChange: "Change PIN",
+    secOn: "PIN required", secOff: "PIN turned off", secPinSaved: "PIN saved and turned on",
     engCommonHint: "Service & engine updates + config backup — shared across Nipret.",
     tabCommon: "General",
     tabDomains: "Domains via VPN", tabIps: "IP exclusions",
@@ -359,6 +369,7 @@ function setOverlay(txt){ const t2 = $("#overlayText"); if (t2) t2.textContent =
 function hideOverlay(){ const o = $("#overlay"); if (o) o.hidden = true; }
 async function api(action, params){
   const r = await fetch("", { method:"POST", body: new URLSearchParams({ action, ...params }) });
+  if (r.status === 401){ location.reload(); return {}; }   // session expired → back to the PIN screen
   return r.json();
 }
 
@@ -371,7 +382,7 @@ document.querySelectorAll(".tab").forEach(tb => tb.addEventListener("click", () 
   if (tb.dataset.view === "nodes") loadNodes().then(autoPingNodes);
   else if (tb.dataset.view === "domains") presetOp.ensure();   // resume a preset spinner if one is applying
   else if (tb.dataset.view === "mgmt") loadSvc();
-  else if (tb.dataset.view === "common") { loadVersions(); loadUpdCheck(); loadBackup(); loadZ2Backup(); loadUndo(); }   // Общее: updates + backup
+  else if (tb.dataset.view === "common") { loadVersions(); loadUpdCheck(); loadBackup(); loadZ2Backup(); loadAuth(); loadUndo(); }   // Общее: updates + backup + security
   else if (tb.dataset.view === "devices") loadDevices();
   else if (tb.dataset.view.indexOf("z2") === 0) { loadZapret2(); z2PresetOp.ensure(); }   // any zapret2 sub-view
 }));
@@ -1531,6 +1542,49 @@ $("#z2bkList").addEventListener("click", async e => {
   if (res && res.ok){ setMsg($("#z2bkMsg"), t("done")); loadZapret2(); }
   else setMsg($("#z2bkMsg"), t("errP") + ((res && res.error) || "?"), false);
 });
+/* ---------- security: optional PIN gate ---------- */
+let AUTH_ON = false, PIN_SET = false;
+function renderAuth(){
+  $("#authOn").checked = AUTH_ON;
+  $("#authLogout").hidden = !AUTH_ON;
+  // status line makes it obvious whether a PIN already exists (first complaint)
+  const st = $("#authStatus");
+  st.textContent = PIN_SET ? "✓ " + t("secPinSet") : t("secPinNone");
+  st.classList.toggle("ok", PIN_SET);
+  // the button both sets a PIN and turns the gate on — its label reflects which
+  $("#authApply").textContent = t(PIN_SET ? "secChange" : "secSetOn");
+  $("#authPin").placeholder = t(PIN_SET ? "secPinChange" : "secPinPh");
+}
+async function loadAuth(){
+  try { const c = await (await fetch("?api=config")).json(); AUTH_ON = c.auth_enabled === 1; PIN_SET = c.pin_set === 1; } catch(e){}
+  renderAuth();
+}
+// the toggle applies IMMEDIATELY (no separate Apply) — matches every other switch in the panel
+$("#authOn").addEventListener("change", async e => {
+  const want = e.currentTarget.checked;
+  if (want && !PIN_SET){   // can't require a PIN that doesn't exist yet — guide, don't half-enable
+    e.currentTarget.checked = false;
+    setMsg($("#secMsg"), t("secNeedPin"), false);
+    $("#authPin").focus();
+    return;
+  }
+  setMsg($("#secMsg"), t("applying"));
+  const res = await api("authset", { enabled: want ? 1 : 0 });
+  if (res && res.ok){ AUTH_ON = !!res.enabled; renderAuth(); setMsg($("#secMsg"), t(want ? "secOn" : "secOff")); }
+  else { e.currentTarget.checked = AUTH_ON; setMsg($("#secMsg"), t("errP") + ((res && res.error) || "?"), false); }
+});
+// set or change the PIN (also turns the gate on — setting a PIN implies wanting it)
+$("#authApply").addEventListener("click", async () => {
+  const pin = $("#authPin").value;
+  if (pin.length < 4){ setMsg($("#secMsg"), t("secShort"), false); return; }
+  setMsg($("#secMsg"), t("applying"));
+  const res = await api("authset", { enabled: 1, pin });
+  if (res && res.ok){ $("#authPin").value = ""; AUTH_ON = true; PIN_SET = true; renderAuth(); setMsg($("#secMsg"), t("secPinSaved")); }
+  else setMsg($("#secMsg"), t("errP") + ((res && res.error === "short") ? t("secShort") : (res && res.error) || "?"), false);
+});
+$("#authLogout").addEventListener("click", async () => {
+  await api("logout", {}); location.reload();   // reload → PIN screen (auth still on)
+});
 $("#bkRestoreBtn").addEventListener("click", () => $("#bkFile").click());
 $("#bkFile").addEventListener("change", async e => {
   const file = e.target.files[0]; if (!file){ return; }
@@ -1696,7 +1750,7 @@ async function bootKiosk(){
   if (CAPS.nikki){ loadIps(); loadAutosync(); loadNodes(); loadSvc(); presetOp.ensure(); }
   if (CAPS.zapret2) z2PresetOp.ensure();   // resume a z2-preset spinner if one is applying
   if (CAPS.nikki || CAPS.zapret2) loadDevices();
-  loadVersions(); loadUpdCheck(); loadBackup(); loadZ2Backup(); loadUndo();   // one availability check per session (cached)
+  loadVersions(); loadUpdCheck(); loadBackup(); loadZ2Backup(); loadAuth(); loadUndo();   // one availability check per session (cached)
   // resume the log view if an update is already running (started from another tab/session)
   try { const s = await (await fetch("?api=updatestatus")).json(); if (s && s.running) pollUpdate(); } catch(e){}
 })();

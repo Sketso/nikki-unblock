@@ -49,6 +49,8 @@
   .kiosk-bar h2 { margin: 0; flex: 1; }
   .kiosk-tools { display: flex; align-items: center; gap: .8rem; margin-top: .5rem; }
   .kiosk-nikkiwarn { color: #dc2626; font-size: .85rem; }
+  .secstatus { font-size: .85rem; opacity: .7; margin: .2rem 0 .4rem; }
+  .secstatus.ok { color: #16a34a; opacity: 1; }
   .undo-wrap { position: relative; }
   .undo-btn { padding: .3rem .6rem; font-size: 1rem; line-height: 1; background: #8883; color: inherit; border-radius: 8px; }
   .undo-menu { display: none; position: absolute; right: 0; top: 100%; margin-top: .35rem; z-index: 50; min-width: 15rem; max-width: 22rem;

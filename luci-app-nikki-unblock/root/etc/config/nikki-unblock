@@ -32,3 +32,7 @@ config nikki-unblock 'config'
 	# One-time marker: has the old IP-keyed z2_bypass_ip / nikki lan_access_control.ip data already
 	# been migrated to MAC? Set by the panel itself on first request after upgrade; don't hand-edit.
 	option dev_mac_migrated '0'
+	# Optional PIN gate for the panel + /unblock page (OFF by default). Set from Общее → Безопасность:
+	# stores only a salted sha256 hash (pin_salt / pin_hash), never the PIN itself. Over plain http this
+	# keeps casual/guest LAN users out, but is not protection against someone sniffing the network.
+	option auth_enabled '0'
