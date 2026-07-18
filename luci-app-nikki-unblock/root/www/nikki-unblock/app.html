@@ -351,36 +351,39 @@
       <div class="msg" id="updMsg"></div>
     </div>
 
-    <div class="svc upd">
-      <h3 data-i18n="bkTitle"></h3>
-      <div class="btns">
-        <button type="button" id="bkDownload" data-i18n="bkDownload"></button>
-        <button type="button" class="ghost" id="bkRestoreBtn" data-i18n="bkRestore"></button>
-        <input type="file" id="bkFile" accept=".gz,.tar.gz,application/gzip" hidden>
+    <div class="bkgroup">
+      <div class="bkgroup-head" data-i18n="bkGroupTitle"></div>
+      <div class="svc upd">
+        <h3 data-i18n="bkTitle"></h3>
+        <div class="btns">
+          <button type="button" id="bkDownload" data-i18n="bkDownload"></button>
+          <button type="button" class="ghost" id="bkRestoreBtn" data-i18n="bkRestore"></button>
+          <input type="file" id="bkFile" accept=".gz,.tar.gz,application/gzip" hidden>
+        </div>
+        <div class="swrow">
+          <span class="swlabel" data-i18n="bkAuto"></span>
+          <label class="sw"><input type="checkbox" id="bkAutoOn"><span class="sl"></span></label>
+        </div>
+        <ul id="bkList" class="nodelist"></ul>
+        <div class="hint" data-i18n="bkHint"></div>
+        <div class="msg" id="bkMsg"></div>
       </div>
-      <div class="swrow">
-        <span class="swlabel" data-i18n="bkAuto"></span>
-        <label class="sw"><input type="checkbox" id="bkAutoOn"><span class="sl"></span></label>
-      </div>
-      <ul id="bkList" class="nodelist"></ul>
-      <div class="hint" data-i18n="bkHint"></div>
-      <div class="msg" id="bkMsg"></div>
-    </div>
 
-    <div class="svc upd" id="z2bkBlock" hidden>
-      <h3 data-i18n="z2bkTitle"></h3>
-      <div class="btns">
-        <button type="button" id="z2bkDownload" data-i18n="bkDownload"></button>
-        <button type="button" class="ghost" id="z2bkRestoreBtn" data-i18n="bkRestore"></button>
-        <input type="file" id="z2bkFile" accept=".gz,.tar.gz,application/gzip" hidden>
+      <div class="svc upd" id="z2bkBlock" hidden>
+        <h3 data-i18n="z2bkTitle"></h3>
+        <div class="btns">
+          <button type="button" id="z2bkDownload" data-i18n="bkDownload"></button>
+          <button type="button" class="ghost" id="z2bkRestoreBtn" data-i18n="bkRestore"></button>
+          <input type="file" id="z2bkFile" accept=".gz,.tar.gz,application/gzip" hidden>
+        </div>
+        <div class="swrow">
+          <span class="swlabel" data-i18n="bkAuto"></span>
+          <label class="sw"><input type="checkbox" id="z2bkAutoOn"><span class="sl"></span></label>
+        </div>
+        <ul id="z2bkList" class="nodelist"></ul>
+        <div class="hint" data-i18n="z2bkHint"></div>
+        <div class="msg" id="z2bkMsg"></div>
       </div>
-      <div class="swrow">
-        <span class="swlabel" data-i18n="bkAuto"></span>
-        <label class="sw"><input type="checkbox" id="z2bkAutoOn"><span class="sl"></span></label>
-      </div>
-      <ul id="z2bkList" class="nodelist"></ul>
-      <div class="hint" data-i18n="z2bkHint"></div>
-      <div class="msg" id="z2bkMsg"></div>
     </div>
 
     <div class="svc upd">

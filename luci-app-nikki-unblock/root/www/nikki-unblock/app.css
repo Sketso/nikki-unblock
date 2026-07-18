@@ -143,6 +143,10 @@
   .modecard .hint { margin: .5rem 0 0; }
   .applybar { display: flex; align-items: center; gap: .8rem; margin-top: 1rem; padding-top: .8rem; border-top: 1px solid #8882; }
   .applybar .msg { margin: 0; }
+  .bkgroup { border: 1px solid #8884; border-radius: 12px; padding: .4rem 1rem 1rem; margin: .4rem 0; }
+  .bkgroup-head { font-size: .95rem; font-weight: 600; margin: .7rem 0 .2rem; }
+  .bkgroup .svc { padding-top: .8rem; border-top: 1px solid #8882; }
+  .bkgroup .svc:first-of-type { border-top: 0; padding-top: 0; }
   .svc { display: flex; flex-direction: column; gap: .8rem; max-width: 440px; }
   .svc .st { font-size: 1rem; font-weight: 600; }
   .svc .dot { display: inline-block; width: .62rem; height: .62rem; border-radius: 50%; margin-right: .45rem; vertical-align: middle; background: #8886; }

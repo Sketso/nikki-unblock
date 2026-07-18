@@ -1616,11 +1616,12 @@ restore_backup() {
 }
 backup_auto_run() {
 	mkdir -p "$BACKUP_DIR"
-	# combined snapshot (nikki + zapret2) so "restore yesterday" covers BOTH engines
-	snap_build "$BACKUP_DIR/daily.tar.gz" auto >/dev/null 2>&1
+	# nikki-only rotating backup (zapret2 has its own auto-backup — z2_backup_auto_run — for parity with
+	# the per-engine manual backups). snap_restore reads this build_backup format via its legacy branch.
+	build_backup "$BACKUP_DIR/daily.tar.gz" >/dev/null 2>&1
 	[ "$(date +%u)" = 1 ]  && cp "$BACKUP_DIR/daily.tar.gz" "$BACKUP_DIR/weekly.tar.gz" 2>/dev/null
 	[ "$(date +%d)" = 01 ] && cp "$BACKUP_DIR/daily.tar.gz" "$BACKUP_DIR/monthly.tar.gz" 2>/dev/null
-	logger -t nikki-unblock "auto-backup written"
+	logger -t nikki-unblock "nikki auto-backup written"
 }
 # zapret2-only rotating auto-backup (mirror of backup_auto_run). Files are prefixed z2- so they never
 # collide with the combined set. No-op if zapret2 isn't installed.
