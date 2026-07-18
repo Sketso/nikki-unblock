@@ -19,6 +19,7 @@
         <button class="undo-btn" id="undoTop" aria-haspopup="true">↩</button>
         <div class="undo-menu" id="undoMenu"></div>
       </span>
+      <span class="mode"><a data-mode="simple" data-i18n="modeSimple"></a> · <a data-mode="advanced" data-i18n="modeAdvanced"></a></span>
       <span class="lang"><a data-lang="ru">RU</a> · <a data-lang="en">EN</a></span>
     </span></h1>
   <div class="banner" id="guard" hidden></div>
@@ -30,14 +31,14 @@
   <div class="hint engine-hint" id="engineHint"></div>
   <div class="tabs tabs-sub">
     <button class="tab active" data-view="domains" data-engine="nikki" data-i18n="tabDomains"></button>
-    <button class="tab" data-view="ips" data-engine="nikki" data-i18n="tabIps"></button>
-    <button class="tab" data-view="nodes" data-engine="nikki" data-i18n="tabNodes"></button>
-    <button class="tab" data-view="mgmt" data-engine="nikki" data-i18n="tabMgmt"></button>
+    <button class="tab adv" data-view="ips" data-engine="nikki" data-i18n="tabIps"></button>
+    <button class="tab adv" data-view="nodes" data-engine="nikki" data-i18n="tabNodes"></button>
+    <button class="tab adv" data-view="mgmt" data-engine="nikki" data-i18n="tabMgmt"></button>
     <button class="tab" data-view="z2domains" data-engine="zapret2" data-i18n="z2TabDomains"></button>
-    <button class="tab" data-view="z2auto" data-engine="zapret2" data-i18n="z2TabAuto"></button>
-    <button class="tab" data-view="z2exclude" data-engine="zapret2" data-i18n="z2TabExclude"></button>
-    <button class="tab" data-view="z2svc" data-engine="zapret2" data-i18n="z2TabSvc"></button>
-    <button class="tab" data-view="devices" data-engine="common" data-i18n="tabDevices"></button>
+    <button class="tab adv" data-view="z2auto" data-engine="zapret2" data-i18n="z2TabAuto"></button>
+    <button class="tab adv" data-view="z2exclude" data-engine="zapret2" data-i18n="z2TabExclude"></button>
+    <button class="tab adv" data-view="z2svc" data-engine="zapret2" data-i18n="z2TabSvc"></button>
+    <button class="tab adv" data-view="devices" data-engine="common" data-i18n="tabDevices"></button>
     <button class="tab" data-view="common" data-engine="common" data-i18n="tabCommon"></button>
   </div>
 
@@ -46,7 +47,7 @@
     <div class="dom-layout">
       <div class="dom-main">
         <form class="add" id="addForm">
-          <select id="rtype" data-i18n-title="tType">
+          <select id="rtype" class="adv" data-i18n-title="tType">
             <option value="DOMAIN-SUFFIX" data-i18n="tSuffix"></option>
             <option value="DOMAIN" data-i18n="tDomain"></option>
             <option value="DOMAIN-KEYWORD" data-i18n="tKeyword"></option>
@@ -55,7 +56,7 @@
             <option value="IP-CIDR">IP-CIDR</option>
           </select>
           <input id="domain" placeholder="example.com" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required>
-          <select id="rnode" data-i18n-title="nAction">
+          <select id="rnode" class="adv" data-i18n-title="nAction">
             <option value="UNBLOCK" data-i18n="nProxy"></option>
             <option value="DIRECT" data-i18n="nDirect"></option>
             <option value="REJECT" data-i18n="nReject"></option>
@@ -63,17 +64,17 @@
           <button type="submit" id="addBtn" data-i18n="add"></button>
         </form>
 
-        <details class="help">
+        <details class="help adv">
           <summary data-i18n="helpSummary"></summary>
           <div class="helpbody" data-i18n-html="helpBody"></div>
         </details>
 
         <div class="row">
-          <button type="button" class="ghost" id="modeToggle"></button>
+          <button type="button" class="ghost adv" id="modeToggle"></button>
           <span class="count" id="count"></span>
         </div>
 
-        <div class="fbar">
+        <div class="fbar adv">
           <input class="flt" id="fltList" data-i18n-ph="fltPh" autocomplete="off" autocapitalize="off" spellcheck="false">
           <label class="fall"><input type="checkbox" id="fallList"><span data-i18n="fltAll"></span></label>
           <button type="button" class="ghost" id="fdelList" data-i18n="fltDel" disabled></button>
@@ -97,7 +98,7 @@
         <div class="presets" id="presets"><span class="hint" data-i18n="loading"></span></div>
         <div class="msg" id="presetMsg"></div>
 
-        <div class="autosync">
+        <div class="autosync adv">
           <div class="asrow"><label class="sw"><input type="checkbox" id="autoOn"><span class="sl"></span></label> <span data-i18n="autoUpdate"></span></div>
           <select id="autoIv">
             <option value="1h" data-i18n="iv1h"></option>
@@ -180,7 +181,7 @@
       <button type="submit" id="z2Btn" data-i18n="add"></button>
     </form>
     <div class="msg" id="z2DomMsg"></div>
-    <div class="fbar">
+    <div class="fbar adv">
       <input class="flt" id="fltZ2U" data-i18n-ph="fltPh" autocomplete="off" autocapitalize="off" spellcheck="false">
       <label class="fall"><input type="checkbox" id="fallZ2U"><span data-i18n="fltAll"></span></label>
       <button type="button" class="ghost" id="fdelZ2U" data-i18n="fltDel" disabled></button>
@@ -351,7 +352,7 @@
       <div class="msg" id="updMsg"></div>
     </div>
 
-    <div class="bkgroup">
+    <div class="bkgroup adv">
       <div class="bkgroup-head" data-i18n="bkGroupTitle"></div>
       <div class="svc upd">
         <h3 data-i18n="bkTitle"></h3>
@@ -386,7 +387,7 @@
       </div>
     </div>
 
-    <div class="svc upd">
+    <div class="svc upd adv">
       <h3 data-i18n="rpTitle"></h3>
       <div class="hint" data-i18n="rpHint"></div>
       <textarea id="rpDesc" spellcheck="false" data-i18n-ph="rpPh"></textarea>

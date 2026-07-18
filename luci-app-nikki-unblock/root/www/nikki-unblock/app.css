@@ -36,6 +36,11 @@
   .lang { font-size: .8rem; font-weight: normal; }
   .lang a { cursor: pointer; opacity: .5; text-decoration: none; color: inherit; }
   .lang a.on { opacity: 1; font-weight: 600; text-decoration: underline; }
+  .mode { font-size: .8rem; font-weight: normal; }
+  .mode a { cursor: pointer; opacity: .5; text-decoration: none; color: inherit; }
+  .mode a.active { opacity: 1; font-weight: 600; text-decoration: underline; }
+  /* simple mode hides every advanced control/sub-tab; advanced shows everything */
+  body.mode-simple .adv { display: none !important; }
   .undo-wrap { position: relative; }
   .undo-btn { padding: .3rem .6rem; font-size: 1rem; line-height: 1; background: #8883; color: inherit; border-radius: 8px; }
   .undo-menu { display: none; position: absolute; right: 0; top: 100%; margin-top: .35rem; z-index: 50; min-width: 15rem; max-width: 22rem;

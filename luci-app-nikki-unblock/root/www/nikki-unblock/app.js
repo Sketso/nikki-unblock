@@ -1,11 +1,12 @@
 const $ = s => document.querySelector(s);
 const escH = s => (s + "").replace(/[<>&"]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
-let RULES = [], PRESETS = [], LANG = "ru";
+let RULES = [], PRESETS = [], LANG = "ru", MODE = "simple";
 
 const I18N = {
   ru: {
     h1: "Nipret · VPN + обход DPI",
     engNikki: "VPN (Nikki)", engZapret2: "Обход DPI (Zapret2)", engCommon: "Общее",
+    modeSimple: "Простой", modeAdvanced: "Расширенный",
     engCommonHint: "Обновления сервиса и движков + резервная копия настроек — общее для всего Nipret.",
     tabCommon: "Общее",
     tabDomains: "Домены в туннель", tabIps: "IP-исключения",
@@ -147,6 +148,7 @@ const I18N = {
   en: {
     h1: "Nipret · VPN + DPI-bypass",
     engNikki: "VPN (Nikki)", engZapret2: "DPI bypass (Zapret2)", engCommon: "General",
+    modeSimple: "Simple", modeAdvanced: "Advanced",
     engCommonHint: "Service & engine updates + config backup — shared across Nipret.",
     tabCommon: "General",
     tabDomains: "Domains via VPN", tabIps: "IP exclusions",
@@ -308,6 +310,20 @@ function setLang(l){
 }
 document.querySelectorAll(".lang a").forEach(a => a.addEventListener("click", () => setLang(a.dataset.lang)));
 
+/* simple vs advanced UI: simple hides everything marked .adv (deep controls / sub-tabs), leaving just
+   the presets + add-a-domain essentials. Per-browser like the language, default simple. */
+function setMode(m){
+  MODE = (m === "advanced") ? "advanced" : "simple";
+  try { localStorage.nikkiMode = MODE; } catch(e){}
+  document.body.classList.toggle("mode-advanced", MODE === "advanced");
+  document.body.classList.toggle("mode-simple", MODE === "simple");
+  document.querySelectorAll(".mode a").forEach(a => a.classList.toggle("active", a.dataset.mode === MODE));
+  // re-evaluate sub-tabs for the current engine so a now-hidden adv tab can't stay active
+  const cur = document.querySelector(".tab-top.active");
+  if (cur) selectEngine(cur.dataset.engine);
+}
+document.querySelectorAll(".mode a").forEach(a => a.addEventListener("click", () => setMode(a.dataset.mode)));
+
 /* global status toast: in-progress (text ends with …) stays with running dots; success/errors
    pop then auto-dismiss. Driven by every setMsg call so statuses are noticeable everywhere. */
 let toastTimer = null, toastClick = null;
@@ -363,7 +379,9 @@ function selectEngine(eng){
   hint.textContent = t(hint.dataset.i18n);
   let first = null, n = 0;
   document.querySelectorAll(".tabs-sub .tab").forEach(b => {
-    const show = b.dataset.engine === eng; b.hidden = !show;
+    // in simple mode an .adv sub-tab stays hidden — and must not be picked as the first/active one
+    const show = b.dataset.engine === eng && !(MODE === "simple" && b.classList.contains("adv"));
+    b.hidden = !show;
     if (show){ n++; if (!first) first = b; }
   });
   $(".tabs-sub").hidden = n <= 1;   // single-view engine → hide the (one-button) sub-bar
@@ -1640,6 +1658,9 @@ $("#updAll").addEventListener("click", () => doUpdate("all"));
   try { const c = await (await fetch("?api=config")).json(); def = c.lang || "ru"; EXITG = c.exit_group || "UNBLOCK";
         CAPS = { nikki: c.nikki !== 0, zapret2: c.zapret2 !== 0 }; } catch(e){}
   try { LANG = localStorage.nikkiLang || def; } catch(e){ LANG = def; }
+  try { MODE = (localStorage.nikkiMode === "advanced") ? "advanced" : "simple"; } catch(e){ MODE = "simple"; }
+  document.body.classList.add(MODE === "advanced" ? "mode-advanced" : "mode-simple");
+  document.querySelectorAll(".mode a").forEach(a => a.classList.toggle("active", a.dataset.mode === MODE));
   applyI18n();
   applyCaps();                       // hide the tabs/controls for whichever engine isn't installed
   setOverlay(t("loading"));
