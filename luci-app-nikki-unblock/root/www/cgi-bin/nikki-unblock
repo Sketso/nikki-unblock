@@ -46,6 +46,9 @@ NODES_DIR="/etc/nikki-unblock/nodes"
 PROV_DIR="/etc/nikki-unblock/providers"
 ORDER_FILE="/etc/nikki-unblock/nodes.order"   # exit node names in user-chosen order (profile + ours)
 OFF_FILE="/etc/nikki-unblock/nodes.off"        # disabled exit node names (works for profile + our nodes)
+AUTOOFF_FILE="/etc/nikki-unblock/nodes.autooff" # subset of OFF_FILE the health watchdog disabled itself —
+                                                # only these get auto re-enabled on recovery; a name the
+                                                # user disabled by hand (in OFF_FILE, not here) stays off
 SUBS_DIR="/etc/nikki-unblock/subs"             # tracked link-subscriptions: <subid>.conf (url + name)
 SUB_TAG="# nikki-unblock-subsync"              # crontab marker for subscription auto-refresh
 BACKUP_DIR="/etc/nikki-unblock/backups"        # rotating auto-backups (daily/weekly/monthly)
@@ -889,6 +892,66 @@ regen_mixin() {
 	uci set nikki.mixin.mixin_file_content=1 2>/dev/null; uci commit nikki 2>/dev/null
 }
 
+# ---- node health watchdog (self-heal exit nodes that go down, or come back) -----------------
+# nodeadd's own post-add probe only judges a node once, at add time. A node that's fine today can go
+# dark later (VPN box rebooted for maintenance, provider hiccup) — or come back AFTER such an outage —
+# and nothing ever revisited it: OFF_FILE just kept whatever nodeadd or the user last left it at. Run
+# from cron every few minutes against OUR added nodes ($NODES_DIR):
+#   - NODEWD_FAILS consecutive failed probes on an enabled node -> disable it (marked in AUTOOFF_FILE)
+#   - one successful probe on a node WE disabled                -> re-enable it automatically
+# A node the user disabled by hand (in OFF_FILE but NOT in AUTOOFF_FILE) is never re-enabled here — a
+# manual OFF is honored permanently. A manual ON just returns the node to normal watching (a still-dead
+# node can be auto-disabled again, then auto-recovered); nodetoggle clears the AUTOOFF mark on any toggle.
+NODEWD_STATE="/tmp/nikki-unblock-nodewd"
+NODEWD_LOCK="/tmp/nikki-unblock-nodewd.lock"
+NODEWD_FAILS=2   # consecutive bad ticks before disabling — rides out a single blip/timeout
+node_watchdog_run() {
+	pgrep -f /usr/bin/mihomo >/dev/null || return 0
+	ls "$NODES_DIR"/*.yaml >/dev/null 2>&1 || return 0
+	# API-liveness gate: mihomo can be RUNNING yet its API briefly unresponsive (e.g. mid-reload), which
+	# would make EVERY per-node probe return "x" and mass-disable all nodes into DIRECT. Only proceed once
+	# the control API actually answers, so an "x" below genuinely means THAT node is down, not the API.
+	curl -s -m 5 -H "Authorization: Bearer $(mihomo_secret)" "$MIHOMO_API/version" 2>/dev/null | grep -q '"version"' || return 0
+	# single-runner guard: with several down nodes each probe waits up to ~14 s, so a run can outlast the
+	# 5-min cron cadence. Two overlapping runs both do `> $MIXIN_FILE` (non-atomic) → a corrupt mixin can
+	# stop mihomo from loading. Skip if a prior run is still alive; steal a dead PID or a >10-min-old lock.
+	if [ -f "$NODEWD_LOCK" ]; then
+		_lp=$(cat "$NODEWD_LOCK" 2>/dev/null)
+		_la=$(( $(date +%s) - $(date -r "$NODEWD_LOCK" +%s 2>/dev/null || echo 0) ))
+		kill -0 "$_lp" 2>/dev/null && [ "$_la" -lt 600 ] && return 0
+	fi
+	echo $$ > "$NODEWD_LOCK"
+	mkdir -p "$NODEWD_STATE"; touch "$OFF_FILE" "$AUTOOFF_FILE"
+	changed=0
+	for f in "$NODES_DIR"/*.yaml; do
+		[ -f "$f" ] || continue
+		nm=$(grep -m1 'name:' "$f" | sed 's/.*name:[[:space:]]*//'); [ -n "$nm" ] || continue
+		sf="$NODEWD_STATE/$(san_name "$nm")"
+		if grep -qxF "$nm" "$OFF_FILE" && ! grep -qxF "$nm" "$AUTOOFF_FILE"; then
+			continue   # user disabled it by hand — not ours to touch
+		fi
+		if [ "$(mihomo_delay "$nm")" != x ]; then
+			rm -f "$sf"
+			if grep -qxF "$nm" "$AUTOOFF_FILE"; then
+				grep -vxF "$nm" "$OFF_FILE" > "$OFF_FILE.tmp"; mv "$OFF_FILE.tmp" "$OFF_FILE"
+				grep -vxF "$nm" "$AUTOOFF_FILE" > "$AUTOOFF_FILE.tmp"; mv "$AUTOOFF_FILE.tmp" "$AUTOOFF_FILE"
+				logger -t nikki-unblock "node '$nm' reachable again -> re-enabled"
+				changed=1
+			fi
+		else
+			n=$(( $(cat "$sf" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$sf"
+			if [ "$n" -ge "$NODEWD_FAILS" ] && ! grep -qxF "$nm" "$OFF_FILE"; then
+				printf '%s\n' "$nm" >> "$OFF_FILE"
+				printf '%s\n' "$nm" >> "$AUTOOFF_FILE"
+				logger -t nikki-unblock "node '$nm' unreachable ($n checks) -> disabled"
+				changed=1
+			fi
+		fi
+	done
+	[ "$changed" = 1 ] && { regen_mixin; apply_nikki; }
+	rm -f "$NODEWD_LOCK"
+}
+
 # ---- link subscriptions (tracked & refreshable) ---------------------------
 # Fetch a subscription URL -> share-links (base64 or plain text), one per line, deduped.
 sub_links() {
@@ -1587,6 +1650,7 @@ build_backup() {
 	[ -f "$MIXIN_FILE" ] && cp "$MIXIN_FILE" "$_d/mixin.yaml"
 	for p in nodes providers subs; do [ -d "/etc/nikki-unblock/$p" ] && cp -r "/etc/nikki-unblock/$p" "$_d/store/"; done
 	[ -f "$ORDER_FILE" ] && cp "$ORDER_FILE" "$_d/store/"; [ -f "$OFF_FILE" ] && cp "$OFF_FILE" "$_d/store/"
+	[ -f "$AUTOOFF_FILE" ] && cp "$AUTOOFF_FILE" "$_d/store/"   # keep the auto/manual distinction across restore
 	printf '{"version":"%s","date":"%s","host":"%s"}' \
 		"$(pkg_ver luci-app-nikki-unblock)" "$(date '+%Y-%m-%d %H:%M')" "$(uci -q get system.@system[0].hostname 2>/dev/null)" > "$_d/manifest.json"
 	_out="${1:-/tmp/nikki-unblock-backup.tar.gz}"
@@ -1605,6 +1669,9 @@ restore_backup() {
 		for p in nodes providers subs; do [ -d "$1/store/$p" ] && cp -r "$1/store/$p" /etc/nikki-unblock/; done
 		mkdir -p "$NODES_DIR" "$PROV_DIR" "$SUBS_DIR"
 		cp "$1/store/nodes.order" "$ORDER_FILE" 2>/dev/null; cp "$1/store/nodes.off" "$OFF_FILE" 2>/dev/null
+		# full-replace: clear stale autooff, then restore it if the backup carried one (pre-feature backups
+		# won't — those OFF entries then read as manual, which is the safe default: they just stay disabled)
+		rm -f "$AUTOOFF_FILE"; cp "$1/store/nodes.autooff" "$AUTOOFF_FILE" 2>/dev/null
 		[ -f "$1/mixin.yaml" ] && cp "$1/mixin.yaml" "$MIXIN_FILE"
 	}
 	_apply_store "$_rd"
@@ -1885,7 +1952,8 @@ z2_backupauto_json() {
 }
 
 # Unified exit list as JSON — NEVER includes secrets. Shape:
-# {mode, active, nodes:[{name,kind,id,type,host,enabled,active}], providers:[{id,name,count}]}
+# {mode, active, nodes:[{name,kind,id,type,host,enabled,active,auto}], providers:[{id,name,count}]}
+# auto=1 means the watchdog (not the user) turned this node off — it'll re-enable itself on recovery.
 # nodes[] = ordered union of profile nodes (kind:profile, id="") + our nodes (kind:node, id=file).
 nodes_json() {
 	json_header
@@ -1917,9 +1985,10 @@ nodes_json() {
 		fi
 		en=1; node_disabled "$nm" && en=0
 		act=0; [ "$nm" = "$active" ] && act=1
+		auto=0; [ "$en" = 0 ] && grep -qxF "$nm" "$AUTOOFF_FILE" 2>/dev/null && auto=1
 		[ "$first" = 1 ] || printf ','; first=0
-		printf '{"name":"%s","kind":"%s","id":"%s","type":"%s","host":"%s","sub":"%s","enabled":%s,"active":%s}' \
-			"$(json_esc "$nm")" "$kind" "$id" "$(json_esc "$ty")" "$(json_esc "$hs")" "$(json_esc "$sb")" "$en" "$act"
+		printf '{"name":"%s","kind":"%s","id":"%s","type":"%s","host":"%s","sub":"%s","enabled":%s,"active":%s,"auto":%s}' \
+			"$(json_esc "$nm")" "$kind" "$id" "$(json_esc "$ty")" "$(json_esc "$hs")" "$(json_esc "$sb")" "$en" "$act" "$auto"
 	done
 	rm -f "$OM"
 	printf '],"providers":['
@@ -1948,6 +2017,8 @@ nodes_json() {
 [ "$1" = "regen" ] && { regen_mixin; exit 0; }
 # cron/CLI: refresh all tracked link-subscriptions (add/update/remove nodes)
 [ "$1" = "subsync" ] && { subrefresh_all; exit 0; }
+# cron/CLI: re-probe our nodes — auto-disable ones that stopped responding, auto-recover ones that came back
+[ "$1" = "nodewatch" ] && { node_watchdog_run; exit 0; }
 # cron/CLI: write a rotating auto-backup (daily/weekly/monthly)
 [ "$1" = "backupauto" ] && { backup_auto_run; exit 0; }
 [ "$1" = "z2backupauto" ] && { z2_backup_auto_run; exit 0; }
@@ -2740,7 +2811,20 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		fi
 		if [ "$kind" = node ]; then
 			rn=$(grep -m1 'name:' "$NODES_DIR/$id.yaml" | sed 's/.*name:[[:space:]]*//')
-			json_header; printf '{"ok":true,"kind":"node","id":"%s","name":"%s","delay":"%s"}' "$id" "$rn" "$(mihomo_delay "$rn")"; exit 0
+			d=$(mihomo_delay "$rn")
+			[ "$d" = x ] && { sleep 3; d=$(mihomo_delay "$rn"); }   # one retry: a fresh handshake can be slow
+			auto=0
+			if [ "$d" = x ]; then
+				# still unreachable -> disable it, same bookkeeping as the watchdog (AUTOOFF_FILE) so it
+				# gets auto re-enabled once node_watchdog_run sees it respond (e.g. server still booting)
+				touch "$OFF_FILE" "$AUTOOFF_FILE"
+				grep -qxF "$rn" "$OFF_FILE" || printf '%s\n' "$rn" >> "$OFF_FILE"
+				grep -qxF "$rn" "$AUTOOFF_FILE" || printf '%s\n' "$rn" >> "$AUTOOFF_FILE"
+				regen_mixin; apply_nikki
+				auto=1
+			fi
+			json_header; printf '{"ok":true,"kind":"node","id":"%s","name":"%s","delay":"%s","autodisabled":%s}' \
+				"$id" "$rn" "$d" "$([ "$auto" = 1 ] && echo true || echo false)"; exit 0
 		elif [ "$kind" = multi ]; then
 			json_header; printf '{"ok":true,"kind":"multi","added":%d}' "$added"; exit 0
 		fi
@@ -2752,8 +2836,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		if [ -n "$id" ]; then
 			nm=$(grep -m1 'name:' "$NODES_DIR/$id.yaml" 2>/dev/null | sed 's/.*name:[[:space:]]*//')
 			rm -f "$NODES_DIR/$id.yaml" "$NODES_DIR/$id.off" "$NODES_DIR/$id.src" "$PROV_DIR/$id.yaml"
-			# drop the name from the order/off lists too
-			for L in "$ORDER_FILE" "$OFF_FILE"; do
+			# drop the name from the order/off/autooff lists too
+			for L in "$ORDER_FILE" "$OFF_FILE" "$AUTOOFF_FILE"; do
 				[ -n "$nm" ] && [ -f "$L" ] && { grep -vxF "$nm" "$L" > "$L.tmp" 2>/dev/null; mv "$L.tmp" "$L"; }
 			done
 		fi
@@ -2774,7 +2858,10 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		# toggle a node (profile OR ours) on/off by NAME via the shared off-list
 		nm=$(get_param name)
 		[ -z "$nm" ] && { json_header; printf '{"ok":false,"error":"no name"}'; exit 0; }
-		touch "$OFF_FILE"
+		touch "$OFF_FILE" "$AUTOOFF_FILE"
+		# a manual toggle clears the "auto-disabled" mark: a manual OFF becomes a permanent user choice the
+		# watchdog won't undo; a manual ON returns the node to normal watching (no stale auto-recover flag)
+		grep -vxF "$nm" "$AUTOOFF_FILE" > "$AUTOOFF_FILE.tmp" 2>/dev/null; mv "$AUTOOFF_FILE.tmp" "$AUTOOFF_FILE"
 		if grep -qxF "$nm" "$OFF_FILE"; then
 			grep -vxF "$nm" "$OFF_FILE" > "$OFF_FILE.tmp"; mv "$OFF_FILE.tmp" "$OFF_FILE"; en=1
 		else

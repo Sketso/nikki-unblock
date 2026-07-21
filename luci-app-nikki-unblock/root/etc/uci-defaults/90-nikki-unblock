@@ -51,6 +51,18 @@ if [ -f /etc/crontabs/root ] || touch /etc/crontabs/root; then
 	}
 fi
 
+# Exit-node health watchdog: self-heals added VPN nodes that stop responding (auto-disable) or come
+# back (auto re-enable), e.g. a node's server going down for maintenance and returning later — without
+# touching anything the user disabled by hand. No-ops until at least one node is added, so it's safe to
+# schedule unconditionally (also covers nodes added later).
+if [ -f /etc/crontabs/root ] || touch /etc/crontabs/root; then
+	grep -q 'nikki-unblock nodewatch' /etc/crontabs/root 2>/dev/null || {
+		echo '*/5 * * * * /www/cgi-bin/nikki-unblock nodewatch' >> /etc/crontabs/root
+		/etc/init.d/cron enable >/dev/null 2>&1
+		/etc/init.d/cron restart >/dev/null 2>&1
+	}
+fi
+
 # Collapse exact-duplicate crontab lines (order-preserving). Not our lines to own, but a co-installed
 # zapret v1 (leftover /etc/config/zapret) appends a `/tmp/zapret+*.log` cleanup line without dedup, so it
 # piles up (seen 19x). Identical cron lines are never intentional — they'd just run the same command

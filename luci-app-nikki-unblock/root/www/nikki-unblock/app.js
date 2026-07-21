@@ -113,6 +113,8 @@ const I18N = {
     nodesHint: "Свои VPN-выходы. Перетащи .conf или вставь конфиг/ссылку: AmneziaWG/WireGuard, vless://…, подписку https://…, или сырой clash-YAML. Добавленные ноды образуют группу UNBLOCK — выбирай «→ VPN (+ноды)» как действие правила.",
     nodeDrop: "Перетащи сюда файл .conf", nodeName: "имя (необязательно)", nodeAdd: "Добавить и проверить",
     validating: "Добавляю и проверяю ноду…", nodeMs: "мс", nodeNoResp: "не отвечает", nodeSub: "подписка",
+    nodeAutoOff: "не достучалась — отключена, включи после починки",
+    nodeAutoOffTag: "недоступна, отключена автоматически",
     nodeProfile: "из профиля", nodeOn: "вкл", nodeOff: "выкл",
     guardBad1: "⚠ Proxy-группа ", guardBad2: " не найдена в mihomo. Правила «→ VPN» указывают на несуществующую группу. Задай базовую группу равной имени proxy-группы твоего профиля: ",
     guardFix: "uci set nikki-unblock.config.base_group='ИМЯ' && uci commit",
@@ -262,6 +264,8 @@ const I18N = {
     nodesHint: "Your own VPN exits. Drop a .conf or paste a config/link: AmneziaWG/WireGuard, vless://…, a subscription https://…, or raw clash YAML. Added nodes form the UNBLOCK group — pick «→ VPN (+nodes)» as a rule action.",
     nodeDrop: "Drop a .conf file here", nodeName: "name (optional)", nodeAdd: "Add & check",
     validating: "Adding & checking node…", nodeMs: "ms", nodeNoResp: "no response", nodeSub: "subscription",
+    nodeAutoOff: "unreachable — disabled, re-enable once it's fixed",
+    nodeAutoOffTag: "unreachable, auto-disabled",
     nodeProfile: "from profile", nodeOn: "on", nodeOff: "off",
     guardBad1: "⚠ Proxy-group ", guardBad2: " was not found in mihomo. «→ VPN» rules point at a nonexistent group. Set the base group to your profile's proxy-group name: ",
     guardFix: "uci set nikki-unblock.config.base_group='NAME' && uci commit",
@@ -1184,7 +1188,7 @@ async function loadNodes(){
     const li = document.createElement("li");
     li.draggable = true; li.dataset.name = n.name; if (off) li.classList.add("off");
     const src = n.sub ? t("nodeFromSub") + " " + n.sub : (n.kind === "profile" ? t("nodeProfile") : (n.type + (n.host ? " · " + n.host : "")));
-    const meta = src + (n.active ? " · " + t("nodeActive") : "");
+    const meta = src + (n.active ? " · " + t("nodeActive") : "") + (off && n.auto ? " · " + t("nodeAutoOffTag") : "");
     li.innerHTML =
       '<span class="drag" title="' + escH(t("dragHint")) + '">⠿</span>' +
       '<span class="ndot' + (n.active ? " act" : "") + '" data-dot="' + i + '"></span>' +
@@ -1245,9 +1249,9 @@ async function addNodeCfg(cfg, name){
   $("#nodeBtn").disabled = false;
   if (res.ok){
     let m = t("done");
-    if (res.kind === "node") m += " · " + res.name + " — " + (res.delay === "x" ? t("nodeNoResp") : res.delay + " " + t("nodeMs"));
+    if (res.kind === "node") m += " · " + res.name + " — " + (res.autodisabled ? t("nodeAutoOff") : res.delay === "x" ? t("nodeNoResp") : res.delay + " " + t("nodeMs"));
     else if (res.kind === "multi") m += " · " + t("subAdded") + res.added;
-    setMsg($("#nodeMsg"), m, res.kind !== "node" || res.delay !== "x");
+    setMsg($("#nodeMsg"), m, res.kind !== "node" || (res.delay !== "x" && !res.autodisabled));
     $("#nodeCfg").value = ""; $("#nodeName").value = "";
     loadNodes().then(() => { hideOverlay(); autoPingNodes(); }); loadDomains();
   } else { hideOverlay(); setMsg($("#nodeMsg"), t("errP") + (res.error || "?"), false); }
