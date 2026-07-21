@@ -26,6 +26,11 @@ You set it up once, then everything is buttons in your router's web panel — no
   Twitter/X) or your own. Presets are the recommended replacement for "auto-learn", which often picks up junk.
 - **One control page** — start/stop each engine, update with one click, and back up each engine
   (manual or scheduled auto-backup).
+- **Simple or full view** — a Simple/Advanced switch (top-right) hides the deep settings so
+  non-technical users see just the essentials: unblock presets, add-a-site, on/off. Remembered per browser.
+- **Hand it to the family** — a minimal **`<router-IP>/unblock`** page lets non-technical people add
+  sites to the VPN themselves, without the full panel. Optionally lock the panel (and that page) behind
+  a **PIN** you set in General → Security.
 
 ## Two engines
 
@@ -50,16 +55,24 @@ Then install Nipret — its tabs light up for whatever you have.
 
 ## Security model
 
-Nipret is built for a **trusted home LAN**. The panel (`/cgi-bin/nikki-unblock`) has **no login of its
-own**: anyone who can open your router's web page can also change routing, apply presets, restore
-backups and run updates. That is a deliberate trade-off for one-tap usability at home. What it means
-for you:
+Nipret is built for a **trusted home LAN**. By default the panel (`/cgi-bin/nikki-unblock`) has **no
+login of its own**: anyone who can open your router's web page can also change routing, apply presets,
+restore backups and run updates. That is a deliberate trade-off for one-tap usability at home.
+
+You can optionally turn on a **PIN** (General → Security) to lock the panel and the `/unblock` page —
+handy when you hand the link to family or share Wi-Fi with guests. The PIN is stored only as a salted
+hash. A logged-in router admin reaching the panel through LuCI (Services → Nipret) is never asked for
+it, so you can always change or reset the PIN there even if you forget it. **Caveat:** over plain http
+the PIN and its cookie travel in the clear, so it keeps casual/guest users out but is not protection
+against someone actively sniffing your LAN.
+
+Either way:
 
 - **never expose the router's web port (80/443) to the internet** — don't port-forward it, don't put
   the router in a DMZ;
-- treat guest Wi-Fi accordingly: give guests an isolated network, or accept that they can reach the
-  panel;
-- LuCI's own login protects only the LuCI page that embeds Nipret, not the panel itself.
+- treat guest Wi-Fi accordingly: give guests an isolated network, or set a PIN;
+- LuCI's own login protects only the LuCI page that embeds Nipret; the standalone panel is open unless
+  you set a PIN.
 
 ## Install
 

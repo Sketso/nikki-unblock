@@ -1978,7 +1978,24 @@ AUTH_FAIL="/tmp/nikki-unblock-authfail"   # epoch per failed attempt (rolling wi
 AUTH_TTL=604800                           # session lifetime — 7 days
 AUTH_FAIL_WINDOW=300                       # 5-minute window
 AUTH_FAIL_MAX=8                            # this many fails in the window → temporary lockout
-auth_enabled() { [ "$(uci -q get nikki-unblock.config.auth_enabled 2>/dev/null)" = 1 ]; }
+# enabled ONLY when a PIN hash actually exists — an "enabled but no hash" state would lock everyone
+# out with no code that works, so we treat it as off (fail-open) instead of a dead end.
+auth_enabled() { [ "$(uci -q get nikki-unblock.config.auth_enabled 2>/dev/null)" = 1 ] && [ -n "$(uci -q get nikki-unblock.config.pin_hash 2>/dev/null)" ]; }
+# A logged-in LuCI admin bypasses the PIN — the router admin is already authenticated and must always
+# be able to get in (e.g. to change/reset the PIN). LuCI sets its own sysauth cookie with
+# Path=/cgi-bin/luci (its own SCRIPT_NAME), which the browser therefore NEVER sends to this sibling
+# CGI path — cookie sharing across the iframe embed doesn't work here, by cookie-scoping design, not a
+# bug in our cookie parsing. So instead: the LuCI view (htdocs/.../view/nikki-unblock/app.js) passes its
+# live `L.env.sessionid` once as a `luci_sid` query param on the iframe src. We verify it via the same
+# ubus ACL our menu entry requires, then mint our OWN session and redirect to drop the param from the
+# URL — from then on it's a normal nipret_sess cookie, same as a PIN login. The ubus sid is used exactly
+# once, never stored; this mirrors LuCI's own convention of passing `sid` as a query param (see ui.js).
+auth_luci_sid_ok() {
+	case "$(ubus call session access "{\"ubus_rpc_session\":\"$1\",\"scope\":\"uci\",\"object\":\"nikki-unblock\",\"function\":\"read\"}" 2>/dev/null)" in
+		*'"access": true'*|*'"access":true'*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
 auth_rand() { head -c 24 /dev/urandom 2>/dev/null | md5sum 2>/dev/null | cut -c1-32; }
 auth_hash() { printf '%s' "$1$2" | sha256sum 2>/dev/null | cut -d' ' -f1; }   # $1=salt $2=pin
 auth_cookie_token() { printf '%s' "${HTTP_COOKIE:-}" | tr ';' '\n' | sed -n 's/^[[:space:]]*nipret_sess=//p' | head -1 | tr -cd 'a-f0-9'; }
@@ -2021,6 +2038,14 @@ button{width:100%;padding:.7rem;font-size:1rem;border:0;border-radius:8px;backgr
 <form id="f"><input id="pin" type="password" inputmode="numeric" autocomplete="off" autofocus>
 <button type="submit">OK</button><div class="m" id="m"></div></form>
 <script>
+if(window.top!==window.self){
+/* Embedded in LuCI (iframe): the parent view holds a LIVE ubus session id, refreshed on every one of
+   its own page loads — unlike any sid baked into this document's own URL, which can go stale (LuCI
+   session rotated, or this URL is a leftover from a much earlier load). Ask the parent for a fresh one
+   instead of making an already-authenticated router admin type a PIN. The parent swaps our src if it
+   works; if not (not really LuCI, or genuinely logged out there too), this form still works as normal. */
+try{window.top.postMessage({type:"nipret-need-luci-sid"},location.origin);}catch(e){}
+}
 document.getElementById("f").addEventListener("submit",async function(e){e.preventDefault();
 var m=document.getElementById("m"),pin=document.getElementById("pin");m.textContent="";
 var r=await fetch("?api=login",{method:"POST",body:new URLSearchParams({pin:pin.value})});
@@ -2047,13 +2072,27 @@ if [ "$API" = "login" ] && [ "$REQUEST_METHOD" = "POST" ]; then
 	_want=$(uci -q get nikki-unblock.config.pin_hash 2>/dev/null)
 	if [ -n "$pin" ] && [ -n "$_want" ] && [ "$(auth_hash "$(uci -q get nikki-unblock.config.pin_salt 2>/dev/null)" "$pin")" = "$_want" ]; then
 		rm -f "$AUTH_FAIL" 2>/dev/null; _tok=$(auth_session_new)
-		printf 'Status: 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: nipret_sess=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%s\r\n\r\n{"ok":true}' "$_tok" "$AUTH_TTL"; exit 0
+		printf 'Status: 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nSet-Cookie: nipret_sess=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%s\r\n\r\n{"ok":true}' "$_tok" "$AUTH_TTL"; exit 0
 	fi
 	printf '%s\n' "$(date +%s)" >> "$AUTH_FAIL"   # record the miss for the brute-force brake
 	printf 'Status: 200 OK\r\nContent-Type: application/json\r\n\r\n{"ok":false,"error":"bad pin"}'; exit 0
 fi
 # everything else is blocked without a live session (when auth is on)
 if auth_enabled && ! auth_session_valid "$(auth_cookie_token)"; then
+	# one-time bootstrap: the LuCI-embedded view passes its own live ubus session id once, see
+	# auth_luci_sid_ok() above for why this can't just be a shared cookie
+	_lsid=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^luci_sid=' | head -1 | cut -d= -f2- | tr -cd 'a-zA-Z0-9')
+	if [ -n "$_lsid" ] && auth_luci_sid_ok "$_lsid"; then
+		_tok=$(auth_session_new)
+		_clean_qs=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep -v '^luci_sid=' | tr '\n' '&' | sed 's/&$//; s/^&//')
+		_redir="${SCRIPT_NAME:-/cgi-bin/nikki-unblock}"; [ -n "$_clean_qs" ] && _redir="$_redir?$_clean_qs"
+		# no-store is load-bearing here, not just hygiene: L.env.sessionid (hence this URL's query
+		# string) stays THE SAME across LuCI page loads within one login, so a cached 302 would be
+		# replayed on every later visit WITHOUT re-sending Set-Cookie — bootstrapping only the first
+		# time and silently failing every time after (e.g. right after "log out on all devices").
+		printf 'Status: 302 Found\r\nLocation: %s\r\nCache-Control: no-store\r\nSet-Cookie: nipret_sess=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%s\r\n\r\n' "$_redir" "$_tok" "$AUTH_TTL"
+		exit 0
+	fi
 	if [ -n "$API" ] || [ "$REQUEST_METHOD" = "POST" ]; then
 		printf 'Status: 401 Unauthorized\r\nContent-Type: application/json\r\nCache-Control: no-store\r\n\r\n{"ok":false,"error":"auth"}'; exit 0
 	fi
@@ -2847,7 +2886,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			fi
 			uci set nikki-unblock.config.auth_enabled=1; uci commit nikki-unblock
 			_tok=$(auth_session_new)   # keep the caller logged in so enabling doesn't lock them out
-			printf 'Status: 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: nipret_sess=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%s\r\n\r\n{"ok":true,"enabled":true}' "$_tok" "$AUTH_TTL"; exit 0
+			printf 'Status: 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nSet-Cookie: nipret_sess=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%s\r\n\r\n{"ok":true,"enabled":true}' "$_tok" "$AUTH_TTL"; exit 0
 		else
 			uci set nikki-unblock.config.auth_enabled=0; uci commit nikki-unblock
 			rm -f "$AUTH_SESS" 2>/dev/null
