@@ -114,6 +114,27 @@ Either way, open it in your web panel: **LuCI → Services → “nikki · Unblo
 - Or in the router panel: **LuCI → System → Software** — if you used Option B it's listed there; with
   Option A just re-do the upload / paste-link with the newer version.
 
+## Uninstalling
+
+Nipret touches more than its own files (nikki routing rules, firewall snippets, a zapret2 desync hook,
+IPv6 toggles, a cron watchdog, the signed update feed). A plain `apk del` would leave those behind, so
+use one of the two clean paths — both do the **same** full revert and leave a safety backup at
+`/tmp/nu-prepurge.tar.gz`:
+
+- **From the app:** **General** tab (advanced mode) → **Remove Nipret**. Tick *“also remove zapret2”* if
+  you want that gone too, then confirm. The panel reverts everything and removes itself.
+- **One command:**
+
+  ```sh
+  wget -O - https://github.com/sketso/nikki-unblock/raw/main/uninstall.sh | sh
+  # also remove /opt/zapret2:
+  wget -O - https://github.com/sketso/nikki-unblock/raw/main/uninstall.sh | sh -s -- zapret2
+  ```
+
+Either way the router is returned to its pre-Nipret state. **nikki is never touched** (removing it is
+its own thing); **zapret2** is left alone unless you explicitly ask for it. Regret it? Install again and
+feed `/tmp/nu-prepurge.tar.gz` to **General → Backup → Restore**.
+
 ## Something not working?
 
 - **A service is ON but nothing goes through the VPN.** The app shows a warning banner at the top when

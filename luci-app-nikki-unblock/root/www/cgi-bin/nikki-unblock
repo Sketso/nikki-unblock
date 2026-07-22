@@ -1924,6 +1924,112 @@ quicblock_set() {   # $1 = on(0/1)
 	fi
 }
 
+# ---- purge / uninstall -----------------------------------------------------
+# Return the router to its pre-Nipret state: revert every change we ever made to OTHER services'
+# config (nikki mihomo, fw4, zapret2 desync, IPv6) and delete all of our own state. Idempotent — safe
+# to run twice, and a no-op for anything that was never turned on. Does NOT remove the package itself
+# (apk del would delete this very CGI mid-run); the wrapper (panel self-destruct / uninstall.sh) does
+# that AFTER this returns. Single source of truth for both entry points.
+PURGE_LOG="/tmp/nu-purge.log"   # progress log; deliberately OUTSIDE the /tmp/nikki-unblock-* glob we
+                                # wipe below, so step 6 doesn't delete our own status file.
+purge_run() {   # $1 = "zapret2" to also remove /opt/zapret2 (nikki is never touched, either way)
+	_pz="$1"
+	_plog() { echo ">> $*" >> "$PURGE_LOG"; }
+
+	# 0) safety net: a full snapshot so an accidental purge stays recoverable. Named nu-* (not wiped
+	#    here) — the user's last-chance restore point once the panel is gone (scp it off, or feed it to
+	#    a fresh install's Restore).
+	_plog "snapshot rollback point -> /tmp/nu-prepurge.tar.gz"
+	build_backup /tmp/nu-prepurge.tar.gz >/dev/null 2>&1
+
+	# 1) system toggles first — each already carries the correct nft/fw4 teardown, so reuse them instead
+	#    of re-deriving the chain names (mss_clamp_all / nipret_block_quic) and the fw4-reload dance.
+	_plog "reverting IPv6 / MSS-clamp / Block-QUIC"
+	ipv6_set 0 2>/dev/null
+	mssclamp_set 0 2>/dev/null
+	quicblock_set 0 2>/dev/null
+
+	# 2) zapret2 per-client desync: our hook file + the nft table that carries the DESYNC_MARK. This is
+	#    OUR companion to zapret2, not zapret2's own rules — remove it whether or not zapret2 stays.
+	_plog "removing zapret2 bypass hook + nft marks"
+	rm -f "$Z2_BYPASS_HOOK" 2>/dev/null
+	nft delete table inet nipret_bypass 2>/dev/null
+
+	# 3) revert nikki (mihomo) routing to pre-Nipret.
+	_plog "reverting nikki routing config"
+	# 3a) every @rule[] is ours (the whole Domains tab). Sections reindex on delete → keep deleting [0].
+	while uci -q get 'nikki.@rule[0]' >/dev/null 2>&1; do uci -q delete 'nikki.@rule[0]'; done
+	# 3b) device ACLs: drop every MAC-keyed lan_access_control, then reset the catch-all's proxy to 1.
+	# Leaving the catch-all alone would strand a proxy=0 on it if the user was last in "only" mode
+	# (nikki_acl_apply_mode sets catch-all proxy=0 there) — that's NOT pre-Nipret: LAN would default to
+	# unproxied. proxy=1 (proxy everyone) is nikki's default and is behaviourally identical to having no
+	# catch-all at all, so this is the safe pristine value whether or not nikki originally shipped one.
+	_i=0
+	while uci -q get "nikki.@lan_access_control[$_i]" >/dev/null 2>&1; do
+		if [ -n "$(uci -q get "nikki.@lan_access_control[$_i].mac")" ]; then
+			uci -q delete "nikki.@lan_access_control[$_i]"; _i=0; continue   # reindex → rescan from 0
+		fi
+		_i=$((_i + 1))
+	done
+	_cat=$(nikki_acl_catchall_idx 2>/dev/null) && [ -n "$_cat" ] && uci -q set "nikki.@lan_access_control[$_cat].proxy=1"
+	# 3c) reserved_ip back to the private-range defaults nikki ships (drops our node IPs + user exclusions)
+	uci -q delete nikki.proxy.reserved_ip 2>/dev/null
+	for _ip in $IP_DEFAULTS; do uci add_list nikki.proxy.reserved_ip="$_ip" >/dev/null 2>&1; done
+	# 3d) geodata-mode toggles we set so GEOIP rules could resolve
+	for _k in geoip_format geox_auto_update geox_update_interval; do uci -q delete "nikki.mixin.$_k" 2>/dev/null; done
+	uci -q commit nikki
+	# 3e) restore the ORIGINAL mihomo mixin (removes our EXIT_GROUP + proxy-providers). No .orig means the
+	#     mixin was created by us → delete it. Reload so mihomo drops references to the node files we're
+	#     about to remove — a dangling proxy-provider path can wedge mihomo on its next reload.
+	if [ -f "$MIXIN_FILE.orig" ]; then
+		cp "$MIXIN_FILE.orig" "$MIXIN_FILE" 2>/dev/null; rm -f "$MIXIN_FILE.orig"
+	else
+		rm -f "$MIXIN_FILE"
+	fi
+	apply_nikki
+	# nikki's reload is slow (~13 s on some routers) and occasionally doesn't bring mihomo back on its
+	# own after this much config churn. Uninstalling must NOT leave the user's VPN down, so verify and
+	# give it a hard restart if needed — same guard the updater/restore paths use.
+	sleep 6; pgrep -f /usr/bin/mihomo >/dev/null 2>&1 || /etc/init.d/nikki restart >/dev/null 2>&1
+
+	# 4) crontab: every line referencing our CGI or watchdog (autosync / subsync / backup / nodewatch /
+	#    z2-watchdog all contain the string "nikki-unblock"), plus any stale legacy nikki-domains line.
+	_plog "cleaning crontab"
+	[ -f "$CRONTAB" ] && { sed -i '/nikki-unblock/d; /nikki-domains/d' "$CRONTAB"; /etc/init.d/cron restart >/dev/null 2>&1; }
+
+	# 5) optional: remove zapret2 itself — it is NOT a package (a bol-van tarball in /opt), so nothing
+	#    else will ever clean it. nikki is never touched here.
+	if [ "$_pz" = zapret2 ] && zapret2_present; then
+		_plog "removing zapret2 (/opt/zapret2)"
+		/etc/init.d/zapret2 stop 2>/dev/null
+		/etc/init.d/zapret2 disable 2>/dev/null
+		rm -f /etc/init.d/zapret2 2>/dev/null
+		rm -rf /opt/zapret2 2>/dev/null
+		nft delete table inet zapret2 2>/dev/null   # its own desync table, if fw4 didn't drop it on stop
+		fw4 reload >/dev/null 2>&1
+	fi
+
+	# 6) our own state + the two out-of-package feed artifacts (apk del NEVER removes these) + LuCI cache.
+	#    Keep /tmp/nu-prepurge.tar.gz (nu-* — not matched by the glob).
+	_plog "removing Nipret state + repo key"
+	rm -rf /etc/nikki-unblock 2>/dev/null
+	rm -f /etc/config/nikki-unblock 2>/dev/null
+	rm -f /tmp/nikki-unblock-* 2>/dev/null
+	rm -f /etc/apk/keys/nikki-unblock.pem /etc/apk/repositories.d/nikki-unblock.list 2>/dev/null
+	rm -f /tmp/luci-indexcache* 2>/dev/null; rm -rf /tmp/luci-modulecache 2>/dev/null
+
+	_plog "__DONE__"
+	return 0
+}
+# Poll endpoint for the panel self-destruct: streams the purge log until __DONE__ (revert finished, the
+# package removal starts next). Once apk del deletes this CGI, the poll itself 404s — the UI treats that
+# disappearance as "removed", so no explicit post-removal state is needed here.
+purgestatus_json() {
+	json_header
+	_done=0; grep -q '^>> __DONE__' "$PURGE_LOG" 2>/dev/null && _done=1
+	printf '{"done":%d,"log":"%s"}' "$_done" "$(json_log "$PURGE_LOG")"
+}
+
 backupauto_json() {
 	json_header
 	en=$(uci -q get nikki-unblock.config.backupauto 2>/dev/null)
@@ -2019,6 +2125,10 @@ nodes_json() {
 [ "$1" = "subsync" ] && { subrefresh_all; exit 0; }
 # cron/CLI: re-probe our nodes — auto-disable ones that stopped responding, auto-recover ones that came back
 [ "$1" = "nodewatch" ] && { node_watchdog_run; exit 0; }
+# CLI: full revert to pre-Nipret state (shared core for the panel self-destruct AND uninstall.sh). Placed
+# BEFORE the PIN gate, like the other CLI hooks — it's only reachable from a local shell, never over http.
+# $2="zapret2" also removes /opt/zapret2. Does NOT remove the package (the caller does that afterwards).
+[ "$1" = "purge" ] && { purge_run "$2"; exit 0; }
 # cron/CLI: write a rotating auto-backup (daily/weekly/monthly)
 [ "$1" = "backupauto" ] && { backup_auto_run; exit 0; }
 [ "$1" = "z2backupauto" ] && { z2_backup_auto_run; exit 0; }
@@ -2379,6 +2489,30 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			*) printf '{"ok":false,"error":"bad op"}' ;;
 		esac
 		exit 0
+
+		;;
+	uninstall)
+		# Self-destruct: full revert, then remove the package (which deletes THIS CGI). Runs DETACHED from
+		# a /tmp script that outlives the CGI — same pattern as the updater. Double-gated: reaches here only
+		# past the PIN gate, and needs an explicit confirm token so a stray click can't trigger it. The
+		# panel exposes this only in advanced mode.
+		[ "$(get_param confirm)" = "REMOVE" ] || { json_header; printf '{"ok":false,"error":"unconfirmed"}'; exit 0; }
+		_z2=""; [ "$(get_param zapret2)" = 1 ] && _z2="zapret2"
+		: > "$PURGE_LOG"
+		{
+			printf '#!/bin/sh\n'
+			# revert first, while the CGI still exists (purge is a CLI subcommand of this same file)
+			printf '"%s" purge %s\n' "$SELF" "$_z2"
+			# then drop the package — apk (25.12+) or opkg (<=24.10)
+			printf 'apk del luci-app-nikki-unblock >/dev/null 2>&1 || opkg remove luci-app-nikki-unblock >/dev/null 2>&1\n'
+			# belt-and-suspenders: the feed key/repo + LuCI cache (purge already did this; harmless if repeated)
+			printf 'rm -f /etc/apk/keys/nikki-unblock.pem /etc/apk/repositories.d/nikki-unblock.list\n'
+			printf 'rm -f /tmp/luci-indexcache*; rm -rf /tmp/luci-modulecache\n'
+			printf 'echo ">> __REMOVED__" >> "%s"\n' "$PURGE_LOG"
+			printf 'rm -f /tmp/nu-purge.sh\n'
+		} > /tmp/nu-purge.sh
+		setsid sh /tmp/nu-purge.sh >/dev/null 2>&1 &
+		json_header; printf '{"ok":true,"started":true}'; exit 0
 
 		;;
 	undo)
@@ -3066,6 +3200,7 @@ devicesall_json() {
 [ "$API" = "z2presetop" ] && { op_json "$Z2_PRESET_OP"; exit 0; }
 [ "$API" = "undolist" ] && { undolist_json; exit 0; }
 [ "$API" = "updatestatus" ] && { updatestatus_json; exit 0; }
+[ "$API" = "purgestatus" ] && { purgestatus_json; exit 0; }
 [ "$API" = "config" ] && { config_json; exit 0; }
 [ "$API" = "nodes" ] && { nodes_json; exit 0; }
 [ "$API" = "svcstatus" ] && {

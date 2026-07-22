@@ -24,7 +24,7 @@ else
 fi
 if $SH_CHECK -n "$TMP_SH"; then ok "$SH_CHECK -n $CGI"; else err "shell syntax: $CGI"; fi
 
-for f in feed.sh \
+for f in feed.sh uninstall.sh \
          luci-app-nikki-unblock/root/etc/uci-defaults/90-nikki-unblock \
          luci-app-nikki-unblock/root/usr/bin/nikki-unblock-z2-watchdog \
          tools/*.sh; do

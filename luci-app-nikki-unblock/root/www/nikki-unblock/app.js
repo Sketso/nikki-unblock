@@ -152,7 +152,18 @@ const I18N = {
     adding: "Добавляю ", removing: "Удаляю…", applying: "Применяю…", saving: "Сохраняю и применяю…",
     added: "Добавлено", removedC: "удалено", already: "уже было", willAdd: "добавит", willRem: "уберёт",
     onCount: " своих + ", onCount2: " системных", en_: "Вкл", dis_: "Выкл",
-    confirmDel: n => "Будет удалено доменов: " + n + ". Продолжить?"
+    confirmDel: n => "Будет удалено доменов: " + n + ". Продолжить?",
+    rmTitle: "Удаление Nipret",
+    rmHint: "Полностью удалить Nipret и откатить все его изменения: правила nikki, устройства, тумблеры QUIC/MSS/IPv6, метки zapret2, ключ репозитория. Сам nikki не трогается. Перед удалением создаётся резервная копия в /tmp/nu-prepurge.tar.gz. Действие необратимо — панель исчезнет.",
+    rmZ2: "Также удалить zapret2 (/opt/zapret2)",
+    rmBtn: "Удалить Nipret",
+    rmPrompt: "Это необратимо. Чтобы подтвердить, введите слово УДАЛИТЬ:",
+    rmWord: "УДАЛИТЬ",
+    rmMismatch: "Слово не совпало — отменено",
+    rmRunning: "Удаляю… (панель скоро перестанет отвечать — это нормально)",
+    rmGone: "Пакет снят, панель удалена.",
+    rmDone: "Nipret удалён. Обновлять эту страницу больше не нужно.",
+    rmDelFail: "Изменения откачены, но снять пакет не удалось. Заверши удаление командой uninstall.sh (см. README)."
   },
   en: {
     h1: "Nipret · VPN + DPI-bypass",
@@ -303,7 +314,18 @@ const I18N = {
     adding: "Adding ", removing: "Removing…", applying: "Applying…", saving: "Saving & applying…",
     added: "Added", removedC: "removed", already: "existing", willAdd: "adds", willRem: "removes",
     onCount: " custom + ", onCount2: " system", en_: "On", dis_: "Off",
-    confirmDel: n => "This will remove " + n + " domain(s). Continue?"
+    confirmDel: n => "This will remove " + n + " domain(s). Continue?",
+    rmTitle: "Remove Nipret",
+    rmHint: "Completely remove Nipret and revert every change it made: nikki rules, devices, QUIC/MSS/IPv6 toggles, zapret2 marks, the repo key. nikki itself is left untouched. A backup is saved to /tmp/nu-prepurge.tar.gz first. This is irreversible — the panel will disappear.",
+    rmZ2: "Also remove zapret2 (/opt/zapret2)",
+    rmBtn: "Remove Nipret",
+    rmPrompt: "This is irreversible. To confirm, type the word REMOVE:",
+    rmWord: "REMOVE",
+    rmMismatch: "Word didn't match — cancelled",
+    rmRunning: "Removing… (the panel will stop responding shortly — that's expected)",
+    rmGone: "Package removed, panel deleted.",
+    rmDone: "Nipret removed. No need to refresh this page.",
+    rmDelFail: "Changes reverted, but package removal failed. Finish it with uninstall.sh (see README)."
   }
 };
 const t = k => (I18N[LANG] && I18N[LANG][k] !== undefined) ? I18N[LANG][k] : (I18N.ru[k] || k);
@@ -1632,6 +1654,7 @@ async function loadVersions(){
     $("#verGeo").textContent = GEO_OK ? (t("geoOn") + (v.geo_date ? " · " + v.geo_date : "")) : t("geoOff");
     const z2 = v.z2_present === 1;
     $("#verZ2Row").hidden = !z2; $("#updZ2").hidden = !z2;
+    if ($("#rmZ2Row")) $("#rmZ2Row").hidden = !z2;   // offer "also remove zapret2" only when it's present
     if (z2) $("#verZ2").textContent = v.z2_ver || "?";
     // presets may load before versions — refresh cards so the geoip facet reflects the real DB state
     if (wasGeo !== GEO_OK && PRESETS.length) renderPresets();
@@ -1712,6 +1735,48 @@ $("#updNikki").addEventListener("click", () => doUpdate("nikki"));
 $("#updGeo").addEventListener("click", () => doUpdate("geo"));
 $("#updZ2").addEventListener("click", () => doUpdate("z2"));
 $("#updAll").addEventListener("click", () => doUpdate("all"));
+
+/* ---------- danger zone: uninstall Nipret ---------- */
+/* Poll the purge log until the CGI deletes itself (apk del). The endpoint vanishing IS the success
+   signal — exactly the reasoning the self-update poll uses (see pollUpdate). */
+async function pollPurge(){
+  const log = $("#rmLog"); log.hidden = false;
+  setMsg($("#rmMsg"), t("rmRunning"));
+  let bad = 0;
+  const tick = async () => {
+    let s = null;
+    try { s = await (await fetch("?api=purgestatus")).json(); bad = 0; } catch(e){ bad++; }
+    if (s){
+      if (s.log) { log.textContent = s.log; log.scrollTop = log.scrollHeight; }
+      // __REMOVED__ in the log while the CGI still answers = the revert finished but `apk del` couldn't
+      // remove the package. The important part (revert) succeeded; point the user at the shell fallback.
+      if (s.log && s.log.indexOf("__REMOVED__") >= 0){
+        setMsg($("#rmMsg"), t("rmDelFail"), false);
+        showToast(t("rmDelFail"), "err", { sticky: true });
+        return;
+      }
+    } else if (bad >= 3){
+      // endpoint gone → the package (and this CGI) was removed. That's the finish line.
+      log.textContent += "\n>> " + t("rmGone");
+      setMsg($("#rmMsg"), t("rmDone"), true);
+      showToast(t("rmDone"), "ok", { sticky: true });
+      return;
+    }
+    setTimeout(tick, 1500);
+  };
+  tick();
+}
+async function doUninstall(){
+  const typed = prompt(t("rmPrompt"));
+  if (typed == null) return;                                   // cancelled
+  if (typed.trim().toUpperCase() !== t("rmWord")){ setMsg($("#rmMsg"), t("rmMismatch"), false); return; }
+  const z2 = ($("#rmZ2") && $("#rmZ2").checked) ? 1 : 0;
+  $("#rmBtn").disabled = true; setMsg($("#rmMsg"), t("applying"));
+  let r; try { r = await api("uninstall", { confirm: "REMOVE", zapret2: z2 }); } catch(e){ r = {}; }
+  if (r && r.ok){ pollPurge(); }
+  else { $("#rmBtn").disabled = false; setMsg($("#rmMsg"), t("errP") + ((r && r.error) || "?"), false); }
+}
+$("#rmBtn") && $("#rmBtn").addEventListener("click", doUninstall);
 
 /* kiosk: the /unblock page reuses this whole app but strips it to the VPN "add a site" essentials.
    Same engine/domain/preset logic, just a minimal standalone surface for non-technical users. */
