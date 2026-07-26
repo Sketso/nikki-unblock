@@ -1034,6 +1034,9 @@ Z2_HOSTX="/opt/zapret2/ipset/zapret-hosts-user-exclude.txt"
 Z2_USER="/opt/zapret2/ipset/zapret-hosts-user.txt"     # manual DPI-bypass domains (the "add a domain" file)
 Z2_AUTO="/opt/zapret2/ipset/zapret-hosts-auto.txt"     # auto-learned (autohostlist)
 Z2_CONFIG="/opt/zapret2/config"                        # shell-var config (MODE_FILTER, NFQWS2_OPT, …)
+Z2_CUSTOM_OPT="/etc/nikki-unblock/z2-custom.opt"       # the user's own NFQWS2_OPT, kept OUTSIDE the config:
+                                                       # the config has ONE slot, so switching to a curated
+                                                       # strategy would otherwise destroy a hand-tuned one
 # curated bypass presets (YouTube/Discord/…) — we OWN the "main" hostlist zapret-hosts.txt (wired by
 # find_hostlists, separate from the user's manual file) and rebuild it from the active presets. Each
 # preset's fetched domains are cached under Z2_PDIR so a rebuild never depends on the network.
@@ -1476,10 +1479,14 @@ z2_strat_body() {   # $1=id -> the NFQWS2_OPT body (profile lines); empty for un
 '--filter-udp=443 --filter-l7=quic <HOSTLIST_NOAUTO> --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=2:cutoff=3' ;;
 	esac
 }
+# the live NFQWS2_OPT body — the multiline profile block between NFQWS2_OPT=" and its closing "
+z2_cur_opt_body() {
+	awk '/^NFQWS2_OPT="[[:space:]]*$/{s=1;next} s&&/^"[[:space:]]*$/{exit} s{print}' "$Z2_CONFIG" 2>/dev/null
+}
 # which curated strategy is live (compare the config's NFQWS2_OPT body, whitespace-normalised, to each)
 z2_cur_strat() {
 	_norm() { tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//'; }
-	_cur=$(awk '/^NFQWS2_OPT="[[:space:]]*$/{s=1;next} s&&/^"[[:space:]]*$/{exit} s{print}' "$Z2_CONFIG" 2>/dev/null | _norm)
+	_cur=$(z2_cur_opt_body | _norm)
 	for _id in $(z2_strat_ids); do
 		[ "$(z2_strat_body "$_id" | _norm)" = "$_cur" ] && { echo "$_id"; return; }
 	done
@@ -1508,6 +1515,23 @@ z2status_json() {
 	v6=0; ipv6_off && v6=1
 	printf '{"present":%d,"running":%d,"boot":%d,"autohostlist":%d,"user_count":%s,"auto_count":%s,"setup_done":%d,"quic_block":%d,"desync_ok":%d,"strategy":"%s","ipv6_off":%d}' \
 		"$pr" "$rn" "$bt" "$ah" "$(z2_count "$Z2_USER")" "$(z2_count "$Z2_AUTO")" "$sd" "$qb" "$dq" "$st" "$v6"
+}
+# NFQWS2_OPT body as JSON lines[] — prefills the "custom strategy" editor (never the whole config).
+# Which body? If a hand-tuned strategy is LIVE, edit reality. Otherwise hand back the SAVED custom one, so
+# switching to a curated strategy and back doesn't lose it — falling back to the live body as a starting
+# point when nothing was ever saved. source= tells the UI which of the two it got.
+z2stratraw_json() {
+	json_header
+	[ -f "$Z2_CONFIG" ] || { printf '{"ok":false,"error":"no config"}'; return; }
+	_src=live
+	[ "$(z2_cur_strat)" != custom ] && [ -s "$Z2_CUSTOM_OPT" ] && _src=saved
+	printf '{"ok":true,"source":"%s","lines":[' "$_src"
+	first=1
+	{ if [ "$_src" = saved ]; then cat "$Z2_CUSTOM_OPT"; else z2_cur_opt_body; fi; } | while IFS= read -r ln; do
+		[ "$first" = 1 ] || printf ','; first=0
+		printf '"%s"' "$(json_esc "$ln")"
+	done
+	printf ']}'
 }
 # ---- zapret2 self-update (binary/strategy swap; not a package) ---------------
 # zapret2 is installed from bol-van's tarball, not apk — so updating = swap the daemon + lua
@@ -1818,6 +1842,7 @@ z2_build_backup() {
 		[ -f "$_f" ] && cp "$_f" "$_d/$(basename "$_f")"
 	done
 	[ -d "$Z2_PDIR" ] && cp -r "$Z2_PDIR" "$_d/presets"
+	[ -f "$Z2_CUSTOM_OPT" ] && cp "$Z2_CUSTOM_OPT" "$_d/z2-custom.opt"   # the hand-tuned strategy slot
 	{
 		echo "setup_done=$(uci -q get nikki-unblock.z2.setup_done 2>/dev/null)"
 		echo "presets=$(z2_active_presets)"
@@ -1839,6 +1864,9 @@ z2_restore_backup() {
 			[ -f "$1/$_bn" ] && cp "$1/$_bn" "$_f"
 		done
 		if [ -d "$1/presets" ]; then rm -rf "$Z2_PDIR"; cp -r "$1/presets" "$Z2_PDIR"; fi
+		# full replace: an older backup carries no custom slot → clear it rather than leave a stale one
+		rm -f "$Z2_CUSTOM_OPT"
+		[ -f "$1/z2-custom.opt" ] && { mkdir -p "$(dirname "$Z2_CUSTOM_OPT")"; cp "$1/z2-custom.opt" "$Z2_CUSTOM_OPT"; }
 		if [ -f "$1/z2-uci.env" ]; then
 			_sd=$(sed -n 's/^setup_done=//p' "$1/z2-uci.env")
 			_ps=$(sed -n 's/^presets=//p' "$1/z2-uci.env")
@@ -1942,6 +1970,13 @@ purge_run() {   # $1 = "zapret2" to also remove /opt/zapret2 (nikki is never tou
 	_plog "snapshot rollback point -> /tmp/nu-prepurge.tar.gz"
 	build_backup /tmp/nu-prepurge.tar.gz >/dev/null 2>&1
 
+	# 0b) STOP OUR CRON BEFORE REVERTING ANYTHING. Our jobs actively re-assert the very state we are about
+	#     to undo: nodewatch regenerates the mixin (recreating EXIT_GROUP) and the z2 watchdog restarts
+	#     zapret2. A tick landing mid-purge (the revert below spends ~6 s in a single sleep) would resurrect
+	#     Nipret's config after the revert had already run, leaving traces behind a "full" uninstall.
+	_plog "cleaning crontab"
+	[ -f "$CRONTAB" ] && { sed -i '/nikki-unblock/d; /nikki-domains/d' "$CRONTAB"; /etc/init.d/cron restart >/dev/null 2>&1; }
+
 	# 1) system toggles first — each already carries the correct nft/fw4 teardown, so reuse them instead
 	#    of re-deriving the chain names (mss_clamp_all / nipret_block_quic) and the fw4-reload dance.
 	_plog "reverting IPv6 / MSS-clamp / Block-QUIC"
@@ -1992,9 +2027,10 @@ purge_run() {   # $1 = "zapret2" to also remove /opt/zapret2 (nikki is never tou
 	# give it a hard restart if needed — same guard the updater/restore paths use.
 	sleep 6; pgrep -f /usr/bin/mihomo >/dev/null 2>&1 || /etc/init.d/nikki restart >/dev/null 2>&1
 
-	# 4) crontab: every line referencing our CGI or watchdog (autosync / subsync / backup / nodewatch /
-	#    z2-watchdog all contain the string "nikki-unblock"), plus any stale legacy nikki-domains line.
-	_plog "cleaning crontab"
+	# 4) crontab was already cleared in step 0b (before the reverts, so no tick could undo them). Re-run it
+	#    here anyway: purge is idempotent, and a long revert leaves room for a line to be re-added (e.g. a
+	#    concurrent panel action calling autosync_set / subauto_set).
+	_plog "cleaning crontab (final sweep)"
 	[ -f "$CRONTAB" ] && { sed -i '/nikki-unblock/d; /nikki-domains/d' "$CRONTAB"; /etc/init.d/cron restart >/dev/null 2>&1; }
 
 	# 5) optional: remove zapret2 itself — it is NOT a package (a bol-van tarball in /opt), so nothing
@@ -2338,7 +2374,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 	# nosnap=1 lets a multi-step UI action (e.g. a hybrid preset = geosite + list) skip the 2nd+ snapshot,
 	# so one user click produces ONE undo point (the first sub-action already captured the pre-click state)
 	case "$action" in
-		z2strat|z2quic|z2ipv6|z2autotoggle|mssclamp|devicesapply)
+		z2strat|z2stratsave|z2quic|z2ipv6|z2autotoggle|mssclamp|devicesapply)
 			[ "$(get_param nosnap)" = 1 ] || undo_push "$action" ;;
 	esac
 
@@ -2661,6 +2697,14 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		body=$(z2_strat_body "$id")
 		[ -z "$body" ] && { json_header; printf '{"ok":false,"error":"bad strategy"}'; exit 0; }
 		[ -f "$Z2_CONFIG" ] || { json_header; printf '{"ok":false,"error":"no config"}'; exit 0; }
+		# The config has ONE NFQWS2_OPT slot, so this overwrites whatever is there. If that's a hand-tuned
+		# strategy, stash it first — a single click must not destroy options that took real work to find.
+		# Covers configs hand-edited over ssh long before the panel could save them (e.g. an existing
+		# install upgrading into this feature with a custom strategy already live).
+		if [ "$(z2_cur_strat)" = custom ]; then
+			mkdir -p "$(dirname "$Z2_CUSTOM_OPT")"
+			z2_cur_opt_body > "$Z2_CUSTOM_OPT"
+		fi
 		was=0; z2_running && was=1
 		cp "$Z2_CONFIG" "$Z2_CONFIG.strat.bak"
 		printf '%s' "$body" | z2_write_opt
@@ -2670,6 +2714,34 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			json_header; printf '{"ok":true,"strategy":"%s"}' "$id"; exit 0
 		fi
 		# strategy broke the daemon / desync — revert
+		mv "$Z2_CONFIG.strat.bak" "$Z2_CONFIG"
+		/etc/init.d/zapret2 restart >/dev/null 2>&1
+		json_header; printf '{"ok":false,"error":"rejected (reverted)"}'; exit 0
+
+		;;
+	z2stratsave)
+		# save a hand-edited NFQWS2_OPT body (the "custom" strategy). Same safety as z2strat: backup +
+		# restart + health-check + auto-rollback. Only the NFQWS2_OPT block is touched, never the rest
+		# of the config (MODE_FILTER/DESYNC_MARK/ports stay under Nipret's control).
+		body=$(get_param body | sed 's/\r$//')
+		[ -f "$Z2_CONFIG" ] || { json_header; printf '{"ok":false,"error":"no config"}'; exit 0; }
+		# light sanity: a valid nfqws2 profile has at least one --filter line; refuse obvious garbage up front
+		printf '%s\n' "$body" | grep -q -- '--filter' || { json_header; printf '{"ok":false,"error":"need at least one --filter line"}'; exit 0; }
+		was=0; z2_running && was=1
+		cp "$Z2_CONFIG" "$Z2_CONFIG.strat.bak"
+		printf '%s' "$body" | z2_write_opt
+		/etc/init.d/zapret2 restart >/dev/null 2>&1; sleep 4
+		if z2_running && { [ "$was" = 0 ] || z2_desync_ok; }; then
+			rm -f "$Z2_CONFIG.strat.bak"
+			# keep the user's own options in their own file — the config's single NFQWS2_OPT slot gets
+			# overwritten by the next curated strategy, and without this copy the hand-tuned one is gone
+			mkdir -p "$(dirname "$Z2_CUSTOM_OPT")"
+			printf '%s\n' "$body" > "$Z2_CUSTOM_OPT"
+			# report what the config ACTUALLY reads as now, not a hardcoded "custom": strategy identity is
+			# derived from the body, so saving options that happen to equal a curated set lands on that set.
+			# The UI needs the truth to explain why "Custom" can resolve to e.g. "Balanced".
+			json_header; printf '{"ok":true,"strategy":"%s"}' "$(z2_cur_strat)"; exit 0
+		fi
 		mv "$Z2_CONFIG.strat.bak" "$Z2_CONFIG"
 		/etc/init.d/zapret2 restart >/dev/null 2>&1
 		json_header; printf '{"ok":false,"error":"rejected (reverted)"}'; exit 0
@@ -3171,6 +3243,7 @@ devicesall_json() {
 [ "$API" = "iplist" ] && { iplist_json; exit 0; }
 [ "$API" = "devicesall" ] && { devicesall_json; exit 0; }
 [ "$API" = "z2status" ] && { z2status_json; exit 0; }
+[ "$API" = "z2stratraw" ] && { z2stratraw_json; exit 0; }
 [ "$API" = "ytdiag" ] && { ytdiag_json; exit 0; }
 [ "$API" = "z2hosts" ] && { z2hosts_json; exit 0; }
 [ "$API" = "z2presets" ] && { z2presets_json; exit 0; }

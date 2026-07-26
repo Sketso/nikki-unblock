@@ -44,6 +44,11 @@ const I18N = {
     strat_default: "Сбалансированная (по умолчанию)", strat_youtube: "YouTube: QUIC-блоб googlevideo",
     strat_aggressive: "Агрессивная (TLS multidisorder + badsum)", strat_light: "Лёгкая (для слабых роутеров)", strat_custom: "Своя (ручная правка config)",
     stratCustomNote: "Это ручная стратегия из config — выбери одну из готовых, чтобы применить.", stratSame: "Эта стратегия уже активна",
+    stratCustomEditHint: "Опции NFQWS2_OPT — по одной строке на профиль (--filter…). Правится только этот блок, остальной config Nipret ведёт сам. Битый конфиг откатится автоматически.",
+    stratReset: "↺ Сбросить изменения", stratNeedFilter: "Нужна хотя бы одна строка с --filter",
+    stratActiveTag: " · активна", stratActiveNow: "Сейчас применена: ",
+    stratNoChange: "Опции не изменены — поправь текст, потом «Применить»",
+    stratMatched: "Сохранено. Эти опции совпадают с готовой стратегией, поэтому активной показана: ",
     ytTitle: "Диагностика YouTube", ytHint: "Проверяет, всё ли настроено для обхода YouTube: жив ли десинк, покрыт ли googlevideo, обрабатывается ли QUIC, не течёт ли трафик мимо. Проверка идёт по состоянию правил и конфига, а не по «открывается ли видео» (браузер про QUIC врёт). Рядом с проблемой — кнопка быстрого фикса.",
     ytBtn: "Проверить YouTube",
     ytNotInstalled: "zapret2 не установлен.", ytNotRunning: "Служба zapret2 не запущена.", ytFixStart: "Запустить",
@@ -132,7 +137,7 @@ const I18N = {
     bk_daily: "За день", bk_weekly: "За неделю", bk_monthly: "За месяц",
     undoTitle: "Откат изменений", undoHint: "Перед каждым переключением (стратегия, QUIC, IPv6, автообучение, пресеты) сохраняется снимок обоих движков. Если что-то сломалось после изменения — верни как было.",
     undoBtn: "↩ Вернуть как было", undoThis: "Откатить сюда", undoLast: "Вернуть последнее изменение", redoLast: "Вернуть отменённое", undoEmpty: "Пока нет изменений для отката", undoConfirm: "Откатить к состоянию до этого изменения? Настройки обоих движков вернутся к тому моменту.",
-    act_z2strat: "стратегия zapret2", act_z2quic: "тумблер QUIC", act_z2ipv6: "тумблер IPv6", act_z2autotoggle: "автообучение zapret2",
+    act_z2strat: "стратегия zapret2", act_z2stratsave: "правка стратегии zapret2", act_z2quic: "тумблер QUIC", act_z2ipv6: "тумблер IPv6", act_z2autotoggle: "автообучение zapret2",
     act_devicesapply: "исключения устройств",
     act_preset: "пресет", presetFail: "не применилось полностью", presetBusy: "Дождись окончания текущего применения",
     act_z2preset: "пресет zapret2", act_z2preset_on: "пресет zapret2 вкл", act_z2preset_off: "пресет zapret2 выкл", act_geosite_on: "гео-пресет вкл", act_geosite_off: "гео-пресет выкл",
@@ -206,6 +211,11 @@ const I18N = {
     strat_default: "Balanced (default)", strat_youtube: "YouTube: googlevideo QUIC blob",
     strat_aggressive: "Aggressive (TLS multidisorder + badsum)", strat_light: "Light (for weak routers)", strat_custom: "Custom (hand-edited config)",
     stratCustomNote: "This is a manual strategy from config — pick one of the presets to apply.", stratSame: "That strategy is already active",
+    stratCustomEditHint: "NFQWS2_OPT options — one profile per line (--filter…). Only this block is edited; Nipret manages the rest of the config. A broken config auto-reverts.",
+    stratReset: "↺ Discard changes", stratNeedFilter: "Need at least one --filter line",
+    stratActiveTag: " · active", stratActiveNow: "Currently applied: ",
+    stratNoChange: "Options unchanged — edit the text, then hit Apply",
+    stratMatched: "Saved. These options match a curated strategy, so the active one now reads: ",
     ytTitle: "YouTube diagnostics", ytHint: "Checks whether everything is set up to bypass YouTube: is the desync live, is googlevideo covered, is QUIC handled, is traffic leaking past. Based on rule/config state, not on 'does the video play' (the browser lies about QUIC). Each issue comes with a one-tap fix.",
     ytBtn: "Check YouTube",
     ytNotInstalled: "zapret2 is not installed.", ytNotRunning: "The zapret2 service is not running.", ytFixStart: "Start",
@@ -294,7 +304,7 @@ const I18N = {
     bk_daily: "Daily", bk_weekly: "Weekly", bk_monthly: "Monthly",
     undoTitle: "Undo changes", undoHint: "Before each toggle (strategy, QUIC, IPv6, auto-learn, presets) a snapshot of both engines is saved. If something broke after a change — put it back.",
     undoBtn: "↩ Undo last change", undoThis: "Revert to here", undoLast: "Undo last change", redoLast: "Redo undone change", undoEmpty: "No changes to undo yet", undoConfirm: "Revert to the state before this change? Both engines' settings return to that point.",
-    act_z2strat: "zapret2 strategy", act_z2quic: "QUIC toggle", act_z2ipv6: "IPv6 toggle", act_z2autotoggle: "zapret2 auto-learn",
+    act_z2strat: "zapret2 strategy", act_z2stratsave: "zapret2 strategy edit", act_z2quic: "QUIC toggle", act_z2ipv6: "IPv6 toggle", act_z2autotoggle: "zapret2 auto-learn",
     act_devicesapply: "device exclusions",
     act_preset: "preset", presetFail: "didn't fully apply", presetBusy: "Wait for the current apply to finish",
     act_z2preset: "zapret2 preset", act_z2preset_on: "zapret2 preset on", act_z2preset_off: "zapret2 preset off", act_geosite_on: "geo preset on", act_geosite_off: "geo preset off",
@@ -994,30 +1004,83 @@ $("#z2Quic").addEventListener("change", async e => {
 });
 /* ---------- zapret2 strategies (curated NFQWS2_OPT) ---------- */
 const STRATS = ["default", "youtube", "aggressive", "light"];
+let stratBodyLoaded = false;   // guards the editor prefill so a status refresh never clobbers live edits
+let stratBodyOrig = "";        // body as loaded, so Apply can tell "edited" from "untouched"
+let stratBodySrc = "live";     // "live" = editing the running config, "saved" = your stashed custom one
+let stratPending = false;      // user picked an option they haven't applied — a refresh must not reset it
+// A <select> doubles as "what's live" and "what am I picking", so the two become indistinguishable the
+// moment you touch it. Tag the ACTIVE one in its own label, and say so in plain text under the row.
+function stratLabel(id, cur){ return (t("strat_" + id) || id) + (id === cur ? t("stratActiveTag") : ""); }
 function renderStrat(){
   const sel = $("#z2Strat");
-  const cur = Z2.strategy || "default";
-  // (re)build options, adding a read-only "custom" entry if the config was hand-edited
-  const want = STRATS.concat(cur === "custom" || !STRATS.includes(cur) ? ["custom"] : []);
+  const cur = STRATS.includes(Z2.strategy) ? Z2.strategy : "custom";
+  // "custom" is always offered now — selecting it opens an editor prefilled with the live NFQWS2_OPT,
+  // so you can hand-tune starting from whatever strategy is active.
+  const want = STRATS.concat("custom");
   if (sel.dataset.built !== want.join(",")){
     sel.innerHTML = "";
     want.forEach(id => { const o = document.createElement("option"); o.value = id;
-      o.textContent = t("strat_" + id) || id; sel.appendChild(o); });
+      o.textContent = stratLabel(id, cur); sel.appendChild(o); });
     sel.dataset.built = want.join(",");
   } else {
-    [...sel.options].forEach(o => { o.textContent = t("strat_" + o.value) || o.value; });
+    [...sel.options].forEach(o => { o.textContent = stratLabel(o.value, cur); });
   }
-  sel.value = STRATS.includes(cur) ? cur : "custom";
+  // never yank a pending choice out from under the user (loadZapret2 re-renders after every z2 action)
+  if (!stratPending) sel.value = cur;
+  $("#z2StratCur").textContent = t("stratActiveNow") + (t("strat_" + cur) || cur);
+  syncStratEditor();
 }
+// show the raw-config editor only while "custom" is selected; prefill once (never on every refresh)
+function syncStratEditor(){
+  const isCustom = $("#z2Strat").value === "custom";
+  $("#z2StratEdit").hidden = !isCustom;
+  if (isCustom && !stratBodyLoaded) loadStratBody();
+}
+async function loadStratBody(){
+  const ta = $("#z2StratBody"); ta.value = "…";
+  let src = "live";
+  try { const d = await (await fetch("?api=z2stratraw")).json();
+    ta.value = (d && d.ok && d.lines) ? d.lines.join("\n") : "";
+    src = (d && d.source) || "live";
+  } catch(e){ ta.value = ""; }
+  stratBodySrc = src;
+  stratBodyOrig = ta.value;   // baseline for "did you actually change anything?"
+  stratBodyLoaded = true;
+}
+$("#z2Strat").addEventListener("change", () => {
+  stratPending = $("#z2Strat").value !== (STRATS.includes(Z2.strategy) ? Z2.strategy : "custom");
+  syncStratEditor();
+});
+$("#z2StratReset").addEventListener("click", () => { stratBodyLoaded = false; loadStratBody(); });
 $("#z2StratApply").addEventListener("click", async () => {
   const id = $("#z2Strat").value;
-  if (id === "custom"){ setMsg($("#z2StratMsg"), t("stratCustomNote"), false); return; }
-  if (id === Z2.strategy){ setMsg($("#z2StratMsg"), t("stratSame")); return; }
-  const btn = $("#z2StratApply"); btn.disabled = true;
+  const btn = $("#z2StratApply");
+  if (id === "custom"){
+    const body = $("#z2StratBody").value;
+    if (!/--filter/.test(body)){ setMsg($("#z2StratMsg"), t("stratNeedFilter"), false); return; }
+    // Saving an untouched body that's ALREADY live restarts zapret2 for nothing and then reads back as
+    // whatever curated set it matches — looking like the click did nothing. But an untouched body from the
+    // SAVED slot is the whole point of coming back to "Custom": apply it as-is.
+    if (stratBodySrc === "live" && body === stratBodyOrig){ setMsg($("#z2StratMsg"), t("stratNoChange")); return; }
+    btn.disabled = true; showOverlay(t("applying")); setMsg($("#z2StratMsg"), t("applying"));
+    let res; try { res = await api("z2stratsave", { body }); } catch(e){ res = {}; }
+    hideOverlay(); btn.disabled = false;
+    if (res && res.ok){
+      stratBodyLoaded = false; stratPending = false;
+      // identity is derived from the body, so these options may equal a curated strategy — say so plainly
+      // instead of letting the dropdown silently snap to a name the user never picked.
+      setMsg($("#z2StratMsg"), res.strategy && res.strategy !== "custom"
+        ? t("stratMatched") + (t("strat_" + res.strategy) || res.strategy) : t("done"));
+    } else setMsg($("#z2StratMsg"), t("errP") + ((res && res.error) || "?"), false);
+    loadZapret2();
+    return;
+  }
+  if (id === Z2.strategy){ stratPending = false; setMsg($("#z2StratMsg"), t("stratSame")); return; }
+  btn.disabled = true;
   showOverlay(t("applying")); setMsg($("#z2StratMsg"), t("applying"));
   let res; try { res = await api("z2strat", { id }); } catch(e){ res = {}; }
   hideOverlay(); btn.disabled = false;
-  if (res && res.ok) setMsg($("#z2StratMsg"), t("done"));
+  if (res && res.ok){ setMsg($("#z2StratMsg"), t("done")); stratPending = false; }
   else setMsg($("#z2StratMsg"), t("errP") + ((res && res.error) || "?"), false);
   loadZapret2();
 });
