@@ -3022,35 +3022,48 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			fi
 		fi
 		protect_all_nodes   # shield the new node's server from zapret2 + add it to nikki's loop bypass
+		# "Did mihomo survive this?" is only a verdict on the new config if mihomo was ALIVE to begin with.
+		# On a fresh install nikki is often disabled and profile-less, so it never runs — and blaming the
+		# pasted config for that ("rejected by mihomo") sends people debugging a config that is perfectly
+		# fine. Same guard the zapret2 path already uses (z2strat's `was`).
+		nwas=0; pgrep -f /usr/bin/mihomo >/dev/null && nwas=1
 		regen_mixin; apply_nikki; sleep 6
-		if ! pgrep -f /usr/bin/mihomo >/dev/null; then
-			# config broke nikki -> roll back and report
+		if ! pgrep -f /usr/bin/mihomo >/dev/null && [ "$nwas" = 1 ]; then
+			# config broke a RUNNING nikki -> roll back and report
 			rm -f "$NODES_DIR/$id.yaml" "$PROV_DIR/$pid.yaml"
 			for x in $multiids; do rm -f "$NODES_DIR/$x.yaml" "$NODES_DIR/$x.src"; done
 			[ -n "$subid" ] && rm -f "$SUBS_DIR/$subid.conf"
 			regen_mixin; apply_nikki
 			json_header; printf '{"ok":false,"error":"config rejected by mihomo (reverted)"}'; exit 0
 		fi
+		# nikki was down before and still is: keep the node (nothing here broke anything) and say WHY, so
+		# the fix — enable nikki / give it a profile — is obvious instead of looking like a bad config.
+		nikki_down=false
+		pgrep -f /usr/bin/mihomo >/dev/null || nikki_down=true
 		if [ "$kind" = node ]; then
 			rn=$(grep -m1 'name:' "$NODES_DIR/$id.yaml" | sed 's/.*name:[[:space:]]*//')
-			d=$(mihomo_delay "$rn")
-			[ "$d" = x ] && { sleep 3; d=$(mihomo_delay "$rn"); }   # one retry: a fresh handshake can be slow
-			auto=0
-			if [ "$d" = x ]; then
-				# still unreachable -> disable it, same bookkeeping as the watchdog (AUTOOFF_FILE) so it
-				# gets auto re-enabled once node_watchdog_run sees it respond (e.g. server still booting)
-				touch "$OFF_FILE" "$AUTOOFF_FILE"
-				grep -qxF "$rn" "$OFF_FILE" || printf '%s\n' "$rn" >> "$OFF_FILE"
-				grep -qxF "$rn" "$AUTOOFF_FILE" || printf '%s\n' "$rn" >> "$AUTOOFF_FILE"
-				regen_mixin; apply_nikki
-				auto=1
+			auto=0; d=x
+			# Probing goes through mihomo's API, so with nikki down there is nothing to ask — and a node
+			# that was never tested must NOT be auto-disabled: it isn't dead, it's unverified.
+			if [ "$nikki_down" = false ]; then
+				d=$(mihomo_delay "$rn")
+				[ "$d" = x ] && { sleep 3; d=$(mihomo_delay "$rn"); }   # one retry: a fresh handshake can be slow
+				if [ "$d" = x ]; then
+					# still unreachable -> disable it, same bookkeeping as the watchdog (AUTOOFF_FILE) so it
+					# gets auto re-enabled once node_watchdog_run sees it respond (e.g. server still booting)
+					touch "$OFF_FILE" "$AUTOOFF_FILE"
+					grep -qxF "$rn" "$OFF_FILE" || printf '%s\n' "$rn" >> "$OFF_FILE"
+					grep -qxF "$rn" "$AUTOOFF_FILE" || printf '%s\n' "$rn" >> "$AUTOOFF_FILE"
+					regen_mixin; apply_nikki
+					auto=1
+				fi
 			fi
-			json_header; printf '{"ok":true,"kind":"node","id":"%s","name":"%s","delay":"%s","autodisabled":%s}' \
-				"$id" "$rn" "$d" "$([ "$auto" = 1 ] && echo true || echo false)"; exit 0
+			json_header; printf '{"ok":true,"kind":"node","id":"%s","name":"%s","delay":"%s","autodisabled":%s,"nikki_down":%s}' \
+				"$id" "$rn" "$d" "$([ "$auto" = 1 ] && echo true || echo false)" "$nikki_down"; exit 0
 		elif [ "$kind" = multi ]; then
-			json_header; printf '{"ok":true,"kind":"multi","added":%d}' "$added"; exit 0
+			json_header; printf '{"ok":true,"kind":"multi","added":%d,"nikki_down":%s}' "$added" "$nikki_down"; exit 0
 		fi
-		json_header; printf '{"ok":true,"kind":"provider","id":"%s"}' "$pid"; exit 0
+		json_header; printf '{"ok":true,"kind":"provider","id":"%s","nikki_down":%s}' "$pid" "$nikki_down"; exit 0
 
 		;;
 	nodedel)
@@ -3089,13 +3102,16 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		else
 			printf '%s\n' "$nm" >> "$OFF_FILE"; en=0
 		fi
+		# only a mihomo that was RUNNING before can be said to have died from this toggle (see nodeadd)
+		nwas=0; pgrep -f /usr/bin/mihomo >/dev/null && nwas=1
 		regen_mixin; apply_nikki; sleep 6
-		if ! pgrep -f /usr/bin/mihomo >/dev/null; then
+		if ! pgrep -f /usr/bin/mihomo >/dev/null && [ "$nwas" = 1 ]; then
 			if [ "$en" = 1 ]; then printf '%s\n' "$nm" >> "$OFF_FILE"; else grep -vxF "$nm" "$OFF_FILE" > "$OFF_FILE.tmp"; mv "$OFF_FILE.tmp" "$OFF_FILE"; fi
 			regen_mixin; apply_nikki
 			json_header; printf '{"ok":false,"error":"reload failed (reverted)"}'; exit 0
 		fi
-		json_header; printf '{"ok":true,"enabled":%s}' "$en"; exit 0
+		nikki_down=false; pgrep -f /usr/bin/mihomo >/dev/null || nikki_down=true
+		json_header; printf '{"ok":true,"enabled":%s,"nikki_down":%s}' "$en" "$nikki_down"; exit 0
 
 		;;
 	nodeorder)

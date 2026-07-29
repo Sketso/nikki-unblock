@@ -120,6 +120,7 @@ const I18N = {
     validating: "Добавляю и проверяю ноду…", nodeMs: "мс", nodeNoResp: "не отвечает", nodeSub: "подписка",
     nodeAutoOff: "не достучалась — отключена, включи после починки",
     nodeAutoOffTag: "недоступна, отключена автоматически",
+    nodeNikkiDown: "нода сохранена, но nikki не запущен: включи сервис и задай профиль (Services → Nikki), потом проверь ноду",
     nodeProfile: "из профиля", nodeOn: "вкл", nodeOff: "выкл",
     guardBad1: "⚠ Proxy-группа ", guardBad2: " не найдена в mihomo. Правила «→ VPN» указывают на несуществующую группу. Задай базовую группу равной имени proxy-группы твоего профиля: ",
     guardFix: "uci set nikki-unblock.config.base_group='ИМЯ' && uci commit",
@@ -287,6 +288,7 @@ const I18N = {
     validating: "Adding & checking node…", nodeMs: "ms", nodeNoResp: "no response", nodeSub: "subscription",
     nodeAutoOff: "unreachable — disabled, re-enable once it's fixed",
     nodeAutoOffTag: "unreachable, auto-disabled",
+    nodeNikkiDown: "node saved, but nikki is not running: enable the service and give it a profile (Services → Nikki), then re-check the node",
     nodeProfile: "from profile", nodeOn: "on", nodeOff: "off",
     guardBad1: "⚠ Proxy-group ", guardBad2: " was not found in mihomo. «→ VPN» rules point at a nonexistent group. Set the base group to your profile's proxy-group name: ",
     guardFix: "uci set nikki-unblock.config.base_group='NAME' && uci commit",
@@ -1334,9 +1336,15 @@ async function addNodeCfg(cfg, name){
   $("#nodeBtn").disabled = false;
   if (res.ok){
     let m = t("done");
+    // nikki down = the node is saved but untested; that's a nikki setup problem, not a bad config
+    if (res.nikki_down){
+      if (res.kind === "node") m += " · " + res.name;
+      setMsg($("#nodeMsg"), m + " — " + t("nodeNikkiDown"), false);
+    } else {
     if (res.kind === "node") m += " · " + res.name + " — " + (res.autodisabled ? t("nodeAutoOff") : res.delay === "x" ? t("nodeNoResp") : res.delay + " " + t("nodeMs"));
     else if (res.kind === "multi") m += " · " + t("subAdded") + res.added;
     setMsg($("#nodeMsg"), m, res.kind !== "node" || (res.delay !== "x" && !res.autodisabled));
+    }
     $("#nodeCfg").value = ""; $("#nodeName").value = "";
     loadNodes().then(() => { hideOverlay(); autoPingNodes(); }); loadDomains();
   } else { hideOverlay(); setMsg($("#nodeMsg"), t("errP") + (res.error || "?"), false); }
