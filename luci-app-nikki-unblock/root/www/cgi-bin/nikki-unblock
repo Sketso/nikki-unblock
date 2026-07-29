@@ -1060,6 +1060,41 @@ Z2_PDIR="/opt/zapret2/ipset/.nipret-presets"           # per-preset cached domai
 zapret2_present() { [ -x /etc/init.d/zapret2 ] && [ -d /opt/zapret2 ]; }
 # Nipret is a combine: nikki (Mihomo VPN) and zapret2 (DPI-bypass) are independent; either may be absent.
 nikki_present() { [ -x /etc/init.d/nikki ] && [ -x /usr/bin/mihomo ]; }
+# Does nikki actually have something to run? `profile` is "file:<name>" or "subscription:<name>"; a fresh
+# install points at an empty subscription, which mihomo can't start from. Without this, "no profile" and
+# "profile is broken" look identical to the panel — and to the user, like their pasted node config failed.
+NIKKI_PROFILE_DIR="/etc/nikki/profiles"
+NIKKI_BASE_PROFILE="nipret-base.yaml"       # the skeleton we create when nikki has nothing at all
+nikki_profile_ok() {
+	_p=$(uci -q get nikki.config.profile 2>/dev/null)
+	case "$_p" in
+		file:*)         [ -s "$NIKKI_PROFILE_DIR/${_p#file:}" ] ;;
+		subscription:*) [ -n "$(uci -q get "nikki.${_p#subscription:}.url" 2>/dev/null)" ] ;;
+		*)              return 1 ;;
+	esac
+}
+# One-click "make nikki runnable": write a minimal profile (only if there's nothing usable), point nikki
+# at it, enable and start. Deliberately conservative — an existing profile is never touched or replaced.
+# The skeleton routes MATCH,DIRECT and its group holds DIRECT, so it is valid stand-alone: mihomo starts
+# with zero proxies, and the nodes added in the panel arrive via our mixin (UNBLOCK).
+nikki_init_run() {
+	nikki_present || return 1
+	if ! nikki_profile_ok; then
+		mkdir -p "$NIKKI_PROFILE_DIR"
+		[ -s "$NIKKI_PROFILE_DIR/$NIKKI_BASE_PROFILE" ] || {
+			printf 'proxies: []\nproxy-groups:\n  - name: %s\n    type: fallback\n    url: http://cp.cloudflare.com/generate_204\n    interval: 60\n    proxies: [DIRECT]\nrules:\n  - MATCH,DIRECT\n' \
+				"$BASE_GROUP" > "$NIKKI_PROFILE_DIR/$NIKKI_BASE_PROFILE"
+		}
+		uci set nikki.config.profile="file:$NIKKI_BASE_PROFILE"
+	fi
+	uci set nikki.config.enabled=1
+	uci commit nikki
+	/etc/init.d/nikki enable >/dev/null 2>&1
+	regen_mixin                      # make sure UNBLOCK exists before the service comes up
+	/etc/init.d/nikki restart >/dev/null 2>&1
+	sleep 8
+	pgrep -f /usr/bin/mihomo >/dev/null 2>&1
+}
 
 # ---- nikki device-exclusion ordering ------------------------------------------------------
 # nikki renders lan_access_control in UCI ORDER and `redirect`/`return` are terminal verdicts, so a
@@ -3066,6 +3101,18 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		json_header; printf '{"ok":true,"kind":"provider","id":"%s","nikki_down":%s}' "$pid" "$nikki_down"; exit 0
 
 		;;
+	nikkiinit)
+		# one-click fix for a freshly installed, never-configured nikki (see nikki_init_run)
+		nikki_present || { json_header; printf '{"ok":false,"error":"nikki not installed"}'; exit 0; }
+		undo_push nikkiinit
+		if nikki_init_run; then
+			json_header; printf '{"ok":true,"running":true}'; exit 0
+		fi
+		# started but died, or refused to start — hand back the log tail so the reason is visible in the UI
+		_tail=$(logread 2>/dev/null | grep -iE 'nikki|mihomo' | grep -viE 'crond|cmd /' | tail -3 | tr '\n' ' ')
+		json_header; printf '{"ok":false,"error":"nikki did not start","log":"%s"}' "$(json_esc "$_tail")"; exit 0
+
+		;;
 	nodedel)
 		id=$(get_param id | sed 's/[^a-z0-9_-]//g')
 		if [ -n "$id" ]; then
@@ -3319,8 +3366,14 @@ devicesall_json() {
 	[ "$running" = 1 ] && { curl -s -m 5 -H "Authorization: Bearer $(mihomo_secret)" \
 		"$MIHOMO_API/proxies/$(urlenc_all "$BASE_GROUP")" 2>/dev/null | grep -q '"name"' || base_ok=0; }
 	mss=0; mssclamp_on && mss=1
-	printf '{"running":%d,"boot":%d,"base_group":"%s","base_ok":%d,"mss":%d}' \
-		"$running" "$booten" "$BASE_GROUP" "$base_ok" "$mss"; exit 0
+	# "Unconfigured" is a distinct state from "broken": a freshly installed nikki is disabled and has no
+	# profile, so mihomo never starts and NOTHING routed through it can work. Report it separately so the
+	# panel can offer the one-click fix instead of leaving people to guess (this cost a user an afternoon).
+	svc_en=$(uci -q get nikki.config.enabled 2>/dev/null)
+	prof_ok=0; nikki_profile_ok && prof_ok=1
+	unconf=0; [ "$running" = 0 ] && { [ "$prof_ok" = 0 ] || [ "$svc_en" = 0 ]; } && unconf=1
+	printf '{"running":%d,"boot":%d,"base_group":"%s","base_ok":%d,"mss":%d,"profile_ok":%d,"enabled":%d,"unconfigured":%d}' \
+		"$running" "$booten" "$BASE_GROUP" "$base_ok" "$mss" "$prof_ok" "$([ "$svc_en" = 0 ] && echo 0 || echo 1)" "$unconf"; exit 0
 }
 
 # ---- HTML page -------------------------------------------------------------

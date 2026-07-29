@@ -120,6 +120,8 @@ const I18N = {
     validating: "Добавляю и проверяю ноду…", nodeMs: "мс", nodeNoResp: "не отвечает", nodeSub: "подписка",
     nodeAutoOff: "не достучалась — отключена, включи после починки",
     nodeAutoOffTag: "недоступна, отключена автоматически",
+    nikkiUnconf: "⚠ nikki установлен, но не настроен: нет профиля или сервис выключен — mihomo не запускается, поэтому VPN-ноды и правила «→ VPN» не работают.",
+    nikkiUnconfFix: "Настроить и запустить",
     nodeNikkiDown: "нода сохранена, но nikki не запущен: включи сервис и задай профиль (Services → Nikki), потом проверь ноду",
     nodeProfile: "из профиля", nodeOn: "вкл", nodeOff: "выкл",
     guardBad1: "⚠ Proxy-группа ", guardBad2: " не найдена в mihomo. Правила «→ VPN» указывают на несуществующую группу. Задай базовую группу равной имени proxy-группы твоего профиля: ",
@@ -288,6 +290,8 @@ const I18N = {
     validating: "Adding & checking node…", nodeMs: "ms", nodeNoResp: "no response", nodeSub: "subscription",
     nodeAutoOff: "unreachable — disabled, re-enable once it's fixed",
     nodeAutoOffTag: "unreachable, auto-disabled",
+    nikkiUnconf: "⚠ nikki is installed but not configured: no profile, or the service is off — mihomo never starts, so VPN nodes and «→ VPN» rules do nothing.",
+    nikkiUnconfFix: "Set up & start",
     nodeNikkiDown: "node saved, but nikki is not running: enable the service and give it a profile (Services → Nikki), then re-check the node",
     nodeProfile: "from profile", nodeOn: "on", nodeOff: "off",
     guardBad1: "⚠ Proxy-group ", guardBad2: " was not found in mihomo. «→ VPN» rules point at a nonexistent group. Set the base group to your profile's proxy-group name: ",
@@ -1459,6 +1463,24 @@ function renderSvc(s){
 let LASTSVC = null;
 function renderGuard(s){
   const g = $("#guard"); if (!g) return;
+  // Never-configured nikki: mihomo can't start without a profile, so every "→ VPN" rule and every added
+  // node is dead weight — and the failure surfaces far from its cause. Name it here, with the fix.
+  if (s && s.unconfigured === 1){
+    g.textContent = "";
+    g.append(t("nikkiUnconf"));
+    const b = document.createElement("button");
+    b.type = "button"; b.textContent = t("nikkiUnconfFix");
+    b.addEventListener("click", async () => {
+      b.disabled = true; showOverlay(t("applying"));
+      let r; try { r = await api("nikkiinit", {}); } catch(e){ r = {}; }
+      hideOverlay(); b.disabled = false;
+      if (r && r.ok){ loadSvc(); loadNodes(); loadDomains(); }
+      else { g.append(" — " + ((r && r.log) || (r && r.error) || "?")); }
+    });
+    g.append(" "); g.append(b);
+    g.hidden = false;
+    return;
+  }
   if (s && s.running === 1 && s.base_ok === 0){
     g.textContent = "";
     g.append(t("guardBad1"));
