@@ -60,6 +60,15 @@ REDO_FILE="/etc/nikki-unblock/undo/.redo.tgz"  # pre-undo state so an undo can i
 MSS_FILE="/etc/nftables.d/10-mss-clamp.nft"    # optional MSS clamp (fixes mihomo large-download stalls)
 QUIC_FILE="/etc/nftables.d/20-nipret-block-quic.nft"   # optional Block-QUIC (browsers fall back to TCP)
 MIXIN_FILE="/etc/nikki/mixin.yaml"
+# Where a rule should point when nothing says otherwise. The node feature routes through the managed exit
+# group, but presets were left defaulting to the RAW profile group — so every preset bypassed the panel's
+# own nodes, and on a profile whose group holds only DIRECT (a fresh install's skeleton) it routed nowhere
+# at all: domains looked configured, traffic went straight out. Prefer the exit group when the mixin
+# actually defines it (cheap file check, no API call), else fall back to the profile group so an install
+# with no nodes yet still targets something that exists.
+default_rule_node() {
+	grep -q "name: $EXIT_GROUP" "$MIXIN_FILE" 2>/dev/null && echo "$EXIT_GROUP" || echo "$BASE_GROUP"
+}
 MIHOMO_API="http://127.0.0.1:9090"
 
 # applist URL: UCI-configurable, defaults to the project's neutral GitHub Pages host.
@@ -290,7 +299,7 @@ preset_fields_at() {   # $1=array index $2=index.json body
 	_g=$(printf '%s' "$2" | jsonfilter -e "@[$1].geoip" 2>/dev/null)
 	_ga=$(printf '%s' "$2" | jsonfilter -e "@[$1].geoips[*]" 2>/dev/null | tr '\n' ',')
 	PF_GEOIP=$(printf '%s,%s' "$_g" "$_ga" | sed 's/,,*/,/g; s/^,//; s/,$//')
-	PF_NODE=$(printf '%s' "$2" | jsonfilter -e "@[$1].node" 2>/dev/null); [ -z "$PF_NODE" ] && PF_NODE=PROXY
+	PF_NODE=$(printf '%s' "$2" | jsonfilter -e "@[$1].node" 2>/dev/null); [ -z "$PF_NODE" ] && PF_NODE=$(default_rule_node)
 	PF_IPS=$(printf '%s' "$2" | jsonfilter -e "@[$1].ipcidr[*]" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
 	# hybrid rule: the domain list applies when there is no geosite, or when the entry sets "list": true
 	_wl=$(printf '%s' "$2" | jsonfilter -e "@[$1].list" 2>/dev/null)
@@ -890,6 +899,19 @@ regen_mixin() {
 		fi
 	} > "$MIXIN_FILE"
 	uci set nikki.mixin.mixin_file_content=1 2>/dev/null; uci commit nikki 2>/dev/null
+}
+
+# nikki renders UCI @rule[] sections into mihomo's config ONLY while nikki.mixin.rule is on — its
+# generator wraps the whole nikki-rules block in that flag. Nipret writes those rules but never owned the
+# switch, and a fresh nikki ships it OFF: every domain, preset and "→ VPN" rule the panel had created was
+# silently dropped, the panel showing them as configured while all traffic went direct. Assert it (one uci
+# read in the common case) and apply once when it really was off, so the fix lands without another click.
+nikki_rules_enable() {
+	nikki_present || return 0
+	[ "$(uci -q get nikki.mixin.rule 2>/dev/null)" = 1 ] && return 0
+	uci -q set nikki.mixin.rule=1; uci -q commit nikki
+	logger -t nikki-unblock "nikki.mixin.rule was off — rules were never reaching mihomo; enabled"
+	apply_nikki
 }
 
 # Finish the one-time UNBLOCK build that uci-defaults couldn't do. Installing Nipret BEFORE nikki is a
@@ -2325,6 +2347,7 @@ LOGIN_EOF
 # ---- API -------------------------------------------------------------------
 
 migrate_dev_ip_to_mac
+nikki_rules_enable
 nodes_init_once
 
 API=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^api=' | head -1 | cut -d= -f2-)
