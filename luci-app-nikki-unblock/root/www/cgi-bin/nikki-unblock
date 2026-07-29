@@ -2165,6 +2165,52 @@ z2_backupauto_json() {
 	printf ']}'
 }
 
+# ---- "why isn't the VPN working?" — the nikki-side counterpart of ytdiag ----
+# Every hard failure we have hit read as "configured but not in effect": the rule flag off so 29 UCI rules
+# never reached mihomo, rules aimed at a group that only leads to DIRECT, an exit group that was never
+# built, a node added while nikki had no profile and could not start. None of it was visible from the
+# panel, because the panel only ever showed its OWN state. So this walks the chain and — the part that was
+# missing everywhere — compares intent (UCI rules, our node store) against reality (the config mihomo was
+# actually handed, the live proxy groups).
+NIKKI_RUN_CONFIG="$GEO_RUN/config.yaml"
+nikkidiag_json() {
+	json_header
+	nikki_present || { printf '{"present":0}'; return; }
+	en=1; [ "$(uci -q get nikki.config.enabled 2>/dev/null)" = 0 ] && en=0
+	prof=0; nikki_profile_ok && prof=1
+	run=0; pgrep -f /usr/bin/mihomo >/dev/null 2>&1 && run=1
+	rflag=0; [ "$(uci -q get nikki.mixin.rule 2>/dev/null)" = 1 ] && rflag=1
+	# INTENT: what the panel believes it has configured
+	ucin=0; _i=0
+	while uci -q get "nikki.@rule[$_i]" >/dev/null 2>&1; do ucin=$((ucin + 1)); _i=$((_i + 1)); done
+	_first=$(uci -q get 'nikki.@rule[0].matcher' 2>/dev/null)
+	# REALITY: the rules block mihomo was actually given, and whether our first matcher is really in it
+	liven=$(awk '/^rules:/{f=1;next} f&&/^[^[:space:]-]/{exit} f&&/^[[:space:]]*-/{n++} END{print n+0}' \
+		"$NIKKI_RUN_CONFIG" 2>/dev/null); [ -z "$liven" ] && liven=0
+	hit=0; [ -n "$_first" ] && grep -qF "$_first" "$NIKKI_RUN_CONFIG" 2>/dev/null && hit=1
+	# live proxy groups: does the exit group exist, and can the profile group reach anything at all?
+	eg=0; basedead=0; act=""; adly=x
+	if [ "$run" = 1 ]; then
+		_sec=$(mihomo_secret)
+		curl -s -m 6 -H "Authorization: Bearer $_sec" "$MIHOMO_API/proxies/$(urlenc_all "$EXIT_GROUP")" 2>/dev/null | grep -q '"name"' && eg=1
+		_ball=$(curl -s -m 6 -H "Authorization: Bearer $_sec" "$MIHOMO_API/proxies/$(urlenc_all "$BASE_GROUP")" 2>/dev/null | jsonfilter -e '@.all[*]' 2>/dev/null)
+		# a base group whose only members are DIRECT/REJECT routes nothing — rules aimed at it die silently
+		printf '%s\n' "$_ball" | grep -vxE 'DIRECT|REJECT|REJECT-DROP|PASS|COMPATIBLE|GLOBAL' | grep -q . || basedead=1
+		act=$(curl -s -m 6 -H "Authorization: Bearer $_sec" "$MIHOMO_API/proxies/$(urlenc_all "$EXIT_GROUP")" 2>/dev/null | jsonfilter -e '@.now' 2>/dev/null)
+		[ -n "$act" ] && adly=$(mihomo_delay "$act")
+	fi
+	ntot=0; nen=0
+	for _f in "$NODES_DIR"/*.yaml; do
+		[ -f "$_f" ] || continue
+		ntot=$((ntot + 1))
+		_nm=$(grep -m1 'name:' "$_f" | sed 's/.*name:[[:space:]]*//')
+		node_disabled "$_nm" || nen=$((nen + 1))
+	done
+	legacy=$(uci show nikki 2>/dev/null | grep -c "\.node='$BASE_GROUP'\$")
+	printf '{"present":1,"enabled":%d,"profile_ok":%d,"running":%d,"rule_flag":%d,"uci_rules":%d,"live_rules":%d,"first_hit":%d,"exit_group":%d,"base_dead":%d,"legacy":%s,"nodes":%d,"nodes_on":%d,"active":"%s","delay":"%s"}' \
+		"$en" "$prof" "$run" "$rflag" "$ucin" "$liven" "$hit" "$eg" "$basedead" "${legacy:-0}" "$ntot" "$nen" "$(json_esc "$act")" "$adly"
+}
+
 # Unified exit list as JSON — NEVER includes secrets. Shape:
 # {mode, active, nodes:[{name,kind,id,type,host,enabled,active,auto}], providers:[{id,name,count}]}
 # auto=1 means the watchdog (not the user) turned this node off — it'll re-enable itself on recovery.
@@ -3124,6 +3170,12 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		json_header; printf '{"ok":true,"kind":"provider","id":"%s","nikki_down":%s}' "$pid" "$nikki_down"; exit 0
 
 		;;
+	noderegen)
+		# rebuild the managed exit group + apply — the fix when UNBLOCK is missing while nodes exist
+		regen_mixin; apply_nikki
+		json_header; printf '{"ok":true}'; exit 0
+
+		;;
 	nikkiinit)
 		# one-click fix for a freshly installed, never-configured nikki (see nikki_init_run)
 		nikki_present || { json_header; printf '{"ok":false,"error":"nikki not installed"}'; exit 0; }
@@ -3347,6 +3399,7 @@ devicesall_json() {
 [ "$API" = "z2status" ] && { z2status_json; exit 0; }
 [ "$API" = "z2stratraw" ] && { z2stratraw_json; exit 0; }
 [ "$API" = "ytdiag" ] && { ytdiag_json; exit 0; }
+[ "$API" = "nikkidiag" ] && { nikkidiag_json; exit 0; }
 [ "$API" = "z2hosts" ] && { z2hosts_json; exit 0; }
 [ "$API" = "z2presets" ] && { z2presets_json; exit 0; }
 [ "$API" = "presets" ] && {

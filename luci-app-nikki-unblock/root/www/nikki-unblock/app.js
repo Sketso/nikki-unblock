@@ -120,6 +120,22 @@ const I18N = {
     validating: "Добавляю и проверяю ноду…", nodeMs: "мс", nodeNoResp: "не отвечает", nodeSub: "подписка",
     nodeAutoOff: "не достучалась — отключена, включи после починки",
     nodeAutoOffTag: "недоступна, отключена автоматически",
+    nkDiagTitle: "Почему не работает VPN?",
+    nkDiagHint: "Проверяет всю цепочку: сервис → профиль → правила в конфиге mihomo → группа выходов → нода. Останавливается на первом обрыве и предлагает починку.",
+    nkDiagBtn: "Проверить", nkDiagNoNikki: "nikki не установлен — VPN-часть работать не может",
+    nkDiagUnconf: "nikki не настроен: нет профиля или сервис выключен, mihomo не запускается",
+    nkDiagDown: "nikki настроен, но mihomo не запущен",
+    nkDiagRunning: "nikki работает, mihomo запущен",
+    nkDiagRulesLost: n => "Правил в панели: " + n + ", но в конфиге mihomo их нет — правила не доезжают",
+    nkDiagRulesLive: n => "Правила доехали до mihomo: " + n,
+    nkDiagNoRules: "Правил пока нет — добавь домены или включи пресет",
+    nkDiagNoGroup: "Группа выходов не собрана — правила «→ VPN» указывают в пустоту",
+    nkDiagFixGroup: "Собрать группу",
+    nkDiagDeadBase: n => "Правил ведут в группу профиля, которая никуда не ведёт: " + n + " — трафик идёт напрямую",
+    nkDiagNoNodes: "Нод нет — добавь конфиг во вкладке «Ноды»",
+    nkDiagAllOff: "Все ноды выключены — трафик идёт напрямую",
+    nkDiagNodeDead: "Активная нода не отвечает",
+    nkDiagNodeOk: (n, ms) => "Активная нода отвечает: " + n + " — " + ms + " мс",
     nikkiUnconf: "⚠ nikki установлен, но не настроен: нет профиля или сервис выключен — mihomo не запускается, поэтому VPN-ноды и правила «→ VPN» не работают.",
     nikkiUnconfFix: "Настроить и запустить",
     nodeNikkiDown: "нода сохранена, но nikki не запущен: включи сервис и задай профиль (Services → Nikki), потом проверь ноду",
@@ -290,6 +306,22 @@ const I18N = {
     validating: "Adding & checking node…", nodeMs: "ms", nodeNoResp: "no response", nodeSub: "subscription",
     nodeAutoOff: "unreachable — disabled, re-enable once it's fixed",
     nodeAutoOffTag: "unreachable, auto-disabled",
+    nkDiagTitle: "Why isn't the VPN working?",
+    nkDiagHint: "Walks the whole chain: service → profile → rules inside mihomo's config → exit group → node. Stops at the first break and offers the fix.",
+    nkDiagBtn: "Check", nkDiagNoNikki: "nikki is not installed — the VPN side cannot work",
+    nkDiagUnconf: "nikki is not configured: no profile or the service is off, so mihomo never starts",
+    nkDiagDown: "nikki is configured but mihomo is not running",
+    nkDiagRunning: "nikki is up, mihomo is running",
+    nkDiagRulesLost: n => "The panel has " + n + " rules, but mihomo's config has none — they never reach it",
+    nkDiagRulesLive: n => "Rules reached mihomo: " + n,
+    nkDiagNoRules: "No rules yet — add domains or turn on a preset",
+    nkDiagNoGroup: "The exit group was never built — «→ VPN» rules point at nothing",
+    nkDiagFixGroup: "Build the group",
+    nkDiagDeadBase: n => n + " rules point at a profile group that leads nowhere — traffic goes direct",
+    nkDiagNoNodes: "No nodes — add a config on the Nodes tab",
+    nkDiagAllOff: "Every node is off — traffic goes direct",
+    nkDiagNodeDead: "The active node does not respond",
+    nkDiagNodeOk: (n, ms) => "Active node responds: " + n + " — " + ms + " ms",
     nikkiUnconf: "⚠ nikki is installed but not configured: no profile, or the service is off — mihomo never starts, so VPN nodes and «→ VPN» rules do nothing.",
     nikkiUnconfFix: "Set up & start",
     nodeNikkiDown: "node saved, but nikki is not running: enable the service and give it a profile (Services → Nikki), then re-check the node",
@@ -1099,6 +1131,59 @@ $("#z2Ipv6").addEventListener("change", async e => {
   if (res && res.ok) setMsg($("#z2Msg"), t("done")); else setMsg($("#z2Msg"), t("errP") + ((res && res.error) || "?"), false);
   loadZapret2();
 });
+/* ---------- one-click "why isn't the VPN working?" (nikki side) ----------
+   Walks the chain in the order it actually breaks and stops being green at the first broken link. The
+   load-bearing checks are the ones comparing INTENT with REALITY (uci_rules vs live_rules/first_hit,
+   base_dead): every silent failure we have seen looked fine from the panel's own state. */
+async function nkDiagCheck(){
+  const btn = $("#nkDiagBtn"); btn.disabled = true; setMsg($("#nkDiagMsg"), t("applying"));
+  let d; try { d = await (await fetch("?api=nikkidiag")).json(); }
+  catch(e){ setMsg($("#nkDiagMsg"), t("errP"), false); btn.disabled = false; return; }
+  setMsg($("#nkDiagMsg"), ""); btn.disabled = false;
+  const box = $("#nkDiagResult"); box.innerHTML = ""; box.hidden = false;
+  const rows = [];
+  const add = (state, msg, fix) => rows.push({ state, msg, fix });
+  if (!d.present){ add("bad", t("nkDiagNoNikki")); }
+  else if (!d.running){
+    add("bad", (!d.profile_ok || !d.enabled) ? t("nkDiagUnconf") : t("nkDiagDown"),
+        (!d.profile_ok || !d.enabled) ? { label: t("nikkiUnconfFix"), action: "nikkiinit" }
+                                      : { label: t("svcRestart"), action: "svc", params: { op: "restart" } });
+  } else {
+    add("ok", t("nkDiagRunning"));
+    // intent vs reality — the check that was missing everywhere
+    if (d.uci_rules > 0 && d.first_hit !== 1)
+      add("bad", t("nkDiagRulesLost")(d.uci_rules), { label: t("svcReload"), action: "svc", params: { op: "reload" } });
+    else if (d.uci_rules > 0) add("ok", t("nkDiagRulesLive")(d.uci_rules));
+    else add("info", t("nkDiagNoRules"));
+    // the exit group must exist for "→ VPN" to resolve at all
+    if (d.nodes > 0 && !d.exit_group) add("bad", t("nkDiagNoGroup"), { label: t("nkDiagFixGroup"), action: "noderegen" });
+    // rules aimed at a profile group that can only reach DIRECT go nowhere — the friend's exact failure
+    if (d.base_dead && d.legacy > 0)
+      add("bad", t("nkDiagDeadBase")(d.legacy), { label: t("migrateRules"), action: "migraterules" });
+    // nodes
+    if (d.nodes === 0) add("info", t("nkDiagNoNodes"));
+    else if (d.nodes_on === 0) add("bad", t("nkDiagAllOff"));
+    else if (d.delay === "x") add("bad", t("nkDiagNodeDead"));
+    else add("ok", t("nkDiagNodeOk")(d.active, d.delay));
+  }
+  rows.forEach(e => {
+    const div = document.createElement("div"); div.className = "ytrow " + e.state;
+    div.innerHTML = '<span class="ytic">' + (e.state === "ok" ? "✓" : e.state === "bad" ? "✕" : e.state === "warn" ? "!" : "·") + '</span>' +
+                    '<span class="ytmsg">' + escH(e.msg) + '</span>';
+    if (e.fix){
+      const b = document.createElement("button"); b.className = "ghost"; b.textContent = e.fix.label;
+      b.addEventListener("click", async () => {
+        b.disabled = true; showOverlay(t("applying"));
+        try { await api(e.fix.action, e.fix.params || {}); } catch(err){}
+        hideOverlay(); loadSvc(); loadNodes(); loadDomains(); nkDiagCheck();
+      });
+      div.appendChild(b);
+    }
+    box.appendChild(div);
+  });
+}
+$("#nkDiagBtn").addEventListener("click", nkDiagCheck);
+
 /* ---------- one-click YouTube diagnostics ---------- */
 async function ytCheck(){
   const btn = $("#ytBtn"); btn.disabled = true; setMsg($("#ytMsg"), t("applying"));
