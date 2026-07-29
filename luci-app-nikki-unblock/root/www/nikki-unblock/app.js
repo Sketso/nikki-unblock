@@ -120,6 +120,8 @@ const I18N = {
     validating: "Добавляю и проверяю ноду…", nodeMs: "мс", nodeNoResp: "не отвечает", nodeSub: "подписка",
     nodeAutoOff: "не достучалась — отключена, включи после починки",
     nodeAutoOffTag: "недоступна, отключена автоматически",
+    instNikki: "Установить nikki (VPN)",
+    nikkiMissing: "nikki (VPN-движок) не установлен — VPN-часть скрыта. Поставить можно кнопкой «Установить nikki» в разделе «Общее» → «Обновления».",
     nkDiagTitle: "Почему не работает VPN?",
     nkDiagHint: "Проверяет всю цепочку: сервис → профиль → правила в конфиге mihomo → группа выходов → нода. Останавливается на первом обрыве и предлагает починку.",
     nkDiagBtn: "Проверить", nkDiagNoNikki: "nikki не установлен — VPN-часть работать не может",
@@ -306,6 +308,8 @@ const I18N = {
     validating: "Adding & checking node…", nodeMs: "ms", nodeNoResp: "no response", nodeSub: "subscription",
     nodeAutoOff: "unreachable — disabled, re-enable once it's fixed",
     nodeAutoOffTag: "unreachable, auto-disabled",
+    instNikki: "Install nikki (VPN)",
+    nikkiMissing: "nikki (the VPN engine) is not installed — the VPN side is hidden. Install it with «Install nikki» under Manage → Updates.",
     nkDiagTitle: "Why isn't the VPN working?",
     nkDiagHint: "Walks the whole chain: service → profile → rules inside mihomo's config → exit group → node. Stops at the first break and offers the fix.",
     nkDiagBtn: "Check", nkDiagNoNikki: "nikki is not installed — the VPN side cannot work",
@@ -922,10 +926,17 @@ function applyCaps(){
   const zt = document.querySelector('.tab-top[data-engine="zapret2"]'); if (zt) zt.hidden = !CAPS.zapret2;
   const svc = document.querySelector('#view-mgmt .svc'); if (svc) svc.style.display = CAPS.nikki ? "" : "none";
   const zb = $("#z2bkBlock"); if (zb) zb.hidden = !CAPS.zapret2;
+  const nkd = $("#nkDiagBlock"); if (nkd) nkd.hidden = !CAPS.nikki;
+  // nikki missing → offer to install it. Doing it by hand is a minefield (its feed is DPI-blocked here,
+  // and picking the stable engine silently breaks XHTTP nodes), so the button is the supported path.
+  const inb = $("#instNikki"); if (inb) inb.hidden = CAPS.nikki;
+  const unb = $("#updNikki"); if (unb) unb.hidden = !CAPS.nikki;
   // open the first available engine (prefer nikki, else zapret2, else common)
   const firstEng = document.querySelector('.tab-top:not([hidden])');
   selectEngine(firstEng ? firstEng.dataset.engine : "common");
-  if (!CAPS.nikki && !CAPS.zapret2){ const g = $("#guard"); if (g){ g.textContent = t("noEngines"); g.hidden = false; } }
+  const g = $("#guard");
+  if (g && !CAPS.nikki && !CAPS.zapret2){ g.textContent = t("noEngines"); g.hidden = false; }
+  else if (g && !CAPS.nikki){ g.textContent = t("nikkiMissing"); g.hidden = false; }
 }
 
 /* ---------- zapret2 (DPI bypass) management ---------- */
@@ -1912,6 +1923,7 @@ $("#updSelf").addEventListener("click", () => doUpdate("self"));
 $("#updNikki").addEventListener("click", () => doUpdate("nikki"));
 $("#updGeo").addEventListener("click", () => doUpdate("geo"));
 $("#updZ2").addEventListener("click", () => doUpdate("z2"));
+$("#instNikki").addEventListener("click", () => doUpdate("instnikki"));
 $("#updAll").addEventListener("click", () => doUpdate("all"));
 
 /* ---------- danger zone: uninstall Nipret ---------- */

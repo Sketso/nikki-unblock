@@ -647,8 +647,10 @@ upd_running() {   # 0 (true) if an update runner is alive
 }
 update_start() {   # $1=op(self|nikki|geo|z2|all) ; 0=started 1=busy 2=bad op 3=no space
 	_op="$1"
-	case "$_op" in self|nikki|geo|z2|all) ;; *) return 2 ;; esac
+	case "$_op" in self|nikki|geo|z2|all|instnikki) ;; *) return 2 ;; esac
 	upd_running && return 1
+	# a from-scratch nikki install pulls a ~30 MB archive and unpacks it, both in tmpfs
+	[ "$_op" = instnikki ] && { fs_has_room /tmp 81920 || return 3; }
 	# refuse to start on a nearly-full filesystem: apk downloads via /tmp (tmpfs), geo DBs land in
 	# $GEO_RUN (~40 MB peak). z2 is NOT guarded here — z2_run_update has its own graceful check.
 	case "$_op" in self|nikki|all) fs_has_room /tmp 20480 || return 3 ;; esac
@@ -657,6 +659,9 @@ update_start() {   # $1=op(self|nikki|geo|z2|all) ; 0=started 1=busy 2=bad op 3=
 	{
 		printf '#!/bin/sh\nexec >> "%s" 2>&1\nrc=0\n' "$UPD_LOG"
 		printf 'echo ">> update: %s"\n' "$_op"
+		case "$_op" in instnikki)
+			printf 'echo ">> installing nikki (VPN engine)"; "%s" nikkiinstall || rc=$?\n' "$SELF" ;;
+		esac
 		# nikki FIRST, self LAST: a self-update replaces this CGI, so keep it to the very end
 		# (for op=all) — the poll endpoint then disappears only once everything else is done.
 		case "$_op" in nikki|all)
@@ -2165,6 +2170,53 @@ z2_backupauto_json() {
 	printf ']}'
 }
 
+# ---- install nikki from scratch --------------------------------------------
+# Installing nikki by hand is where new users lose hours, and for reasons they can't guess:
+#   * its own feed lives on pages.dev, which RU DPI mangles — you need a working bypass to install the
+#     bypass. GitHub releases carry the same packages and stay reachable, so we use those.
+#   * the tarball ships TWO engines and the choice is load-bearing: mihomo-meta (stable) can't parse
+#     XHTTP/Reality nodes, so a perfectly good config is "rejected" with no hint. Always take alpha.
+#   * a fresh nikki is disabled and profile-less, so it never starts and everything routed through it
+#     silently does nothing (nikki_init_run finishes that part).
+NIKKI_REL_URL="https://github.com/nikkinikki-org/OpenWrt-nikki/releases/latest/download"
+# package arch as apk names it (aarch64_cortex-a53, not the bare aarch64 from --print-arch): read it off
+# any installed non-noarch package, which is the only place it appears verbatim.
+pkg_arch() { apk list -I 2>/dev/null | awk '$2 != "noarch" && $2 ~ /_/ {print $2; exit}'; }
+owrt_release() {   # "25.12" | "SNAPSHOT"
+	_v=$(sed -n 's/^VERSION_ID="\([0-9]*\.[0-9]*\).*/\1/p' /etc/os-release 2>/dev/null)
+	[ -n "$_v" ] && echo "$_v" || echo SNAPSHOT
+}
+nikki_install_run() {
+	_arch=$(pkg_arch)
+	[ -n "$_arch" ] || { echo "!! cannot determine package architecture"; return 1; }
+	_rel=$(owrt_release)
+	case "$_rel" in SNAPSHOT) _asset="nikki_${_arch}-SNAPSHOT.tar.gz" ;; *) _asset="nikki_${_arch}-openwrt-${_rel}.tar.gz" ;; esac
+	echo ">> target: $_arch / OpenWrt $_rel"
+	fs_has_room /tmp 81920 || { echo "!! not enough space in /tmp (need ~80 MB for the archive + unpack)"; return 3; }
+	_d=/tmp/nu-nikki-inst; rm -rf "$_d"; mkdir -p "$_d"
+	echo ">> downloading $_asset"
+	# NOT the pages.dev feed on purpose — see the note above
+	curl -sfL --max-time 300 -o "$_d/n.tar.gz" "$NIKKI_REL_URL/$_asset" || { echo "!! download failed ($_asset) — is this arch/release published?"; rm -rf "$_d"; return 1; }
+	echo "   $(wc -c < "$_d/n.tar.gz") bytes"
+	tar -xzf "$_d/n.tar.gz" -C "$_d" 2>/dev/null || { echo "!! corrupt archive"; rm -rf "$_d"; return 1; }
+	# alpha, never meta: XHTTP/Reality nodes don't parse on stable and fail as "config rejected"
+	_eng=$(ls "$_d"/mihomo-alpha-*.apk 2>/dev/null | head -1)
+	[ -n "$_eng" ] || _eng=$(ls "$_d"/mihomo-*.apk 2>/dev/null | head -1)
+	[ -n "$_eng" ] || { echo "!! no mihomo package inside the archive"; rm -rf "$_d"; return 1; }
+	echo ">> installing $(basename "$_eng") + nikki"
+	# a previously chosen engine sits in apk's world and conflicts with ours — drop the request, the
+	# package itself is replaced by the transaction below
+	sed -i '/^mihomo-meta/d' /etc/apk/world 2>/dev/null
+	apk add --allow-untrusted "$_eng" "$_d"/nikki-*.apk "$_d"/luci-app-nikki-*.apk "$_d"/luci-i18n-nikki-ru-*.apk || {
+		echo "!! apk add failed"; rm -rf "$_d"; return 1; }
+	rm -rf "$_d"
+	echo ">> configuring + starting nikki"
+	nikki_init_run && { echo ">> mihomo is running"; return 0; }
+	echo "!! nikki did not come up — last log lines:"
+	logread 2>/dev/null | grep -iE 'nikki|mihomo' | grep -viE 'crond|cmd /' | tail -5
+	return 1
+}
+
 # ---- "why isn't the VPN working?" — the nikki-side counterpart of ytdiag ----
 # Every hard failure we have hit read as "configured but not in effect": the rule flag off so 29 UCI rules
 # never reached mihomo, rules aimed at a group that only leads to DIRECT, an exit group that was never
@@ -2288,6 +2340,8 @@ nodes_json() {
 [ "$1" = "z2backupauto" ] && { z2_backup_auto_run; exit 0; }
 # detached update runner hooks (called from the generated update script; stdout → shared update log)
 [ "$1" = "z2update" ] && { z2_run_update "$2" "$3"; exit $?; }
+# detached install runner hook (called from the generated update script; stdout → shared update log)
+[ "$1" = "nikkiinstall" ] && { nikki_install_run; exit $?; }
 # detached atomic nikki-preset apply (both facets) — status streamed to $PRESET_OP
 [ "$1" = "_presetapply" ] && { preset_apply_run "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9"; exit 0; }
 [ "$1" = "_z2presetapply" ] && { z2_preset_apply_run "$2" "$3" "$4"; exit 0; }
