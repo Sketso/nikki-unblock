@@ -55,10 +55,17 @@ jobs:
           cp feed/nikki-unblock.pem _site/apk/nikki-unblock.pem
           if gh release download --repo "$GITHUB_REPOSITORY" \
                -p 'luci-app-nikki-unblock.apk' -D _site/apk 2>/dev/null; then
-            # the router fetches packages by their canonical name <pkg>-<version>-r<rel>.apk,
-            # so rename the stable release asset back before indexing
-            ver=$(sed -n 's/^PKG_VERSION:=//p' luci-app-nikki-unblock/Makefile)
-            rel=$(sed -n 's/^PKG_RELEASE:=//p' luci-app-nikki-unblock/Makefile)
+            # The router fetches packages by their canonical name <pkg>-<version>-r<rel>.apk, so rename
+            # the stable release asset back before indexing.
+            #
+            # The version MUST come from the release we just downloaded, NOT from the Makefile in this
+            # checkout: releases are cut by tag and main can lag behind them (it did — v2.19.0 was tagged
+            # while main still read 2.18.0). mkndx reads the real version from inside the .apk, so a stale
+            # Makefile published an index advertising 2.19.0-r1 next to a file named 2.18.0-r1: every
+            # install 404'd ("wget: exited with error 8"). Tag = what was actually built and released.
+            tag=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)
+            ver=${tag#v}
+            rel=$(sed -n 's/^PKG_RELEASE:=//p' luci-app-nikki-unblock/Makefile); : "${rel:=1}"
             mv _site/apk/luci-app-nikki-unblock.apk \
                "_site/apk/luci-app-nikki-unblock-${ver}-r${rel}.apk"
             # Write the private signing key (from the repo secret) to a file OUTSIDE the published
