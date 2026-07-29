@@ -892,6 +892,21 @@ regen_mixin() {
 	uci set nikki.mixin.mixin_file_content=1 2>/dev/null; uci commit nikki 2>/dev/null
 }
 
+# Finish the one-time UNBLOCK build that uci-defaults couldn't do. Installing Nipret BEFORE nikki is a
+# real order (seen in the wild): at package-install time there was no live mihomo to enumerate, so the
+# exit group was never created and "→ VPN" rules pointed at a group that doesn't exist. Rather than wait
+# for the next package upgrade to retry, finish it the first time the panel sees a live nikki.
+# Deliberately does NOT reload nikki: a reload takes ~13 s and this runs on a page load. Writing the
+# mixin is enough — the next real action (add a node, edit a rule) applies it.
+nodes_init_once() {
+	[ "$(uci -q get nikki-unblock.config._nodes_init 2>/dev/null)" = 1 ] && return 0
+	nikki_present || return 0
+	pgrep -f /usr/bin/mihomo >/dev/null 2>&1 || return 0
+	regen_mixin
+	uci -q set nikki-unblock.config._nodes_init=1 2>/dev/null
+	uci -q commit nikki-unblock 2>/dev/null
+}
+
 # ---- node health watchdog (self-heal exit nodes that go down, or come back) -----------------
 # nodeadd's own post-add probe only judges a node once, at add time. A node that's fine today can go
 # dark later (VPN box rebooted for maintenance, provider hiccup) — or come back AFTER such an outage —
@@ -2275,6 +2290,7 @@ LOGIN_EOF
 # ---- API -------------------------------------------------------------------
 
 migrate_dev_ip_to_mac
+nodes_init_once
 
 API=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^api=' | head -1 | cut -d= -f2-)
 

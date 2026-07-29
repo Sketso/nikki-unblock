@@ -27,16 +27,25 @@ fi
 # Drop any stale autosync cron line from the predecessor CGI (nikki-domains), if present.
 [ -f /etc/crontabs/root ] && sed -i '/nikki-domains/d' /etc/crontabs/root && /etc/init.d/cron restart >/dev/null 2>&1
 
-# One-time: seed the exit-node mode + build the managed exit group (UNBLOCK) so "→ VPN" rules resolve.
-# Idempotent via a flag; runs the CGI's `regen` (queries mihomo for the profile's node names).
-if [ "$(uci -q get nikki-unblock.config._nodes_init 2>/dev/null)" != 1 ]; then
+# Seed the exit-node mode once. Keyed on the VALUE being absent rather than on the init flag below, so
+# the flag can stay unset for a later retry without this ever clobbering a mode the user has changed.
+if [ -z "$(uci -q get nikki-unblock.config.node_mode 2>/dev/null)" ]; then
 	uci -q set nikki-unblock.config.node_mode='fallback'
+	uci -q commit nikki-unblock
+fi
+
+# Build the managed exit group (UNBLOCK) so "→ VPN" rules resolve. `regen` asks a LIVE mihomo for the
+# profile's node names, so it only works once nikki is installed AND running. Nipret is legitimately
+# installed BEFORE nikki (a user hit exactly this), and the flag used to be burned regardless — leaving
+# UNBLOCK missing forever and "→ VPN" pointing at a group that doesn't exist. Record success ONLY, so an
+# install that was too early simply retries on the next package upgrade; the panel also self-heals at
+# runtime (nodes_init_once in the CGI) so it doesn't have to wait for one.
+if [ "$(uci -q get nikki-unblock.config._nodes_init 2>/dev/null)" != 1 ] \
+	&& [ -x /www/cgi-bin/nikki-unblock ] && pgrep -f /usr/bin/mihomo >/dev/null 2>&1; then
+	/www/cgi-bin/nikki-unblock regen 2>/dev/null
+	/etc/init.d/nikki reload >/dev/null 2>&1
 	uci -q set nikki-unblock.config._nodes_init='1'
 	uci -q commit nikki-unblock
-	if [ -x /www/cgi-bin/nikki-unblock ] && pgrep -f /usr/bin/mihomo >/dev/null 2>&1; then
-		/www/cgi-bin/nikki-unblock regen 2>/dev/null
-		/etc/init.d/nikki reload >/dev/null 2>&1
-	fi
 fi
 
 # zapret2 desync-rules watchdog (fw4 "start doesn't rebuild the firewall" self-heal). The script no-ops
