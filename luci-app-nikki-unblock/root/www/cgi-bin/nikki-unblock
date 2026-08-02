@@ -2423,6 +2423,41 @@ geoip_drop_run() {
 	return 1
 }
 
+# ---- does this domain actually open? ---------------------------------------
+# The HTTP code alone is worthless here — the failures that matter look similar and need opposite fixes,
+# and telling them apart by hand cost hours:
+#   dpi        no handshake at all (curl reports 000). The desync isn't getting through; change strategy.
+#   throttled  the response STARTS, delivers a few KB and then hangs until the timeout. That is IP-level
+#              throttling — the decision is made on the destination address, so no desync helps and only a
+#              tunnel does. Easy to misread as success: the code is 200, and only the elapsed time — equal
+#              to the timeout — gives it away.
+#   challenge  Cloudflare interstitial (cf-mitigated). A browser solves it; not a failure.
+#   ok         full response in reasonable time.
+REACH_TIMEOUT=12
+reach_probe() {   # $1=domain -> "verdict|code|bytes|seconds"
+	_hd="/tmp/nu-reach.$$"
+	_r=$(curl -m "$REACH_TIMEOUT" -s -o /dev/null -D "$_hd" -w '%{http_code} %{size_download} %{time_total}' "https://$1/" 2>/dev/null)
+	_code=$(printf '%s' "$_r" | awk '{print $1+0}')
+	_size=$(printf '%s' "$_r" | awk '{print $2+0}')
+	_secs=$(printf '%s' "$_r" | awk '{printf "%d", $3+0}')
+	_cf=0; grep -qi '^cf-mitigated:' "$_hd" 2>/dev/null && _cf=1
+	rm -f "$_hd"
+	if [ "$_code" = 0 ]; then _v=dpi
+	elif [ "$_secs" -ge $((REACH_TIMEOUT - 1)) ]; then _v=throttled
+	elif [ "$_cf" = 1 ]; then _v=challenge
+	else _v=ok; fi
+	printf '%s|%s|%s|%s' "$_v" "$_code" "$_size" "$_secs"
+}
+reachcheck_json() {
+	json_header
+	_d=$(get_param domain | tr 'A-Z' 'a-z' | sed 's#^https\?://##; s#/.*##; s/[^a-z0-9.-]//g')
+	case "$_d" in *.*) ;; *) printf '{"ok":false,"error":"bad domain"}'; return ;; esac
+	_p=$(reach_probe "$_d")
+	printf '{"ok":true,"domain":"%s","verdict":"%s","code":%s,"bytes":%s,"secs":%s}' \
+		"$(json_esc "$_d")" "$(printf '%s' "$_p" | cut -d'|' -f1)" "$(printf '%s' "$_p" | cut -d'|' -f2)" \
+		"$(printf '%s' "$_p" | cut -d'|' -f3)" "$(printf '%s' "$_p" | cut -d'|' -f4)"
+}
+
 # ---- "why doesn't THIS site open?" ------------------------------------------
 # The system-wide check answers "is the plumbing sound"; this answers the question people actually ask,
 # about one site. It resolves the domain the way mihomo will: against the rules in the LIVE config, in
@@ -3493,6 +3528,10 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			*) printf '{"ok":false,"error":"failed","log":"%s"}' "$(json_esc "$_out")" ;;
 		esac
 		exit 0
+
+		;;
+	reachcheck)
+		reachcheck_json; exit 0
 
 		;;
 	domaincheck)

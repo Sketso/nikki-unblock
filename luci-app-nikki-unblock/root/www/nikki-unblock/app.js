@@ -131,6 +131,12 @@ const I18N = {
     stGeoipNeeded: r => "Сейчас используется правилами: " + r + ". При удалении они будут заменены на опубликованные подсети (для Telegram — с core.telegram.org), остальные удалены.",
     stGeoipConfirm: "Заменить GEOIP-правила на подсети и удалить базу? Страновые правила продолжат работать. Если mihomo не поднимется — изменение откатится.",
     stLow: "Места почти нет — записи конфига могут начать падать",
+    dcProbing: "пробую открыть…",
+    dcOpenOk: (c, kb) => "Открывается: код " + c + ", получено " + kb + " КБ",
+    dcOpenThrottled: (kb, s) => "Ответ начался и завис на " + kb + " КБ (" + s + " с до таймаута) — это удушение по IP, десинк тут не поможет, нужен туннель",
+    dcOpenDpi: "Соединение не устанавливается вообще — DPI рвёт рукопожатие, нужна другая стратегия zapret2",
+    dcOpenChallenge: "Cloudflare показывает проверку — в браузере она проходит сама, это не блокировка",
+    dcProbeCaveat: "Проверка идёт с роутера по TCP: у клиента результат может отличаться, если браузер уйдёт по QUIC или будет резолвить домен своим DNS",
     dcTitle: "Почему не открывается сайт?",
     dcHint: "Введи домен — панель скажет, какой движок его обрабатывает и работает ли этот путь прямо сейчас. Проверяется по живому конфигу mihomo, а не по настройкам панели.",
     dcBtn: "Проверить", dcPh: "instagram.com",
@@ -345,6 +351,12 @@ const I18N = {
     stGeoipNeeded: r => "Currently used by rules: " + r + ". Deleting replaces them with published IP ranges (Telegram's come from core.telegram.org); the rest are dropped.",
     stGeoipConfirm: "Replace the GEOIP rules with IP ranges and delete the database? Country rules keep working. If mihomo fails to come back, the change is reverted.",
     stLow: "Almost no free space — config writes may start failing",
+    dcProbing: "trying to open…",
+    dcOpenOk: (c, kb) => "Opens: code " + c + ", " + kb + " KB received",
+    dcOpenThrottled: (kb, s) => "Response started then stalled at " + kb + " KB (" + s + " s to timeout) — IP-level throttling; no desync fixes this, it needs a tunnel",
+    dcOpenDpi: "No connection at all — DPI is breaking the handshake; try another zapret2 strategy",
+    dcOpenChallenge: "Cloudflare is showing a challenge — a browser solves it, this is not a block",
+    dcProbeCaveat: "Probed from the router over TCP: a client may differ if the browser uses QUIC or resolves the domain itself",
     dcTitle: "Why doesn't this site open?",
     dcHint: "Enter a domain and the panel tells you which engine handles it and whether that path works right now. Checked against mihomo's live config, not the panel's settings.",
     dcBtn: "Check", dcPh: "instagram.com",
@@ -1280,12 +1292,26 @@ async function dcCheck(dom){
   else if (!viaVpn) add("info", t("dcNoEngine"));
   if (d.geosite_before > 0) add("info", t("dcGeoCaveat")(d.geosite_before));
   box.innerHTML = ""; box.hidden = false;
-  rows.forEach(e => {
+  const render = e => {
     const div = document.createElement("div"); div.className = "ytrow " + e.state;
     div.innerHTML = '<span class="ytic">' + (e.state === "ok" ? "✓" : e.state === "bad" ? "✕" : e.state === "warn" ? "!" : "·") + '</span>' +
                     '<span class="ytmsg">' + escH(e.msg) + '</span>';
-    box.appendChild(div);
-  });
+    box.appendChild(div); return div;
+  };
+  rows.forEach(render);
+  // Routing is only half the answer — now actually try to open it. Kept as a second call so the routing
+  // verdict shows immediately instead of waiting out a probe that can run to a 12 s timeout.
+  const pending = render({ state: "info", msg: t("dcProbing") });
+  let p; try { p = await api("reachcheck", { domain: d.domain }); } catch(e){ p = {}; }
+  pending.remove();
+  if (p && p.ok){
+    const kb = Math.round(p.bytes / 1024);
+    if (p.verdict === "ok") render({ state: "ok", msg: t("dcOpenOk")(p.code, kb) });
+    else if (p.verdict === "throttled") render({ state: "bad", msg: t("dcOpenThrottled")(kb, p.secs) });
+    else if (p.verdict === "dpi") render({ state: "bad", msg: t("dcOpenDpi") });
+    else if (p.verdict === "challenge") render({ state: "info", msg: t("dcOpenChallenge") });
+    render({ state: "info", msg: t("dcProbeCaveat") });
+  }
 }
 $("#dcForm").addEventListener("submit", e => {
   e.preventDefault();
