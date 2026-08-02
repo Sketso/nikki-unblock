@@ -34,8 +34,12 @@
   },
   {
     "id": "discord",
-    "name": "Discord",
+    "name": "Discord (всё через VPN)",
     "geosite": "discord"
+  },
+  {
+    "id": "discord-web",
+    "name": "Discord: сайт через VPN, голос напрямую"
   },
   {
     "id": "twitch",
