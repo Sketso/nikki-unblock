@@ -63,9 +63,11 @@ const I18N = {
     ytFootnote: "Если всё зелёное, а видео не грузится — попробуй стратегию «YouTube» или «Агрессивная», очисти кэш браузера и проверь в приватном окне.",
     z2HealthWarn: "Служба запущена, но правила обхода не активны — трафик идёт мимо DPI-обхода. Нажми «Перезапустить», чтобы пересобрать правила.",
     z2TryHint: "Проверить, пробивает ли zapret2 этот домен",
-    z2ResOk: kb => "открывается (" + kb + " КБ)",
+    z2ResOk: sz => "открывается (" + sz + ")",
+    z2ResOkRedir: c => "открывается (переадресация " + c + ")",
+    unitKb: "КБ", unitB: "Б",
     z2ResDpi: "не открывается — DPI рвёт соединение, попробуй другую стратегию",
-    z2ResThrottled: kb => "завис на " + kb + " КБ — удушение по IP, десинк не поможет",
+    z2ResThrottled: sz => "завис на " + sz + " — удушение по IP, десинк не поможет",
     z2ResChallenge: "проверка Cloudflare — в браузере пройдёт",
     z2ResTunnel: g => "идёт не через zapret2, а в VPN (" + g + ")",
     z2MoveBtn: "Перенести в VPN",
@@ -140,8 +142,9 @@ const I18N = {
     stGeoipConfirm: "Заменить GEOIP-правила на подсети и удалить базу? Страновые правила продолжат работать. Если mihomo не поднимется — изменение откатится.",
     stLow: "Места почти нет — записи конфига могут начать падать",
     dcProbing: "пробую открыть…",
-    dcOpenOk: (c, kb) => "Открывается: код " + c + ", получено " + kb + " КБ",
-    dcOpenThrottled: (kb, s) => "Ответ начался и завис на " + kb + " КБ (" + s + " с до таймаута) — это удушение по IP, десинк тут не поможет, нужен туннель",
+    dcOpenOk: (c, sz) => "Открывается: код " + c + ", получено " + sz,
+    dcOpenRedir: c => "Открывается: переадресация " + c + " (тела нет, это нормально)",
+    dcOpenThrottled: (sz, s) => "Ответ начался и завис на " + sz + " (" + s + " с до таймаута) — это удушение по IP, десинк тут не поможет, нужен туннель",
     dcOpenDpi: "Соединение не устанавливается вообще — DPI рвёт рукопожатие, нужна другая стратегия zapret2",
     dcOpenChallenge: "Cloudflare показывает проверку — в браузере она проходит сама, это не блокировка",
     dcProbeCaveat: "Проверка идёт с роутера по TCP: у клиента результат может отличаться, если браузер уйдёт по QUIC или будет резолвить домен своим DNS",
@@ -291,9 +294,11 @@ const I18N = {
     ytFootnote: "If everything is green but video won't load — try the 'YouTube' or 'Aggressive' strategy, clear the browser cache and test in a private window.",
     z2HealthWarn: "The service is running, but the desync rules are not active — traffic is passing without the DPI bypass. Hit Restart to rebuild the rules.",
     z2TryHint: "Check whether zapret2 gets this domain through",
-    z2ResOk: kb => "opens (" + kb + " KB)",
+    z2ResOk: sz => "opens (" + sz + ")",
+    z2ResOkRedir: c => "opens (redirect " + c + ")",
+    unitKb: "KB", unitB: "B",
     z2ResDpi: "does not open — DPI breaks the connection, try another strategy",
-    z2ResThrottled: kb => "stalled at " + kb + " KB — IP throttling, desync cannot fix it",
+    z2ResThrottled: sz => "stalled at " + sz + " — IP throttling, desync cannot fix it",
     z2ResChallenge: "Cloudflare challenge — a browser passes it",
     z2ResTunnel: g => "not going through zapret2 — routed to VPN (" + g + ")",
     z2MoveBtn: "Move to VPN",
@@ -368,8 +373,9 @@ const I18N = {
     stGeoipConfirm: "Replace the GEOIP rules with IP ranges and delete the database? Country rules keep working. If mihomo fails to come back, the change is reverted.",
     stLow: "Almost no free space — config writes may start failing",
     dcProbing: "trying to open…",
-    dcOpenOk: (c, kb) => "Opens: code " + c + ", " + kb + " KB received",
-    dcOpenThrottled: (kb, s) => "Response started then stalled at " + kb + " KB (" + s + " s to timeout) — IP-level throttling; no desync fixes this, it needs a tunnel",
+    dcOpenOk: (c, sz) => "Opens: code " + c + ", " + sz + " received",
+    dcOpenRedir: c => "Opens: redirect " + c + " (no body, which is normal)",
+    dcOpenThrottled: (sz, s) => "Response started then stalled at " + sz + " (" + s + " s to timeout) — IP-level throttling; no desync fixes this, it needs a tunnel",
     dcOpenDpi: "No connection at all — DPI is breaking the handshake; try another zapret2 strategy",
     dcOpenChallenge: "Cloudflare is showing a challenge — a browser solves it, this is not a block",
     dcProbeCaveat: "Probed from the router over TCP: a client may differ if the browser uses QUIC or resolves the domain itself",
@@ -1245,6 +1251,9 @@ function agoStr(epoch){
   const h = m / 60;
   return (h < 24 ? Math.round(h) + " " + t("agoHour") : Math.round(h / 24) + " " + t("agoDay"));
 }
+// Bytes only mean something once there are some: a redirect legitimately carries no body, and
+// "0 KB" there reads like a failure when the probe in fact succeeded.
+function sizeStr(b){ return b >= 1024 ? Math.round(b / 1024) + " " + t("unitKb") : b + " " + t("unitB"); }
 const mb = kb => (kb / 1024).toFixed(1) + " MB";
 async function loadStorage(){
   let s; try { s = await (await fetch("?api=storage")).json(); } catch(e){ return; }
@@ -1324,9 +1333,8 @@ async function dcCheck(dom){
   let p; try { p = await api("reachcheck", { domain: d.domain }); } catch(e){ p = {}; }
   pending.remove();
   if (p && p.ok){
-    const kb = Math.round(p.bytes / 1024);
-    if (p.verdict === "ok") render({ state: "ok", msg: t("dcOpenOk")(p.code, kb) });
-    else if (p.verdict === "throttled") render({ state: "bad", msg: t("dcOpenThrottled")(kb, p.secs) });
+      if (p.verdict === "ok") render({ state: "ok", msg: (p.code >= 300 && p.code < 400) ? t("dcOpenRedir")(p.code) : t("dcOpenOk")(p.code, sizeStr(p.bytes)) });
+    else if (p.verdict === "throttled") render({ state: "bad", msg: t("dcOpenThrottled")(sizeStr(p.bytes), p.secs) });
     else if (p.verdict === "dpi") render({ state: "bad", msg: t("dcOpenDpi") });
     else if (p.verdict === "challenge") render({ state: "info", msg: t("dcOpenChallenge") });
     render({ state: "info", msg: t("dcProbeCaveat") });
@@ -1463,11 +1471,13 @@ async function z2Try(dom){
   let r; try { r = await api("z2reach", { domain: dom }); } catch(e){ r = {}; }
   if (!cell) return;
   if (!r || !r.ok){ cell.textContent = t("errP"); return; }
-  const kb = Math.round(r.bytes / 1024);
   if (r.path === "tunnel"){ cell.textContent = t("z2ResTunnel")(r.tunnel_target); return; }
-  if (r.verdict === "ok"){ cell.textContent = t("z2ResOk")(kb); return; }
+  if (r.verdict === "ok"){
+    cell.textContent = (r.code >= 300 && r.code < 400) ? t("z2ResOkRedir")(r.code) : t("z2ResOk")(sizeStr(r.bytes));
+    return;
+  }
   if (r.verdict === "challenge"){ cell.textContent = t("z2ResChallenge"); return; }
-  cell.textContent = r.verdict === "throttled" ? t("z2ResThrottled")(kb) : t("z2ResDpi");
+  cell.textContent = r.verdict === "throttled" ? t("z2ResThrottled")(sizeStr(r.bytes)) : t("z2ResDpi");
   // only offer the move where routing is genuinely the answer
   if (r.verdict === "throttled"){
     const b = document.createElement("button");
