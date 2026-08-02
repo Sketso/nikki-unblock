@@ -62,8 +62,8 @@ const I18N = {
     ytHintsTitle: "Не обязательно — можно улучшить",
     ytFootnote: "Если всё зелёное, а видео не грузится — попробуй стратегию «YouTube» или «Агрессивная», очисти кэш браузера и проверь в приватном окне.",
     z2HealthWarn: "Служба запущена, но правила обхода не активны — трафик идёт мимо DPI-обхода. Нажми «Перезапустить», чтобы пересобрать правила.",
-    z2QuicLabel: "Резать QUIC (форсить TCP)",
-    z2QuicHint: "Блокирует UDP/443 из локальной сети — браузеры откатываются на TCP, где обход DPI работает надёжнее. Приложению YouTube на телефоне это не поможет: ему нужен рабочий QUIC-обход, а не блок.",
+    z2QuicLabel: "Резать QUIC (форсить TCP) — рекомендуется",
+    z2QuicHint: "HTTP/3 — это UDP/443, третий путь трафика: он идёт мимо туннеля (nikki проксирует TCP) и мимо zapret2 (для QUIC нужен отдельный блоб под каждый сервис). Из-за этого сайт бывает настроен верно и всё равно уходит напрямую, причём симптом плавает: момент переключения решает кэш Alt-Svc браузера. Блокировка возвращает браузеры на TCP, где работают оба движка; на проводном канале потеря скорости незаметна. Приложению YouTube на телефоне не поможет — ему нужен рабочий QUIC-обход, а не блок.",
     z2Ipv6Label: "Отключить IPv6 на роутере",
     z2Ipv6Hint: "Иногда чинит обход: если у устройств остаётся рабочий IPv6-маршрут до заблокированного сайта, их трафик идёт по IPv6 мимо десинка. Выключает раздачу IPv6 в локалку (RA/DHCPv6) и IPv6-WAN. Полностью обратимо.",
     z2Ipv6Confirm: "Отключить IPv6 на всём роутере? Сеть кратко переприменится, устройства перейдут на IPv4. Это обратимо тем же тумблером.",
@@ -159,6 +159,7 @@ const I18N = {
     nkDiagNoGroup: "Группа выходов не собрана — правила «→ VPN» указывают в пустоту",
     nkDiagFixGroup: "Собрать группу",
     nkDiagDeadBase: n => "Правил ведут в группу профиля, которая никуда не ведёт: " + n + " — трафик идёт напрямую",
+    nkDiagQuic: "QUIC не заблокирован: HTTP/3 идёт мимо туннеля и мимо zapret2, сайт может уходить напрямую",
     nkDiagNoNodes: "Нод нет — добавь конфиг во вкладке «Ноды»",
     nkDiagAllOff: "Все ноды выключены — трафик идёт напрямую",
     nkDiagNodeDead: "Активная нода не отвечает",
@@ -275,8 +276,8 @@ const I18N = {
     ytHintsTitle: "Optional — could be improved",
     ytFootnote: "If everything is green but video won't load — try the 'YouTube' or 'Aggressive' strategy, clear the browser cache and test in a private window.",
     z2HealthWarn: "The service is running, but the desync rules are not active — traffic is passing without the DPI bypass. Hit Restart to rebuild the rules.",
-    z2QuicLabel: "Block QUIC (force TCP)",
-    z2QuicHint: "Drops LAN UDP/443 so browsers fall back to TCP, where the DPI bypass is more reliable. Won't help the mobile YouTube app — it needs a working QUIC desync, not a block.",
+    z2QuicLabel: "Block QUIC (force TCP) — recommended",
+    z2QuicHint: "HTTP/3 is UDP/443 — a third traffic path that misses both engines: nikki proxies TCP, and desyncing QUIC needs a per-service blob. A site can be routed correctly and still leave directly, and the symptom drifts because the browser's Alt-Svc cache decides when it switches. Blocking it returns browsers to TCP, where both engines work; on a fixed line the speed cost is unnoticeable. Won't help the mobile YouTube app — it needs a working QUIC desync, not a block.",
     z2Ipv6Label: "Disable IPv6 on the router",
     z2Ipv6Hint: "Sometimes fixes the bypass: if devices keep a working IPv6 route to a blocked site, their traffic goes over IPv6 and skips the desync. Turns off IPv6 for LAN clients (RA/DHCPv6) and the IPv6 WAN. Fully reversible.",
     z2Ipv6Confirm: "Disable IPv6 on the whole router? The network re-applies briefly and devices switch to IPv4. Reversible with the same toggle.",
@@ -372,6 +373,7 @@ const I18N = {
     nkDiagNoGroup: "The exit group was never built — «→ VPN» rules point at nothing",
     nkDiagFixGroup: "Build the group",
     nkDiagDeadBase: n => n + " rules point at a profile group that leads nowhere — traffic goes direct",
+    nkDiagQuic: "QUIC is not blocked: HTTP/3 misses both the tunnel and zapret2, so a site can still leave directly",
     nkDiagNoNodes: "No nodes — add a config on the Nodes tab",
     nkDiagAllOff: "Every node is off — traffic goes direct",
     nkDiagNodeDead: "The active node does not respond",
@@ -1320,6 +1322,7 @@ async function nkDiagCheck(){
     if (d.base_dead && d.legacy > 0)
       add("bad", t("nkDiagDeadBase")(d.legacy), { label: t("migrateRules"), action: "migraterules" });
     // nodes
+    if (!d.quic_block) add("warn", t("nkDiagQuic"));
     if (d.nodes === 0) add("info", t("nkDiagNoNodes"));
     else if (d.nodes_on === 0) add("bad", t("nkDiagAllOff"));
     else if (d.delay === "x") add("bad", t("nkDiagNodeDead"));

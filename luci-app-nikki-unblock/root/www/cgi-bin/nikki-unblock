@@ -1602,7 +1602,7 @@ z2_strat_ids() { echo "ytdiscord default youtube aggressive light"; }
 # are widened — that was the quiet reason Discord stayed blocked with its preset switched on.
 z2_strat_ports() {
 	case "$1" in
-		ytdiscord) echo "80,443,2053,2083,2087,2096,8443|443,19294-19344,50000-50100" ;;
+		ytdiscord) echo "80,443,2053,2083,2087,2096,8443|443,3478,19294-19344,50000-50100" ;;
 		*)         echo "80,443|443" ;;
 	esac
 }
@@ -1616,7 +1616,7 @@ z2_strat_body() {   # $1=id -> the NFQWS2_OPT body (profile lines); empty for un
 			# the rest keeps what already worked. Media rides non-standard TCP ports and voice is UDP
 			# 50000+, neither of which the standard profiles ever see — hence the extra ports above.
 			printf '%s
-' '--filter-tcp=80 --filter-l7=http <HOSTLIST> --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5 --lua-desync=multisplit:pos=method+2 --new' '--filter-tcp=443 --filter-l7=tls --hostlist-domains=discord.com,discord.gg,discord.media,discordapp.com,discordapp.net,discordcdn.com,discord.app,discord.dev,discord.gift,discord.new,discord.store,discordstatus.com,dis.gd --payload=tls_client_hello --lua-desync=multisplit:pos=1:seqovl=568 --new' '--filter-tcp=2053,2083,2087,2096,8443 --filter-l7=tls --hostlist-domains=discord.media,discordapp.net --payload=tls_client_hello --lua-desync=multisplit:pos=1:seqovl=681 --new' '--filter-udp=19294-19344,50000-50100 --filter-l7=discord,stun --lua-desync=fake:blob=discord-ip-discovery-with-port:repeats=6 --new' '--filter-tcp=443 --filter-l7=tls <HOSTLIST> --payload=tls_client_hello --lua-desync=multidisorder:pos=1,midsld --new' "--filter-udp=443 --filter-l7=quic <HOSTLIST_NOAUTO> --payload=quic_initial --lua-desync=fake:blob=${_gv}:repeats=8" ;;
+' '--filter-tcp=80 --filter-l7=http <HOSTLIST> --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5 --lua-desync=multisplit:pos=method+2 --new' '--filter-tcp=443 --filter-l7=tls --hostlist-domains=discord.com,discord.gg,discord.media,discordapp.com,discordapp.net,discordcdn.com,discord.app,discord.dev,discord.gift,discord.new,discord.store,discordstatus.com,dis.gd --payload=tls_client_hello --lua-desync=multisplit:pos=1:seqovl=568 --new' '--filter-tcp=2053,2083,2087,2096,8443 --filter-l7=tls --hostlist-domains=discord.media,discordapp.net --payload=tls_client_hello --lua-desync=multisplit:pos=1:seqovl=681 --new' '--filter-udp=3478,19294-19344,50000-50100 --filter-l7=discord,stun --lua-desync=fake:blob=discord-ip-discovery-with-port:repeats=6 --new' '--filter-tcp=443 --filter-l7=tls <HOSTLIST> --payload=tls_client_hello --lua-desync=multidisorder:pos=1,midsld --new' "--filter-udp=443 --filter-l7=quic <HOSTLIST_NOAUTO> --payload=quic_initial --lua-desync=fake:blob=${_gv}:repeats=8" ;;
 		default)
 			printf '%s\n' \
 '--filter-tcp=80 --filter-l7=http <HOSTLIST> --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5 --lua-desync=multisplit:pos=method+2 --new' \
@@ -2347,8 +2347,13 @@ nikkidiag_json() {
 		node_disabled "$_nm" || nen=$((nen + 1))
 	done
 	legacy=$(uci show nikki 2>/dev/null | grep -c "\.node='$BASE_GROUP'\$")
-	printf '{"present":1,"enabled":%d,"profile_ok":%d,"running":%d,"rule_flag":%d,"uci_rules":%d,"live_rules":%d,"first_hit":%d,"exit_group":%d,"base_dead":%d,"legacy":%s,"nodes":%d,"nodes_on":%d,"active":"%s","delay":"%s"}' \
-		"$en" "$prof" "$run" "$rflag" "$ucin" "$liven" "$hit" "$eg" "$basedead" "${legacy:-0}" "$ntot" "$nen" "$(json_esc "$act")" "$adly"
+	# QUIC is the third path. HTTP/3 is UDP/443, which nikki doesn't proxy by default and zapret2 only
+	# desyncs with a per-service blob — so a domain can be routed correctly over TCP and still leave
+	# directly over QUIC. The browser's Alt-Svc cache decides when it switches, so the symptom drifts and
+	# looks like the routing is broken. Name it here rather than let people chase it.
+	qb=0; quicblock_on && qb=1
+	printf '{"present":1,"enabled":%d,"profile_ok":%d,"running":%d,"rule_flag":%d,"uci_rules":%d,"live_rules":%d,"first_hit":%d,"exit_group":%d,"base_dead":%d,"legacy":%s,"nodes":%d,"nodes_on":%d,"active":"%s","delay":"%s","quic_block":%d}' \
+		"$en" "$prof" "$run" "$rflag" "$ucin" "$liven" "$hit" "$eg" "$basedead" "${legacy:-0}" "$ntot" "$nen" "$(json_esc "$act")" "$adly" "$qb"
 }
 
 # ---- storage: what is actually eating the flash -----------------------------
@@ -3305,6 +3310,13 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 					cp "$Z2_CONFIG" "$Z2_CONFIG.nipret.bak" 2>/dev/null
 					sed -i "s/^\([[:space:]]*MODE_FILTER=\).*/\1hostlist/" "$Z2_CONFIG"
 				fi
+				# QUIC on by default. Browsers prefer HTTP/3, which is UDP/443 — a third traffic path that
+				# neither engine covers: nikki proxies TCP only unless told otherwise, and desyncing QUIC
+				# needs a per-service fake blob. So a site can be correctly routed and still leak, and the
+				# symptom drifts because Alt-Svc caching decides when the browser switches. Blocking it
+				# makes browsers fall back to TCP, where both engines actually work. Cost is small on a
+				# fixed line; the confusion it removes is not.
+				quicblock_on || quicblock_set 1
 				# start a fresh install on the recommended strategy rather than whatever zapret2 shipped:
 				# the stock one carries YouTube but leaves Discord blocked, which reads as "the preset is on
 				# and nothing happens". A hand-tuned config reports as "custom" and is left untouched.
