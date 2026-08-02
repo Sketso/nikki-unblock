@@ -3530,6 +3530,38 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		exit 0
 
 		;;
+	z2reach)
+		# "Does zapret2 actually get this domain through?" — with the caveat that matters: if a nikki rule
+		# also claims the domain, the probe travels the TUNNEL and says nothing about the desync. Report
+		# which path was measured instead of quietly conflating them (that conflation burned a whole
+		# afternoon of debugging).
+		d=$(get_param domain | tr 'A-Z' 'a-z' | sed 's#^https\?://##; s#/.*##; s/[^a-z0-9.-]//g')
+		case "$d" in *.*) ;; *) json_header; printf '{"ok":false,"error":"bad domain"}'; exit 0 ;; esac
+		_rm=$(domain_rule_match "$d" "$(domain_geosite_cats "$d")")
+		_tgt=$(printf '%s' "$_rm" | cut -d'|' -f3)
+		case "$_tgt" in ""|DIRECT|REJECT|REJECT-DROP|PASS) _path=z2 ;; *) _path=tunnel ;; esac
+		_p=$(reach_probe "$d")
+		json_header
+		printf '{"ok":true,"domain":"%s","path":"%s","tunnel_target":"%s","verdict":"%s","code":%s,"bytes":%s,"secs":%s}' 			"$(json_esc "$d")" "$_path" "$(json_esc "$_tgt")" 			"$(printf '%s' "$_p" | cut -d'|' -f1)" "$(printf '%s' "$_p" | cut -d'|' -f2)" 			"$(printf '%s' "$_p" | cut -d'|' -f3)" "$(printf '%s' "$_p" | cut -d'|' -f4)"
+		exit 0
+
+		;;
+	z2move)
+		# Hand a domain over from zapret2 to the tunnel: desync can't beat throttling or an IP block, so
+		# the honest fix is to stop trying and route it instead. Added to nikki first, dropped from the
+		# zapret2 list only once that succeeded — never leave it covered by neither.
+		d=$(printf '%s' "$(get_param domain)" | parse_domains | head -1)
+		[ -z "$d" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
+		undo_push z2move
+		[ "$(rule_exists DOMAIN-SUFFIX "$d")" = 1 ] || add_rule DOMAIN-SUFFIX "$d" "$(default_rule_node)"
+		uci commit nikki
+		if [ -f "$Z2_USER" ]; then
+			grep -vxF "$d" "$Z2_USER" > "$Z2_USER.tmp" 2>/dev/null; mv "$Z2_USER.tmp" "$Z2_USER"; z2_apply_hosts
+		fi
+		apply_nikki
+		json_header; printf '{"ok":true,"domain":"%s","node":"%s"}' "$(json_esc "$d")" "$(default_rule_node)"; exit 0
+
+		;;
 	reachcheck)
 		reachcheck_json; exit 0
 

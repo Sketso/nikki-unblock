@@ -62,6 +62,14 @@ const I18N = {
     ytHintsTitle: "Не обязательно — можно улучшить",
     ytFootnote: "Если всё зелёное, а видео не грузится — попробуй стратегию «YouTube» или «Агрессивная», очисти кэш браузера и проверь в приватном окне.",
     z2HealthWarn: "Служба запущена, но правила обхода не активны — трафик идёт мимо DPI-обхода. Нажми «Перезапустить», чтобы пересобрать правила.",
+    z2TryHint: "Проверить, пробивает ли zapret2 этот домен",
+    z2ResOk: kb => "открывается (" + kb + " КБ)",
+    z2ResDpi: "не открывается — DPI рвёт соединение, попробуй другую стратегию",
+    z2ResThrottled: kb => "завис на " + kb + " КБ — удушение по IP, десинк не поможет",
+    z2ResChallenge: "проверка Cloudflare — в браузере пройдёт",
+    z2ResTunnel: g => "идёт не через zapret2, а в VPN (" + g + ")",
+    z2MoveBtn: "Перенести в VPN",
+    z2MovedTo: n => "Перенесено в VPN (" + n + ") и убрано из списка zapret2",
     z2QuicLabel: "Резать QUIC (форсить TCP) — рекомендуется",
     z2QuicHint: "HTTP/3 — это UDP/443, третий путь трафика: он идёт мимо туннеля (nikki проксирует TCP) и мимо zapret2 (для QUIC нужен отдельный блоб под каждый сервис). Из-за этого сайт бывает настроен верно и всё равно уходит напрямую, причём симптом плавает: момент переключения решает кэш Alt-Svc браузера. Блокировка возвращает браузеры на TCP, где работают оба движка; на проводном канале потеря скорости незаметна. Приложению YouTube на телефоне не поможет — ему нужен рабочий QUIC-обход, а не блок.",
     z2Ipv6Label: "Отключить IPv6 на роутере",
@@ -282,6 +290,14 @@ const I18N = {
     ytHintsTitle: "Optional — could be improved",
     ytFootnote: "If everything is green but video won't load — try the 'YouTube' or 'Aggressive' strategy, clear the browser cache and test in a private window.",
     z2HealthWarn: "The service is running, but the desync rules are not active — traffic is passing without the DPI bypass. Hit Restart to rebuild the rules.",
+    z2TryHint: "Check whether zapret2 gets this domain through",
+    z2ResOk: kb => "opens (" + kb + " KB)",
+    z2ResDpi: "does not open — DPI breaks the connection, try another strategy",
+    z2ResThrottled: kb => "stalled at " + kb + " KB — IP throttling, desync cannot fix it",
+    z2ResChallenge: "Cloudflare challenge — a browser passes it",
+    z2ResTunnel: g => "not going through zapret2 — routed to VPN (" + g + ")",
+    z2MoveBtn: "Move to VPN",
+    z2MovedTo: n => "Moved to VPN (" + n + ") and removed from the zapret2 list",
     z2QuicLabel: "Block QUIC (force TCP) — recommended",
     z2QuicHint: "HTTP/3 is UDP/443 — a third traffic path that misses both engines: nikki proxies TCP, and desyncing QUIC needs a per-service blob. A site can be routed correctly and still leave directly, and the symptom drifts because the browser's Alt-Svc cache decides when it switches. Blocking it returns browsers to TCP, where both engines work; on a fixed line the speed cost is unnoticeable. Won't help the mobile YouTube app — it needs a working QUIC desync, not a block.",
     z2Ipv6Label: "Disable IPv6 on the router",
@@ -1084,7 +1100,10 @@ function renderZ2(){
   const u = Z2HOSTS.user || []; $("#z2UserCount").textContent = "(" + u.length + ")";
   u.forEach(d => { const li = document.createElement("li");
     li.innerHTML = '<input type="checkbox" class="pick" data-key="' + escH(d) + '">' +
-      '<span class="dom">' + escH(d) + '</span><button class="ghost" data-z2del="' + escH(d) + '">✕</button>';
+      '<span class="dom">' + escH(d) + '</span>' +
+      '<span class="ms" data-z2res="' + escH(d) + '"></span>' +
+      '<button class="ghost" data-z2try="' + escH(d) + '" title="' + escH(t("z2TryHint")) + '">⟳</button>' +
+      '<button class="ghost" data-z2del="' + escH(d) + '">✕</button>';
     ul.appendChild(li); });
   fltRerender(BAR_Z2U);
   $("#z2AutoCount").textContent = "(" + (Z2HOSTS.auto || []).length + ")";
@@ -1435,7 +1454,37 @@ $("#z2Form").addEventListener("submit", async e => {
   if (res.ok){ setMsg($("#z2DomMsg"), res.dup ? t("dup") : t("done")); $("#z2Domain").value = ""; loadZapret2(); }
   else setMsg($("#z2DomMsg"), t("errP") + (res.error || "?"), false);
 });
+// Probe one zapret2 domain and, when the desync provably cannot fix it, offer to route it instead.
+// The distinction is the whole point: a broken handshake is a strategy problem, but throttling and IP
+// blocks are decided on the destination address, where no amount of desync helps and only a tunnel does.
+async function z2Try(dom){
+  const cell = document.querySelector('[data-z2res="' + CSS.escape(dom) + '"]');
+  if (cell) cell.textContent = "…";
+  let r; try { r = await api("z2reach", { domain: dom }); } catch(e){ r = {}; }
+  if (!cell) return;
+  if (!r || !r.ok){ cell.textContent = t("errP"); return; }
+  const kb = Math.round(r.bytes / 1024);
+  if (r.path === "tunnel"){ cell.textContent = t("z2ResTunnel")(r.tunnel_target); return; }
+  if (r.verdict === "ok"){ cell.textContent = t("z2ResOk")(kb); return; }
+  if (r.verdict === "challenge"){ cell.textContent = t("z2ResChallenge"); return; }
+  cell.textContent = r.verdict === "throttled" ? t("z2ResThrottled")(kb) : t("z2ResDpi");
+  // only offer the move where routing is genuinely the answer
+  if (r.verdict === "throttled"){
+    const b = document.createElement("button");
+    b.className = "ghost"; b.textContent = t("z2MoveBtn");
+    b.addEventListener("click", async () => {
+      b.disabled = true; showOverlay(t("applying"));
+      let m; try { m = await api("z2move", { domain: dom }); } catch(e){ m = {}; }
+      hideOverlay();
+      if (m && m.ok){ setMsg($("#z2DomMsg"), t("z2MovedTo")(m.node)); loadZapret2(); loadDomains(); }
+      else { setMsg($("#z2DomMsg"), t("errP") + ((m && m.error) || "?"), false); b.disabled = false; }
+    });
+    cell.appendChild(document.createTextNode(" ")); cell.appendChild(b);
+  }
+}
 $("#z2UserList").addEventListener("click", async e => {
+  const tb = e.target.closest("button[data-z2try]");
+  if (tb){ z2Try(tb.dataset.z2try); return; }
   const b = e.target.closest("button[data-z2del]"); if (!b) return;
   b.disabled = true; showOverlay(t("removing")); setMsg($("#z2DomMsg"), t("removing"));
   const res = await api("z2hostdel", { domain: b.dataset.z2del });
