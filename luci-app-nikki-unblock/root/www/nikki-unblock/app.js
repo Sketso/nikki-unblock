@@ -1502,7 +1502,10 @@ $("#pingAll").addEventListener("click", e => { e.currentTarget.blur(); autoPingN
 $("#migrateBtn").addEventListener("click", async e => {
   if (!confirm(t("migrateConfirm"))) return;
   e.currentTarget.disabled = true; setMsg($("#nodeMsg"), t("applying")); showOverlay(t("applying"));
-  const res = await api("migraterules", {});
+  // every other handler guards this; this one didn't, and a request that outlived uhttpd's CGI timeout
+  // threw out of the await — leaving the overlay stuck on "applying" forever while the router had in
+  // fact finished the job. Never let a failed call skip hideOverlay().
+  let res; try { res = await api("migraterules", {}); } catch(err){ res = { error: "timeout" }; }
   e.currentTarget.disabled = false; hideOverlay();
   if (res && res.ok){ setMsg($("#nodeMsg"), t("done") + (res.changed ? " (" + res.changed + ")" : "")); loadDomains(); loadNodes(); }
   else setMsg($("#nodeMsg"), t("errP") + ((res && res.error) || "?"), false);

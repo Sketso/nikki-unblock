@@ -3308,12 +3308,15 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 	migraterules)
 		# move all "→ VPN" rules from the raw profile group ($BASE_GROUP) onto the managed exit group
 		regen_mixin   # make sure UNBLOCK exists before rules point at it
-		i=0; changed=0
-		while uci -q get "nikki.@rule[$i]" >/dev/null 2>&1; do
-			[ "$(uci -q get "nikki.@rule[$i].node")" = "$BASE_GROUP" ] && { uci set "nikki.@rule[$i].node=$EXIT_GROUP"; changed=$((changed + 1)); }
-			i=$((i + 1))
-		done
-		[ "$changed" -gt 0 ] && uci commit nikki
+		# One `uci show` to find the rules that need moving, one `uci batch` to move them. The old loop
+		# spawned two uci processes PER RULE: on a real install (105 rules) that plus the nikki reload
+		# outran uhttpd's 60 s CGI timeout, so the browser never saw the reply even though the router had
+		# finished — the panel sat on "applying" forever.
+		_idx=$(uci show nikki 2>/dev/null | sed -n "s/^nikki\.@rule\[\([0-9]*\)\]\.node='$BASE_GROUP'\$/\1/p")
+		changed=$(printf '%s\n' "$_idx" | grep -c .)
+		if [ "$changed" -gt 0 ]; then
+			{ for _n in $_idx; do echo "set nikki.@rule[$_n].node=$EXIT_GROUP"; done; echo "commit nikki"; } | uci batch
+		fi
 		apply_nikki; sleep 4
 		pgrep -f /usr/bin/mihomo >/dev/null || apply_nikki
 		json_header; printf '{"ok":true,"changed":%d}' "$changed"; exit 0
