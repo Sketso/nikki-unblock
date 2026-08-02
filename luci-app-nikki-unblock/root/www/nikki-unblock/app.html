@@ -360,6 +360,17 @@
 
   <!-- ================= ОБЩЕЕ (обновления + бэкап, общее для всего сервиса) ================= -->
   <section class="view" id="view-common">
+    <div class="svc" id="dcBlock">
+      <h3 data-i18n="dcTitle"></h3>
+      <div class="hint" data-i18n="dcHint"></div>
+      <form id="dcForm" class="row">
+        <input type="text" id="dcInput" spellcheck="false" autocomplete="off" data-i18n-ph="dcPh">
+        <button type="submit" id="dcBtn" data-i18n="dcBtn"></button>
+      </form>
+      <div class="ytresult" id="dcResult" hidden></div>
+      <div class="msg" id="dcMsg"></div>
+    </div>
+
     <div class="svc upd">
       <h3 data-i18n="updTitle"></h3>
       <div class="uprow"><span class="upname">Nipret</span><span class="upver" id="verSelf">…</span></div>

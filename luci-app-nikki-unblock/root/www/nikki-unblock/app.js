@@ -120,6 +120,20 @@ const I18N = {
     validating: "Добавляю и проверяю ноду…", nodeMs: "мс", nodeNoResp: "не отвечает", nodeSub: "подписка",
     nodeAutoOff: "не достучалась — отключена, включи после починки",
     nodeAutoOffTag: "недоступна, отключена автоматически",
+    dcTitle: "Почему не открывается сайт?",
+    dcHint: "Введи домен — панель скажет, какой движок его обрабатывает и работает ли этот путь прямо сейчас. Проверяется по живому конфигу mihomo, а не по настройкам панели.",
+    dcBtn: "Проверить", dcPh: "instagram.com",
+    dcByDefault: "по умолчанию",
+    dcViaVpn: (g, r) => "Идёт через VPN, группа «" + g + "» (правило: " + r + ")",
+    dcGroupDead: g => "Группа «" + g + "» не найдена в mihomo — трафик никуда не пойдёт",
+    dcNodeDead: n => "Нода «" + n + "» не отвечает — сайт не откроется",
+    dcNodeOk: (n, ms) => "Нода «" + n + "» отвечает: " + ms + " мс",
+    dcBlocked: r => "Блокируется правилом: " + r,
+    dcDirect: r => "Идёт напрямую, мимо VPN (правило: " + r + ")",
+    dcZ2On: l => "Zapret2 пробивает этот домен (список: " + l + ") — для многих сайтов этого достаточно",
+    dcZ2Down: l => "Домен есть в списке zapret2 (" + l + "), но сервис не работает",
+    dcNoEngine: "Ни один движок этот домен не обрабатывает — добавь его в «Домены» (VPN) или в список zapret2",
+    dcGeoCaveat: n => "Выше есть правил-категорий (GEOSITE), которые тут не проверить: " + n + " — сайт может попасть под одно из них",
     instNikki: "Установить nikki (VPN)",
     nikkiMissing: "nikki (VPN-движок) не установлен — VPN-часть скрыта. Поставить можно кнопкой «Установить nikki» в разделе «Общее» → «Обновления».",
     nkDiagTitle: "Почему не работает VPN?",
@@ -308,6 +322,20 @@ const I18N = {
     validating: "Adding & checking node…", nodeMs: "ms", nodeNoResp: "no response", nodeSub: "subscription",
     nodeAutoOff: "unreachable — disabled, re-enable once it's fixed",
     nodeAutoOffTag: "unreachable, auto-disabled",
+    dcTitle: "Why doesn't this site open?",
+    dcHint: "Enter a domain and the panel tells you which engine handles it and whether that path works right now. Checked against mihomo's live config, not the panel's settings.",
+    dcBtn: "Check", dcPh: "instagram.com",
+    dcByDefault: "default",
+    dcViaVpn: (g, r) => "Goes through the VPN, group «" + g + "» (rule: " + r + ")",
+    dcGroupDead: g => "Group «" + g + "» is not in mihomo — this traffic goes nowhere",
+    dcNodeDead: n => "Node «" + n + "» does not respond — the site won't open",
+    dcNodeOk: (n, ms) => "Node «" + n + "» responds: " + ms + " ms",
+    dcBlocked: r => "Blocked by rule: " + r,
+    dcDirect: r => "Goes direct, bypassing the VPN (rule: " + r + ")",
+    dcZ2On: l => "Zapret2 covers this domain (list: " + l + ") — enough for many sites",
+    dcZ2Down: l => "The domain is in a zapret2 list (" + l + "), but the service is not running",
+    dcNoEngine: "No engine handles this domain — add it under Domains (VPN) or to a zapret2 list",
+    dcGeoCaveat: n => n + " category rules (GEOSITE) sit above the match and can't be evaluated here — the site may fall under one",
     instNikki: "Install nikki (VPN)",
     nikkiMissing: "nikki (the VPN engine) is not installed — the VPN side is hidden. Install it with «Install nikki» under Manage → Updates.",
     nkDiagTitle: "Why isn't the VPN working?",
@@ -1142,6 +1170,48 @@ $("#z2Ipv6").addEventListener("change", async e => {
   if (res && res.ok) setMsg($("#z2Msg"), t("done")); else setMsg($("#z2Msg"), t("errP") + ((res && res.error) || "?"), false);
   loadZapret2();
 });
+/* ---------- "why doesn't THIS site open?" — per-domain verdict ----------
+   Answers the question users actually ask. Resolves the domain the way mihomo will: against the rules in
+   the LIVE config, first match wins — so it reports what the router really does, not what the panel
+   believes it configured. GEOSITE rules can't be evaluated here (they need the .dat blobs), so any that
+   sit above the match are surfaced as a caveat rather than quietly ignored. */
+async function dcCheck(dom){
+  const box = $("#dcResult"), btn = $("#dcBtn");
+  btn.disabled = true; setMsg($("#dcMsg"), t("applying"));
+  let d; try { d = await api("domaincheck", { domain: dom }); } catch(e){ d = {}; }
+  btn.disabled = false;
+  if (!d || !d.ok){ setMsg($("#dcMsg"), t("errP") + ((d && d.error) || "?"), false); box.hidden = true; return; }
+  setMsg($("#dcMsg"), "");
+  const rows = [];
+  const add = (state, msg) => rows.push({ state, msg });
+  const viaVpn = d.target && !["DIRECT", "REJECT", "REJECT-DROP", "PASS", ""].includes(d.target);
+  if (viaVpn){
+    add("ok", t("dcViaVpn")(d.target, d.type === "MATCH" ? t("dcByDefault") : d.type + " " + d.value));
+    if (!d.target_live) add("bad", t("dcGroupDead")(d.target));
+    else if (d.delay === "x") add("bad", t("dcNodeDead")(d.node || "?"));
+    else add("ok", t("dcNodeOk")(d.node, d.delay));
+  } else if (d.target === "REJECT" || d.target === "REJECT-DROP"){
+    add("info", t("dcBlocked")(d.type === "MATCH" ? t("dcByDefault") : d.type + " " + d.value));
+  } else {
+    add(d.z2 ? "info" : "warn", t("dcDirect")(d.type === "MATCH" ? t("dcByDefault") : d.type + " " + d.value));
+  }
+  // the other engine: zapret2 needs no rule of ours, only its hostlist
+  if (d.z2) add(d.z2_running ? "ok" : "bad", d.z2_running ? t("dcZ2On")(d.z2_list) : t("dcZ2Down")(d.z2_list));
+  else if (!viaVpn) add("info", t("dcNoEngine"));
+  if (d.geosite_before > 0) add("info", t("dcGeoCaveat")(d.geosite_before));
+  box.innerHTML = ""; box.hidden = false;
+  rows.forEach(e => {
+    const div = document.createElement("div"); div.className = "ytrow " + e.state;
+    div.innerHTML = '<span class="ytic">' + (e.state === "ok" ? "✓" : e.state === "bad" ? "✕" : e.state === "warn" ? "!" : "·") + '</span>' +
+                    '<span class="ytmsg">' + escH(e.msg) + '</span>';
+    box.appendChild(div);
+  });
+}
+$("#dcForm").addEventListener("submit", e => {
+  e.preventDefault();
+  const v = $("#dcInput").value.trim(); if (v) dcCheck(v);
+});
+
 /* ---------- one-click "why isn't the VPN working?" (nikki side) ----------
    Walks the chain in the order it actually breaks and stops being green at the first broken link. The
    load-bearing checks are the ones comparing INTENT with REALITY (uci_rules vs live_rules/first_hit,

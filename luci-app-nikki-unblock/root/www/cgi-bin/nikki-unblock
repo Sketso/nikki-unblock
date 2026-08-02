@@ -649,8 +649,8 @@ update_start() {   # $1=op(self|nikki|geo|z2|all) ; 0=started 1=busy 2=bad op 3=
 	_op="$1"
 	case "$_op" in self|nikki|geo|z2|all|instnikki) ;; *) return 2 ;; esac
 	upd_running && return 1
-	# a from-scratch nikki install pulls a ~30 MB archive and unpacks it, both in tmpfs
-	[ "$_op" = instnikki ] && { fs_has_room /tmp 81920 || return 3; }
+	# a from-scratch nikki install pulls a ~30 MB archive into tmpfs and lays ~55 MB onto the overlay
+	[ "$_op" = instnikki ] && { fs_has_room /tmp 81920 && fs_has_room / 61440 || return 3; }
 	# refuse to start on a nearly-full filesystem: apk downloads via /tmp (tmpfs), geo DBs land in
 	# $GEO_RUN (~40 MB peak). z2 is NOT guarded here — z2_run_update has its own graceful check.
 	case "$_op" in self|nikki|all) fs_has_room /tmp 20480 || return 3 ;; esac
@@ -2193,6 +2193,11 @@ nikki_install_run() {
 	case "$_rel" in SNAPSHOT) _asset="nikki_${_arch}-SNAPSHOT.tar.gz" ;; *) _asset="nikki_${_arch}-openwrt-${_rel}.tar.gz" ;; esac
 	echo ">> target: $_arch / OpenWrt $_rel"
 	fs_has_room /tmp 81920 || { echo "!! not enough space in /tmp (need ~80 MB for the archive + unpack)"; return 3; }
+	# /tmp is only where the archive lands — the packages themselves go to the overlay, and nikki + the
+	# engine + kmods weigh ~55 MB there. Without this an install on a small-flash router dies halfway
+	# with "No space left on device", leaving a half-installed nikki (seen on the dev box: 60 MB overlay
+	# went to 100 % full). Refuse honestly instead.
+	fs_has_room / 61440 || { echo "!! not enough free space on the router (need ~60 MB for nikki + mihomo; check df -h /)"; return 3; }
 	_d=/tmp/nu-nikki-inst; rm -rf "$_d"; mkdir -p "$_d"
 	echo ">> downloading $_asset"
 	# NOT the pages.dev feed on purpose — see the note above
@@ -2261,6 +2266,71 @@ nikkidiag_json() {
 	legacy=$(uci show nikki 2>/dev/null | grep -c "\.node='$BASE_GROUP'\$")
 	printf '{"present":1,"enabled":%d,"profile_ok":%d,"running":%d,"rule_flag":%d,"uci_rules":%d,"live_rules":%d,"first_hit":%d,"exit_group":%d,"base_dead":%d,"legacy":%s,"nodes":%d,"nodes_on":%d,"active":"%s","delay":"%s"}' \
 		"$en" "$prof" "$run" "$rflag" "$ucin" "$liven" "$hit" "$eg" "$basedead" "${legacy:-0}" "$ntot" "$nen" "$(json_esc "$act")" "$adly"
+}
+
+# ---- "why doesn't THIS site open?" ------------------------------------------
+# The system-wide check answers "is the plumbing sound"; this answers the question people actually ask,
+# about one site. It resolves the domain the way mihomo will: against the rules in the LIVE config, in
+# order, first match wins — not against our UCI copy, which may or may not have reached the engine. Then
+# it reports whether zapret2 covers the domain too, so "which engine is supposed to handle this" stops
+# being guesswork.
+# GEOSITE rules can't be evaluated here (they need the .dat blobs), so any that precede the match are
+# reported as an explicit caveat rather than silently ignored.
+domain_rule_match() {   # $1=domain -> "TYPE|VALUE|TARGET|GEOSITE_SEEN_BEFORE"
+	awk -v d="$1" '
+		function sfx(dd, vv) { return (dd == vv) || (length(dd) > length(vv) + 1 && substr(dd, length(dd) - length(vv)) == "." vv) }
+		/^rules:/ { f = 1; next }
+		f && /^[^[:space:]-]/ { exit }
+		f && /^[[:space:]]*-/ {
+			line = $0; sub(/^[[:space:]]*-[[:space:]]*/, "", line); gsub(/["'\'']/, "", line)
+			n = split(line, a, ","); t = a[1]
+			if (t == "MATCH")   { print "MATCH||" a[2] "|" geo; found = 1; exit }
+			if (n < 3) next
+			v = a[2]; tgt = a[3]
+			if (t == "DOMAIN"         && d == v)        { print t "|" v "|" tgt "|" geo; found = 1; exit }
+			if (t == "DOMAIN-SUFFIX"  && sfx(d, v))     { print t "|" v "|" tgt "|" geo; found = 1; exit }
+			if (t == "DOMAIN-KEYWORD" && index(d, v))   { print t "|" v "|" tgt "|" geo; found = 1; exit }
+			if (t == "GEOSITE") geo++
+		}
+		END { if (!found) print "|||" geo }
+	' "$NIKKI_RUN_CONFIG" 2>/dev/null
+}
+# is the domain in any zapret2 hostlist (they match by suffix, same as nikki's DOMAIN-SUFFIX)?
+z2_lists_hit() {   # $1=domain -> the list's basename, or empty
+	for _l in "$Z2_USER" "$Z2_MAIN" "$Z2_AUTO" "$Z2_PDIR"/*.lst; do
+		[ -f "$_l" ] || continue
+		awk -v d="$1" '
+			function sfx(dd, vv) { return (dd == vv) || (length(dd) > length(vv) + 1 && substr(dd, length(dd) - length(vv)) == "." vv) }
+			{ v = $1; if (v == "" || v ~ /^#/) next; if (sfx(d, v)) { hit = 1; exit } }
+			END { exit !hit }' "$_l" && { basename "$_l"; return 0; }
+	done
+	return 1
+}
+domaincheck_json() {
+	json_header
+	_d=$(get_param domain | tr 'A-Z' 'a-z' | sed 's#^https\?://##; s#/.*##; s/[^a-z0-9.*-]//g; s/^\*\.//')
+	case "$_d" in *.*) ;; *) printf '{"ok":false,"error":"bad domain"}'; return ;; esac
+	_r=$(domain_rule_match "$_d")
+	_ty=$(printf '%s' "$_r" | cut -d'|' -f1); _va=$(printf '%s' "$_r" | cut -d'|' -f2)
+	_tg=$(printf '%s' "$_r" | cut -d'|' -f3); _geo=$(printf '%s' "$_r" | cut -d'|' -f4)
+	# if it lands on a proxy group, is that group actually able to carry traffic right now?
+	_live=0; _node=""; _delay=x
+	case "$_tg" in
+		""|DIRECT|REJECT|REJECT-DROP|PASS) ;;
+		*)
+			if pgrep -f /usr/bin/mihomo >/dev/null 2>&1; then
+				_sec=$(mihomo_secret)
+				_j=$(curl -s -m 6 -H "Authorization: Bearer $_sec" "$MIHOMO_API/proxies/$(urlenc_all "$_tg")" 2>/dev/null)
+				printf '%s' "$_j" | grep -q '"name"' && _live=1
+				_node=$(printf '%s' "$_j" | jsonfilter -e '@.now' 2>/dev/null)
+				[ -n "$_node" ] && _delay=$(mihomo_delay "$_node")
+			fi ;;
+	esac
+	_zl=""; zapret2_present && _zl=$(z2_lists_hit "$_d")
+	printf '{"ok":true,"domain":"%s","type":"%s","value":"%s","target":"%s","geosite_before":%s,"target_live":%d,"node":"%s","delay":"%s","z2":%d,"z2_list":"%s","z2_running":%d}' \
+		"$(json_esc "$_d")" "$_ty" "$(json_esc "$_va")" "$(json_esc "$_tg")" "${_geo:-0}" "$_live" \
+		"$(json_esc "$_node")" "$_delay" "$([ -n "$_zl" ] && echo 1 || echo 0)" "$(json_esc "$_zl")" \
+		"$(z2_running && echo 1 || echo 0)"
 }
 
 # Unified exit list as JSON — NEVER includes secrets. Shape:
@@ -2695,7 +2765,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		case "$rc" in
 			0) printf '{"ok":true,"started":true}' ;;
 			1) printf '{"ok":false,"error":"busy"}' ;;
-			3) printf '{"ok":false,"error":"no space left (/tmp or geo dir)"}' ;;
+			3) printf '{"ok":false,"error":"not enough free space (check df -h / and /tmp)"}' ;;
 			*) printf '{"ok":false,"error":"bad op"}' ;;
 		esac
 		exit 0
@@ -3222,6 +3292,10 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			json_header; printf '{"ok":true,"kind":"multi","added":%d,"nikki_down":%s}' "$added" "$nikki_down"; exit 0
 		fi
 		json_header; printf '{"ok":true,"kind":"provider","id":"%s","nikki_down":%s}' "$pid" "$nikki_down"; exit 0
+
+		;;
+	domaincheck)
+		domaincheck_json; exit 0
 
 		;;
 	noderegen)
