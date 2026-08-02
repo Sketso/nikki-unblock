@@ -46,9 +46,11 @@ NODES_DIR="/etc/nikki-unblock/nodes"
 PROV_DIR="/etc/nikki-unblock/providers"
 ORDER_FILE="/etc/nikki-unblock/nodes.order"   # exit node names in user-chosen order (profile + ours)
 OFF_FILE="/etc/nikki-unblock/nodes.off"        # disabled exit node names (works for profile + our nodes)
-AUTOOFF_FILE="/etc/nikki-unblock/nodes.autooff" # subset of OFF_FILE the health watchdog disabled itself —
-                                                # only these get auto re-enabled on recovery; a name the
-                                                # user disabled by hand (in OFF_FILE, not here) stays off
+AUTOOFF_FILE="/etc/nikki-unblock/nodes.autooff" # LEGACY. The watchdog used to disable exits and recorded
+                                                # them here; it only observes now, so nodes.off means
+                                                # "the user turned this off" and nothing else. Referenced
+                                                # solely by nodewd_unautooff_once, which gives those exits
+                                                # back once and deletes the file.
 SUBS_DIR="/etc/nikki-unblock/subs"             # tracked link-subscriptions: <subid>.conf (url + name)
 SUB_TAG="# nikki-unblock-subsync"              # crontab marker for subscription auto-refresh
 BACKUP_DIR="/etc/nikki-unblock/backups"        # rotating auto-backups (daily/weekly/monthly)
@@ -960,103 +962,102 @@ nodes_init_once() {
 	uci -q commit nikki-unblock 2>/dev/null
 }
 
-# ---- node health watchdog (self-heal exit nodes that go down, or come back) -----------------
-# nodeadd's own post-add probe only judges a node once, at add time. A node that's fine today can go
-# dark later (VPN box rebooted for maintenance, provider hiccup) — or come back AFTER such an outage —
-# and nothing ever revisited it: OFF_FILE just kept whatever nodeadd or the user last left it at. Run
-# from cron every few minutes against OUR added nodes ($NODES_DIR):
-#   - NODEWD_FAILS consecutive failed probes on an enabled node -> disable it (marked in AUTOOFF_FILE)
-#   - one successful probe on a node WE disabled                -> re-enable it automatically
-# A node the user disabled by hand (in OFF_FILE but NOT in AUTOOFF_FILE) is never re-enabled here — a
-# manual OFF is honored permanently. A manual ON just returns the node to normal watching (a still-dead
-# node can be auto-disabled again, then auto-recovered); nodetoggle clears the AUTOOFF mark on any toggle.
-NODEWD_STATE="/tmp/nikki-unblock-nodewd"
+# ---- node health watch (OBSERVES; never touches the group) -------------------
+# It used to disable a failing exit and re-enable it later. That was redundant and, on balance, harmful:
+# mihomo's own group already health-checks every 300 s and skips a dead member instantly, at no cost —
+# whereas removing the node from the group meant rewriting the mixin and reloading nikki, roughly ten
+# seconds of dropped traffic. For a brief outage that made things strictly worse: mihomo had already
+# routed around it, and we then produced one interruption when the node fell over and another when it
+# came back. Worse still, if every exit failed at once — an ISP outage, not a node problem — the group
+# emptied into a bare DIRECT and traffic left unprotected while the user believed it was tunnelled.
+#
+# So this now only WATCHES: it records what each exit is doing and logs transitions, and mihomo does the
+# routing it was already doing. What the panel gains over its own on-demand ping is duration — "down for
+# 40 minutes" is something a page you are not looking at cannot tell you.
+# Consequence worth keeping in mind: nodes.off now means exactly one thing — what the user turned off.
+NODEWD_STATE="/tmp/nikki-unblock-nodewd"          # per-node consecutive-failure counters
 NODEWD_LOCK="/tmp/nikki-unblock-nodewd.lock"
-NODEWD_FAILS=2   # consecutive bad ticks before disabling — rides out a single blip/timeout
+NODEWD_HEALTH="/tmp/nikki-unblock-nodehealth"     # name \t ok|bad \t delay \t epoch-when-this-state-began
+NODEWD_FAILS=2   # consecutive bad probes before a node is called down — rides out a single blip
+# current state of $1 from the health file: "state<TAB>delay<TAB>since"
+node_health_of() { [ -f "$NODEWD_HEALTH" ] && awk -F'\t' -v n="$1" '$1==n {print $2 "\t" $3 "\t" $4; exit}' "$NODEWD_HEALTH"; }
 node_watchdog_run() {
 	pgrep -f /usr/bin/mihomo >/dev/null || return 0
 	ls "$NODES_DIR"/*.yaml >/dev/null 2>&1 || return 0
-	# API-liveness gate: mihomo can be RUNNING yet its API briefly unresponsive (e.g. mid-reload), which
-	# would make EVERY per-node probe return "x" and mass-disable all nodes into DIRECT. Only proceed once
-	# the control API actually answers, so an "x" below genuinely means THAT node is down, not the API.
+	# mihomo can be RUNNING yet its API briefly unresponsive (mid-reload), which would make every probe
+	# return "x" and record a fleet-wide outage that never happened.
 	curl -s -m 5 -H "Authorization: Bearer $(mihomo_secret)" "$MIHOMO_API/version" 2>/dev/null | grep -q '"version"' || return 0
-	# single-runner guard: with several down nodes each probe waits up to ~14 s, so a run can outlast the
-	# 5-min cron cadence. Two overlapping runs both do `> $MIXIN_FILE` (non-atomic) → a corrupt mixin can
-	# stop mihomo from loading. Skip if a prior run is still alive; steal a dead PID or a >10-min-old lock.
 	if [ -f "$NODEWD_LOCK" ]; then
 		_lp=$(cat "$NODEWD_LOCK" 2>/dev/null)
 		_la=$(( $(date +%s) - $(date -r "$NODEWD_LOCK" +%s 2>/dev/null || echo 0) ))
 		kill -0 "$_lp" 2>/dev/null && [ "$_la" -lt 600 ] && return 0
 	fi
 	echo $$ > "$NODEWD_LOCK"
-	mkdir -p "$NODEWD_STATE"; touch "$OFF_FILE" "$AUTOOFF_FILE"
-	changed=0
-	# Probe everything FIRST, decide after. A per-node verdict only means anything if the router itself
-	# has working connectivity: when the WAN drops, every probe fails, and judging nodes one at a time
-	# disabled all of them in turn — rewriting the config, reloading nikki, and leaving the exit group as
-	# a bare DIRECT. That is traffic leaving unprotected exactly while the user believes it is tunnelled,
-	# over an outage that had nothing to do with the nodes.
+	mkdir -p "$NODEWD_STATE"
+	_now=$(date +%s)
 	_pf="/tmp/nu-wdprobe.$$"; : > "$_pf"
 	for f in "$NODES_DIR"/*.yaml; do
 		[ -f "$f" ] || continue
 		nm=$(grep -m1 'name:' "$f" | sed 's/.*name:[[:space:]]*//'); [ -n "$nm" ] || continue
-		grep -qxF "$nm" "$OFF_FILE" && ! grep -qxF "$nm" "$AUTOOFF_FILE" && continue   # user's own choice
-		if [ "$(mihomo_delay "$nm")" != x ]; then printf 'ok\t%s\n' "$nm"; else printf 'bad\t%s\n' "$nm"; fi
+		node_disabled "$nm" && continue          # switched off by the user; nothing to observe
+		_d=$(mihomo_delay "$nm")
+		if [ "$_d" = x ]; then printf 'bad\t%s\tx\n' "$nm"; else printf 'ok\t%s\t%s\n' "$nm" "$_d"; fi
 	done >> "$_pf"
+	# Not one exit answered: that is this router's connectivity, not theirs. Record nothing — otherwise a
+	# WAN outage would mark every node "down for N minutes" and bury the real signal.
 	if ! grep -q '^ok' "$_pf" && grep -q '^bad' "$_pf"; then
-		# not one exit answered — that is this router's connectivity, not theirs. Change nothing, and
-		# don't advance the failure counters either, so a WAN outage can't age nodes into being disabled.
-		logger -t nikki-unblock "no exit answered at all — treating as local connectivity, leaving nodes alone"
+		logger -t nikki-unblock "no exit answered at all — local connectivity, not the nodes"
 		rm -f "$_pf" "$NODEWD_LOCK"; return 0
 	fi
-	# how many exits are live in the group right now — used as a floor below
-	_onnow=$(ordered_exit_names | while IFS= read -r n; do [ -n "$n" ] && { node_disabled "$n" || echo x; }; done | grep -c .)
-	while IFS="	" read -r _verdict nm; do
+	_new="$NODEWD_HEALTH.tmp"; : > "$_new"
+	while IFS="	" read -r _v nm _d; do
 		[ -n "$nm" ] || continue
 		sf="$NODEWD_STATE/$(san_name "$nm")"
-		if [ "$_verdict" = ok ]; then
+		_prev=$(node_health_of "$nm" | cut -f1)
+		_since=$(node_health_of "$nm" | cut -f3)
+		if [ "$_v" = ok ]; then
 			rm -f "$sf"
-			if grep -qxF "$nm" "$AUTOOFF_FILE"; then
-				grep -vxF "$nm" "$OFF_FILE" > "$OFF_FILE.tmp"; mv "$OFF_FILE.tmp" "$OFF_FILE"
-				grep -vxF "$nm" "$AUTOOFF_FILE" > "$AUTOOFF_FILE.tmp"; mv "$AUTOOFF_FILE.tmp" "$AUTOOFF_FILE"
-				logger -t nikki-unblock "node '$nm' reachable again -> re-enabled"
-				changed=1
-			fi
+			[ "$_prev" = bad ] && { logger -t nikki-unblock "exit '$nm' is answering again"; _since=""; }
+			[ -n "$_since" ] && [ "$_prev" = ok ] || _since=$_now
+			printf '%s\tok\t%s\t%s\n' "$nm" "$_d" "$_since" >> "$_new"
 		else
-			n=$(( $(cat "$sf" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$sf"
-			if [ "$n" -ge "$NODEWD_FAILS" ] && ! grep -qxF "$nm" "$OFF_FILE"; then
-				# Never empty the group. With no exits left, regen_mixin writes a bare DIRECT and the
-				# tunnel silently becomes a passthrough — worse than keeping one unreachable exit, which
-				# at least fails closed and leaves something for recovery to re-test.
-				if [ "$_onnow" -le 1 ]; then
-					logger -t nikki-unblock "node '$nm' unreachable, but it is the last one enabled — keeping it"
-				else
-					printf '%s\n' "$nm" >> "$OFF_FILE"
-					printf '%s\n' "$nm" >> "$AUTOOFF_FILE"
-					_onnow=$((_onnow - 1))
-					logger -t nikki-unblock "node '$nm' unreachable ($n checks) -> disabled"
-					changed=1
-				fi
+			_n=$(( $(cat "$sf" 2>/dev/null || echo 0) + 1 )); echo "$_n" > "$sf"
+			if [ "$_n" -ge "$NODEWD_FAILS" ]; then
+				[ "$_prev" = bad ] || { logger -t nikki-unblock "exit '$nm' stopped answering (mihomo will route around it)"; _since=$_now; }
+				[ -n "$_since" ] || _since=$_now
+				printf '%s\tbad\tx\t%s\n' "$nm" "$_since" >> "$_new"
+			else
+				# one miss is not a verdict — keep showing the previous state
+				[ -n "$_prev" ] && printf '%s\t%s\t%s\t%s\n' "$nm" "$_prev" "$_d" "${_since:-$_now}" >> "$_new"
 			fi
 		fi
 	done < "$_pf"
+	mv "$_new" "$NODEWD_HEALTH"
 	rm -f "$_pf"
-	[ "$changed" = 1 ] && { regen_mixin; apply_nikki; }
-	# Housekeeping: drop entries naming exits that no longer exist, and dedup. A subscription that
-	# removes a node used to leave its name behind in these lists (fixed at the source, but installs
-	# carry the residue), and that is not cosmetic — if the provider later re-adds a node under the same
-	# name it is born disabled, with nothing in the UI explaining why. Only runs with a live API, so
-	# ordered_exit_names really knows the profile's nodes rather than seeing none of them.
+	# Housekeeping: drop names from nodes.off that are no longer exits at all, and dedup. A subscription
+	# that removes a node used to leave its name behind, and that is not cosmetic — if the provider later
+	# re-adds a node under the same name it would be born disabled with nothing explaining why.
 	_known=$(ordered_exit_names)
-	if [ -n "$_known" ]; then
-		for _L in "$OFF_FILE" "$AUTOOFF_FILE"; do
-			[ -f "$_L" ] || continue
-			printf '%s\n' "$_known" | awk 'NR==FNR { k[$0]=1; next } $0 != "" && k[$0] && !seen[$0]++' - "$_L" > "$_L.tmp"
-			cmp -s "$_L" "$_L.tmp" || { logger -t nikki-unblock "pruned stale entries from $(basename "$_L")"; mv "$_L.tmp" "$_L"; }
-			rm -f "$_L.tmp"
-		done
+	if [ -n "$_known" ] && [ -f "$OFF_FILE" ]; then
+		printf '%s\n' "$_known" | awk 'NR==FNR { k[$0]=1; next } $0 != "" && k[$0] && !seen[$0]++' - "$OFF_FILE" > "$OFF_FILE.tmp"
+		cmp -s "$OFF_FILE" "$OFF_FILE.tmp" || { logger -t nikki-unblock "pruned stale names from nodes.off"; mv "$OFF_FILE.tmp" "$OFF_FILE"; }
+		rm -f "$OFF_FILE.tmp"
 	fi
 	rm -f "$NODEWD_LOCK"
+}
+
+# One-time: give back the exits the OLD watchdog had switched off. Now that nothing auto-disables, an
+# auto-disabled node would otherwise stay off forever with nobody left to revive it.
+nodewd_unautooff_once() {
+	[ -f "$AUTOOFF_FILE" ] || return 0
+	if [ -s "$AUTOOFF_FILE" ] && [ -f "$OFF_FILE" ]; then
+		grep -vxF -f "$AUTOOFF_FILE" "$OFF_FILE" > "$OFF_FILE.tmp" 2>/dev/null; mv "$OFF_FILE.tmp" "$OFF_FILE"
+		logger -t nikki-unblock "re-enabled exits the old watchdog had disabled; nodes.off is now user choice only"
+		rm -f "$AUTOOFF_FILE"
+		regen_mixin; apply_nikki
+		return 0
+	fi
+	rm -f "$AUTOOFF_FILE"
 }
 
 # ---- link subscriptions (tracked & refreshable) ---------------------------
@@ -1101,7 +1102,7 @@ sub_sync() {   # $1=subid $2=url $3=name-prefix
 		onm=$(printf '%s' "$line" | cut -f1); oid=$(printf '%s' "$line" | cut -f2)
 		[ -z "$oid" ] && continue
 		grep -qxF "$onm" "$KEEP" || { rm -f "$NODES_DIR/$oid.yaml" "$NODES_DIR/$oid.src"
-			for L in "$ORDER_FILE" "$OFF_FILE" "$AUTOOFF_FILE"; do [ -f "$L" ] && [ -n "$onm" ] && { grep -vxF "$onm" "$L" > "$L.t" 2>/dev/null; mv "$L.t" "$L"; }; done; }
+			for L in "$ORDER_FILE" "$OFF_FILE"; do [ -f "$L" ] && [ -n "$onm" ] && { grep -vxF "$onm" "$L" > "$L.t" 2>/dev/null; mv "$L.t" "$L"; }; done; }
 	done < "$OWN"
 	rm -f "$LL" "$OWN" "$KEEP"; return 0
 }
@@ -1816,7 +1817,6 @@ build_backup() {
 	[ -f "$MIXIN_FILE" ] && cp "$MIXIN_FILE" "$_d/mixin.yaml"
 	for p in nodes providers subs; do [ -d "/etc/nikki-unblock/$p" ] && cp -r "/etc/nikki-unblock/$p" "$_d/store/"; done
 	[ -f "$ORDER_FILE" ] && cp "$ORDER_FILE" "$_d/store/"; [ -f "$OFF_FILE" ] && cp "$OFF_FILE" "$_d/store/"
-	[ -f "$AUTOOFF_FILE" ] && cp "$AUTOOFF_FILE" "$_d/store/"   # keep the auto/manual distinction across restore
 	printf '{"version":"%s","date":"%s","host":"%s"}' \
 		"$(pkg_ver luci-app-nikki-unblock)" "$(date '+%Y-%m-%d %H:%M')" "$(uci -q get system.@system[0].hostname 2>/dev/null)" > "$_d/manifest.json"
 	_out="${1:-/tmp/nikki-unblock-backup.tar.gz}"
@@ -1835,9 +1835,10 @@ restore_backup() {
 		for p in nodes providers subs; do [ -d "$1/store/$p" ] && cp -r "$1/store/$p" /etc/nikki-unblock/; done
 		mkdir -p "$NODES_DIR" "$PROV_DIR" "$SUBS_DIR"
 		cp "$1/store/nodes.order" "$ORDER_FILE" 2>/dev/null; cp "$1/store/nodes.off" "$OFF_FILE" 2>/dev/null
-		# full-replace: clear stale autooff, then restore it if the backup carried one (pre-feature backups
-		# won't — those OFF entries then read as manual, which is the safe default: they just stay disabled)
-		rm -f "$AUTOOFF_FILE"; cp "$1/store/nodes.autooff" "$AUTOOFF_FILE" 2>/dev/null
+		# A backup taken while the watchdog still disabled exits may carry nodes.autooff. Drop it rather
+		# than restore it: nothing auto-disables now, and nodewd_unautooff_once would hand those exits
+		# back on the next request anyway.
+		rm -f "$AUTOOFF_FILE"
 		[ -f "$1/mixin.yaml" ] && cp "$1/mixin.yaml" "$MIXIN_FILE"
 	}
 	_apply_store "$_rd"
@@ -2513,10 +2514,14 @@ nodes_json() {
 		fi
 		en=1; node_disabled "$nm" && en=0
 		act=0; [ "$nm" = "$active" ] && act=1
-		auto=0; [ "$en" = 0 ] && grep -qxF "$nm" "$AUTOOFF_FILE" 2>/dev/null && auto=1
+		# observed health from the watcher: what the exit has been doing while nobody was looking at the
+		# page. The tab's own ping only ever knows "right now" — this is what carries "down for 40 min".
+		_hl=$(node_health_of "$nm")
+		_hst=$(printf '%s' "$_hl" | cut -f1); _hsn=$(printf '%s' "$_hl" | cut -f3)
+		[ -n "$_hsn" ] || _hsn=0
 		[ "$first" = 1 ] || printf ','; first=0
-		printf '{"name":"%s","kind":"%s","id":"%s","type":"%s","host":"%s","sub":"%s","enabled":%s,"active":%s,"auto":%s}' \
-			"$(json_esc "$nm")" "$kind" "$id" "$(json_esc "$ty")" "$(json_esc "$hs")" "$(json_esc "$sb")" "$en" "$act" "$auto"
+		printf '{"name":"%s","kind":"%s","id":"%s","type":"%s","host":"%s","sub":"%s","enabled":%s,"active":%s,"health":"%s","health_since":%s}' \
+			"$(json_esc "$nm")" "$kind" "$id" "$(json_esc "$ty")" "$(json_esc "$hs")" "$(json_esc "$sb")" "$en" "$act" "$_hst" "$_hsn"
 	done
 	rm -f "$OM"
 	printf '],"providers":['
@@ -2667,6 +2672,7 @@ LOGIN_EOF
 migrate_dev_ip_to_mac
 nikki_rules_enable
 nodes_init_once
+nodewd_unautooff_once
 
 API=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^api=' | head -1 | cut -d= -f2-)
 
@@ -3424,16 +3430,10 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			if [ "$nikki_down" = false ]; then
 				d=$(mihomo_delay "$rn")
 				[ "$d" = x ] && { sleep 3; d=$(mihomo_delay "$rn"); }   # one retry: a fresh handshake can be slow
-				if [ "$d" = x ]; then
-					# still unreachable -> disable it, same bookkeeping as the watchdog (AUTOOFF_FILE) so it
-					# gets auto re-enabled once node_watchdog_run sees it respond (e.g. server still booting)
-					touch "$OFF_FILE" "$AUTOOFF_FILE"
-					grep -qxF "$rn" "$OFF_FILE" || printf '%s\n' "$rn" >> "$OFF_FILE"
-					grep -qxF "$rn" "$AUTOOFF_FILE" || printf '%s\n' "$rn" >> "$AUTOOFF_FILE"
-					regen_mixin; apply_nikki
-					auto=1
-				fi
 			fi
+			# Deliberately NOT switched off when it fails to answer. The group skips an unhealthy member
+			# on its own, so disabling buys no routing benefit and only leaves a state the user has to
+			# undo by hand once the server finishes booting. Report it and leave the choice to them.
 			json_header; printf '{"ok":true,"kind":"node","id":"%s","name":"%s","delay":"%s","autodisabled":%s,"nikki_down":%s}' \
 				"$id" "$rn" "$d" "$([ "$auto" = 1 ] && echo true || echo false)" "$nikki_down"; exit 0
 		elif [ "$kind" = multi ]; then
@@ -3483,7 +3483,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			nm=$(grep -m1 'name:' "$NODES_DIR/$id.yaml" 2>/dev/null | sed 's/.*name:[[:space:]]*//')
 			rm -f "$NODES_DIR/$id.yaml" "$NODES_DIR/$id.off" "$NODES_DIR/$id.src" "$PROV_DIR/$id.yaml"
 			# drop the name from the order/off/autooff lists too
-			for L in "$ORDER_FILE" "$OFF_FILE" "$AUTOOFF_FILE"; do
+			for L in "$ORDER_FILE" "$OFF_FILE"; do
 				[ -n "$nm" ] && [ -f "$L" ] && { grep -vxF "$nm" "$L" > "$L.tmp" 2>/dev/null; mv "$L.tmp" "$L"; }
 			done
 		fi
@@ -3504,10 +3504,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		# toggle a node (profile OR ours) on/off by NAME via the shared off-list
 		nm=$(get_param name)
 		[ -z "$nm" ] && { json_header; printf '{"ok":false,"error":"no name"}'; exit 0; }
-		touch "$OFF_FILE" "$AUTOOFF_FILE"
-		# a manual toggle clears the "auto-disabled" mark: a manual OFF becomes a permanent user choice the
-		# watchdog won't undo; a manual ON returns the node to normal watching (no stale auto-recover flag)
-		grep -vxF "$nm" "$AUTOOFF_FILE" > "$AUTOOFF_FILE.tmp" 2>/dev/null; mv "$AUTOOFF_FILE.tmp" "$AUTOOFF_FILE"
+		touch "$OFF_FILE"
 		if grep -qxF "$nm" "$OFF_FILE"; then
 			grep -vxF "$nm" "$OFF_FILE" > "$OFF_FILE.tmp"; mv "$OFF_FILE.tmp" "$OFF_FILE"; en=1
 		else
@@ -3579,7 +3576,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		sid=$(get_param id | sed 's/[^a-z0-9_-]//g')
 		for oid in $(sub_owned_ids "$sid"); do
 			onm=$(node_name_of "$oid"); rm -f "$NODES_DIR/$oid.yaml" "$NODES_DIR/$oid.src"
-			for L in "$ORDER_FILE" "$OFF_FILE" "$AUTOOFF_FILE"; do [ -f "$L" ] && [ -n "$onm" ] && { grep -vxF "$onm" "$L" > "$L.t" 2>/dev/null; mv "$L.t" "$L"; }; done
+			for L in "$ORDER_FILE" "$OFF_FILE"; do [ -f "$L" ] && [ -n "$onm" ] && { grep -vxF "$onm" "$L" > "$L.t" 2>/dev/null; mv "$L.t" "$L"; }; done
 		done
 		rm -f "$SUBS_DIR/$sid.conf"
 		regen_mixin; apply_nikki

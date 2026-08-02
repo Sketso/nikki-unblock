@@ -118,8 +118,9 @@ const I18N = {
     nodesHint: "Свои VPN-выходы. Перетащи .conf или вставь конфиг/ссылку: AmneziaWG/WireGuard, vless://…, подписку https://…, или сырой clash-YAML. Добавленные ноды образуют группу UNBLOCK — выбирай «→ VPN (+ноды)» как действие правила.",
     nodeDrop: "Перетащи сюда файл .conf", nodeName: "имя (необязательно)", nodeAdd: "Добавить и проверить",
     validating: "Добавляю и проверяю ноду…", nodeMs: "мс", nodeNoResp: "не отвечает", nodeSub: "подписка",
-    nodeAutoOff: "не достучалась — отключена, включи после починки",
-    nodeAutoOffTag: "недоступна, отключена автоматически",
+    nodeDownFor: a => "не отвечает " + a + " (mihomo обходит её сам)",
+    nodeNoRespKept: "не отвечает — оставлена включённой, mihomo обойдёт её сам",
+    agoMin: "мин", agoHour: "ч", agoDay: "дн",
     stTitle: "Место на роутере", stFree: "Свободно / всего",
     stOwnState: "Данные Nipret (ноды, списки, бэкапы)",
     stGeoipWhat: "нужен только для правил GEOIP по сервисам",
@@ -330,8 +331,9 @@ const I18N = {
     nodesHint: "Your own VPN exits. Drop a .conf or paste a config/link: AmneziaWG/WireGuard, vless://…, a subscription https://…, or raw clash YAML. Added nodes form the UNBLOCK group — pick «→ VPN (+nodes)» as a rule action.",
     nodeDrop: "Drop a .conf file here", nodeName: "name (optional)", nodeAdd: "Add & check",
     validating: "Adding & checking node…", nodeMs: "ms", nodeNoResp: "no response", nodeSub: "subscription",
-    nodeAutoOff: "unreachable — disabled, re-enable once it's fixed",
-    nodeAutoOffTag: "unreachable, auto-disabled",
+    nodeDownFor: a => "not answering for " + a + " (mihomo routes around it)",
+    nodeNoRespKept: "not answering — left enabled, mihomo will route around it",
+    agoMin: "min", agoHour: "h", agoDay: "d",
     stTitle: "Router storage", stFree: "Free / total",
     stOwnState: "Nipret data (nodes, lists, backups)",
     stGeoipWhat: "only needed for service-category GEOIP rules",
@@ -1202,6 +1204,14 @@ $("#z2Ipv6").addEventListener("change", async e => {
    which is where config writes start failing. Rules are deliberately NOT offered as a lever — all of
    them together weigh ~19 KB, so "turn off a preset to free space" would promise megabytes that don't
    exist. Only the blobs move the needle. */
+// compact "how long ago" for health timestamps
+function agoStr(epoch){
+  if (!epoch) return "";
+  const m = Math.max(0, Math.round(Date.now() / 1000 - epoch) / 60);
+  if (m < 60) return Math.round(m) + " " + t("agoMin");
+  const h = m / 60;
+  return (h < 24 ? Math.round(h) + " " + t("agoHour") : Math.round(h / 24) + " " + t("agoDay"));
+}
 const mb = kb => (kb / 1024).toFixed(1) + " MB";
 async function loadStorage(){
   let s; try { s = await (await fetch("?api=storage")).json(); } catch(e){ return; }
@@ -1515,7 +1525,10 @@ async function loadNodes(){
     // so dragging there would save an order that changes nothing
     li.draggable = NODEMODE !== "urltest"; li.dataset.name = n.name; if (off) li.classList.add("off");
     const src = n.sub ? t("nodeFromSub") + " " + n.sub : (n.kind === "profile" ? t("nodeProfile") : (n.type + (n.host ? " · " + n.host : "")));
-    const meta = src + (n.active ? " · " + t("nodeActive") : "") + (off && n.auto ? " · " + t("nodeAutoOffTag") : "");
+    // health comes from the background watcher, so it survives you not looking at this page; the tab's
+    // own ping (autoPingNodes) only ever knows "right now"
+    const down = n.health === "bad" && !off;
+    const meta = src + (n.active ? " · " + t("nodeActive") : "") + (down ? " · " + t("nodeDownFor")(agoStr(n.health_since)) : "");
     li.innerHTML =
       (NODEMODE === "urltest" ? '<span class="drag" style="opacity:.25" title="' + escH(t("dragAutoOff")) + '">⠿</span>' : '<span class="drag" title="' + escH(t("dragHint")) + '">⠿</span>') +
       '<span class="ndot' + (n.active ? " act" : "") + '" data-dot="' + i + '"></span>' +
@@ -1581,9 +1594,9 @@ async function addNodeCfg(cfg, name){
       if (res.kind === "node") m += " · " + res.name;
       setMsg($("#nodeMsg"), m + " — " + t("nodeNikkiDown"), false);
     } else {
-    if (res.kind === "node") m += " · " + res.name + " — " + (res.autodisabled ? t("nodeAutoOff") : res.delay === "x" ? t("nodeNoResp") : res.delay + " " + t("nodeMs"));
+    if (res.kind === "node") m += " · " + res.name + " — " + (res.delay === "x" ? t("nodeNoRespKept") : res.delay + " " + t("nodeMs"));
     else if (res.kind === "multi") m += " · " + t("subAdded") + res.added;
-    setMsg($("#nodeMsg"), m, res.kind !== "node" || (res.delay !== "x" && !res.autodisabled));
+    setMsg($("#nodeMsg"), m, res.kind !== "node" || res.delay !== "x");
     }
     $("#nodeCfg").value = ""; $("#nodeName").value = "";
     loadNodes().then(() => { hideOverlay(); autoPingNodes(); }); loadDomains();
