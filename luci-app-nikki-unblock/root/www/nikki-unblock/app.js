@@ -41,7 +41,7 @@ const I18N = {
     z2OnNoDesync: "работает, но обход не активен",
     z2StratTitle: "Стратегия обхода", apply: "Применить",
     z2StratHint: "Набор параметров десинхронизации. Если что-то не пробивается — попробуй другую; при поломке автоматически откатится на прежнюю.",
-    strat_default: "Сбалансированная (по умолчанию)", strat_youtube: "YouTube: QUIC-блоб googlevideo",
+    strat_ytdiscord: "YouTube + Discord (рекомендуется)", strat_default: "Сбалансированная", strat_youtube: "YouTube: QUIC-блоб googlevideo",
     strat_aggressive: "Агрессивная (TLS multidisorder + badsum)", strat_light: "Лёгкая (для слабых роутеров)", strat_custom: "Своя (ручная правка config)",
     stratCustomNote: "Это ручная стратегия из config — выбери одну из готовых, чтобы применить.", stratSame: "Эта стратегия уже активна",
     stratCustomEditHint: "Опции NFQWS2_OPT — по одной строке на профиль (--filter…). Правится только этот блок, остальной config Nipret ведёт сам. Битый конфиг откатится автоматически.",
@@ -254,7 +254,7 @@ const I18N = {
     z2OnNoDesync: "running, but bypass inactive",
     z2StratTitle: "Bypass strategy", apply: "Apply",
     z2StratHint: "The desync parameter set. If something won't get through, try another; a broken one auto-reverts to the previous.",
-    strat_default: "Balanced (default)", strat_youtube: "YouTube: googlevideo QUIC blob",
+    strat_ytdiscord: "YouTube + Discord (recommended)", strat_default: "Balanced", strat_youtube: "YouTube: googlevideo QUIC blob",
     strat_aggressive: "Aggressive (TLS multidisorder + badsum)", strat_light: "Light (for weak routers)", strat_custom: "Custom (hand-edited config)",
     stratCustomNote: "This is a manual strategy from config — pick one of the presets to apply.", stratSame: "That strategy is already active",
     stratCustomEditHint: "NFQWS2_OPT options — one profile per line (--filter…). Only this block is edited; Nipret manages the rest of the config. A broken config auto-reverts.",
@@ -1109,7 +1109,7 @@ $("#z2Quic").addEventListener("change", async e => {
   loadZapret2();
 });
 /* ---------- zapret2 strategies (curated NFQWS2_OPT) ---------- */
-const STRATS = ["default", "youtube", "aggressive", "light"];
+const STRATS = ["ytdiscord", "default", "youtube", "aggressive", "light"];
 let stratBodyLoaded = false;   // guards the editor prefill so a status refresh never clobbers live edits
 let stratBodyOrig = "";        // body as loaded, so Apply can tell "edited" from "untouched"
 let stratBodySrc = "live";     // "live" = editing the running config, "saved" = your stashed custom one

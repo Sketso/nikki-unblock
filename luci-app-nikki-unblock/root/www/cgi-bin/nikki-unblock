@@ -1596,10 +1596,27 @@ z2_gv_blob() {
 	_b=$(ls /opt/zapret2/files/fake/ 2>/dev/null | grep -iE 'quic_initial.*googlevideo.*\.bin$' | head -1)
 	[ -n "$_b" ] && echo "${_b%.bin}" || echo "fake_default_quic"
 }
-z2_strat_ids() { echo "default youtube aggressive light"; }
+z2_strat_ids() { echo "ytdiscord default youtube aggressive light"; }
+# Extra interception ports a strategy needs, "TCP|UDP". Profiles are only ever offered packets the
+# firewall actually queues, so a Discord profile bound to 2053/50000-50100 is dead weight unless these
+# are widened — that was the quiet reason Discord stayed blocked with its preset switched on.
+z2_strat_ports() {
+	case "$1" in
+		ytdiscord) echo "80,443,2053,2083,2087,2096,8443|443,19294-19344,50000-50100" ;;
+		*)         echo "80,443|443" ;;
+	esac
+}
 z2_strat_body() {   # $1=id -> the NFQWS2_OPT body (profile lines); empty for unknown id
 	_gv=$(z2_gv_blob)
 	case "$1" in
+		ytdiscord)
+			# One desync does not fit both services: measured on a live router, multidisorder carries
+			# YouTube but never opens Discord, while multisplit+seqovl opens Discord and breaks YouTube.
+			# So Discord's domains get their own profile ahead of the general one (first match wins), and
+			# the rest keeps what already worked. Media rides non-standard TCP ports and voice is UDP
+			# 50000+, neither of which the standard profiles ever see — hence the extra ports above.
+			printf '%s
+' '--filter-tcp=80 --filter-l7=http <HOSTLIST> --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5 --lua-desync=multisplit:pos=method+2 --new' '--filter-tcp=443 --filter-l7=tls --hostlist-domains=discord.com,discord.gg,discord.media,discordapp.com,discordapp.net,discordcdn.com,discord.app,discord.dev,discord.gift,discord.new,discord.store,discordstatus.com,dis.gd --payload=tls_client_hello --lua-desync=multisplit:pos=1:seqovl=568 --new' '--filter-tcp=2053,2083,2087,2096,8443 --filter-l7=tls --hostlist-domains=discord.media,discordapp.net --payload=tls_client_hello --lua-desync=multisplit:pos=1:seqovl=681 --new' '--filter-udp=19294-19344,50000-50100 --filter-l7=discord,stun --lua-desync=fake:blob=discord-ip-discovery-with-port:repeats=6 --new' '--filter-tcp=443 --filter-l7=tls <HOSTLIST> --payload=tls_client_hello --lua-desync=multidisorder:pos=1,midsld --new' "--filter-udp=443 --filter-l7=quic <HOSTLIST_NOAUTO> --payload=quic_initial --lua-desync=fake:blob=${_gv}:repeats=8" ;;
 		default)
 			printf '%s\n' \
 '--filter-tcp=80 --filter-l7=http <HOSTLIST> --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5 --lua-desync=multisplit:pos=method+2 --new' \
@@ -3106,6 +3123,9 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		was=0; z2_running && was=1
 		cp "$Z2_CONFIG" "$Z2_CONFIG.strat.bak"
 		printf '%s' "$body" | z2_write_opt
+		# widen (or restore) the queued ports this strategy's profiles depend on
+		_pp=$(z2_strat_ports "$id"); _ptcp=${_pp%%|*}; _pudp=${_pp##*|}
+		sed -i "s#^NFQWS2_PORTS_TCP=.*#NFQWS2_PORTS_TCP=$_ptcp#; s#^NFQWS2_PORTS_UDP=.*#NFQWS2_PORTS_UDP=$_pudp#" "$Z2_CONFIG"
 		/etc/init.d/zapret2 restart >/dev/null 2>&1; sleep 4
 		if z2_running && { [ "$was" = 0 ] || z2_desync_ok; }; then
 			rm -f "$Z2_CONFIG.strat.bak"
@@ -3284,6 +3304,14 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 				if [ -f "$Z2_CONFIG" ] && z2_autohostlist; then
 					cp "$Z2_CONFIG" "$Z2_CONFIG.nipret.bak" 2>/dev/null
 					sed -i "s/^\([[:space:]]*MODE_FILTER=\).*/\1hostlist/" "$Z2_CONFIG"
+				fi
+				# start a fresh install on the recommended strategy rather than whatever zapret2 shipped:
+				# the stock one carries YouTube but leaves Discord blocked, which reads as "the preset is on
+				# and nothing happens". A hand-tuned config reports as "custom" and is left untouched.
+				if [ -f "$Z2_CONFIG" ] && [ "$(z2_cur_strat)" != custom ]; then
+					z2_strat_body ytdiscord | z2_write_opt
+					_pp=$(z2_strat_ports ytdiscord); _ptcp=${_pp%%|*}; _pudp=${_pp##*|}
+					sed -i "s#^NFQWS2_PORTS_TCP=.*#NFQWS2_PORTS_TCP=$_ptcp#; s#^NFQWS2_PORTS_UDP=.*#NFQWS2_PORTS_UDP=$_pudp#" "$Z2_CONFIG"
 				fi
 				z2_rebuild_main   # writes the preset hostlist + restarts (applies new main + autohostlist-off)
 			fi
