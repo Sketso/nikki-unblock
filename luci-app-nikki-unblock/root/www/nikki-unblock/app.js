@@ -493,10 +493,17 @@ const setMsg = (el, txt, ok=true) => {
 function showOverlay(txt){ const o = $("#overlay"); if (!o) return; $("#overlayText").textContent = txt || ""; o.hidden = false; }
 function setOverlay(txt){ const t2 = $("#overlayText"); if (t2) t2.textContent = txt || ""; }
 function hideOverlay(){ const o = $("#overlay"); if (o) o.hidden = true; }
+// Never throws. A rejected fetch (router busy, request outliving uhttpd's CGI timeout, Wi-Fi blip) used
+// to propagate out of every `await api(...)`, skipping the rest of the handler — including hideOverlay().
+// The panel then sat on "applying" forever while the router had in fact finished the job. Most call
+// sites are not wrapped in try/catch, so guarding here fixes the whole class at once rather than in the
+// three dozen places that would each have to remember.
 async function api(action, params){
-  const r = await fetch("", { method:"POST", body: new URLSearchParams({ action, ...params }) });
-  if (r.status === 401){ location.reload(); return {}; }   // session expired → back to the PIN screen
-  return r.json();
+  try {
+    const r = await fetch("", { method:"POST", body: new URLSearchParams({ action, ...params }) });
+    if (r.status === 401){ location.reload(); return {}; }   // session expired → back to the PIN screen
+    return await r.json();
+  } catch(e){ return { ok: false, error: "timeout" }; }
 }
 
 /* ---------- tabs ---------- */
@@ -1504,11 +1511,13 @@ async function loadNodes(){
   NODES.forEach((n, i) => {
     const off = n.enabled === 0;
     const li = document.createElement("li");
-    li.draggable = true; li.dataset.name = n.name; if (off) li.classList.add("off");
+    // order is the priority chain in fallback mode; url-test picks by latency and ignores it entirely,
+    // so dragging there would save an order that changes nothing
+    li.draggable = NODEMODE !== "urltest"; li.dataset.name = n.name; if (off) li.classList.add("off");
     const src = n.sub ? t("nodeFromSub") + " " + n.sub : (n.kind === "profile" ? t("nodeProfile") : (n.type + (n.host ? " · " + n.host : "")));
     const meta = src + (n.active ? " · " + t("nodeActive") : "") + (off && n.auto ? " · " + t("nodeAutoOffTag") : "");
     li.innerHTML =
-      '<span class="drag" title="' + escH(t("dragHint")) + '">⠿</span>' +
+      (NODEMODE === "urltest" ? '<span class="drag" style="opacity:.25" title="' + escH(t("dragAutoOff")) + '">⠿</span>' : '<span class="drag" title="' + escH(t("dragHint")) + '">⠿</span>') +
       '<span class="ndot' + (n.active ? " act" : "") + '" data-dot="' + i + '"></span>' +
       '<span class="dom">' + escH(n.name) + '</span>' +
       '<span class="meta">' + escH(meta) + '</span>' +

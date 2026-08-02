@@ -991,14 +991,30 @@ node_watchdog_run() {
 	echo $$ > "$NODEWD_LOCK"
 	mkdir -p "$NODEWD_STATE"; touch "$OFF_FILE" "$AUTOOFF_FILE"
 	changed=0
+	# Probe everything FIRST, decide after. A per-node verdict only means anything if the router itself
+	# has working connectivity: when the WAN drops, every probe fails, and judging nodes one at a time
+	# disabled all of them in turn — rewriting the config, reloading nikki, and leaving the exit group as
+	# a bare DIRECT. That is traffic leaving unprotected exactly while the user believes it is tunnelled,
+	# over an outage that had nothing to do with the nodes.
+	_pf="/tmp/nu-wdprobe.$$"; : > "$_pf"
 	for f in "$NODES_DIR"/*.yaml; do
 		[ -f "$f" ] || continue
 		nm=$(grep -m1 'name:' "$f" | sed 's/.*name:[[:space:]]*//'); [ -n "$nm" ] || continue
+		grep -qxF "$nm" "$OFF_FILE" && ! grep -qxF "$nm" "$AUTOOFF_FILE" && continue   # user's own choice
+		if [ "$(mihomo_delay "$nm")" != x ]; then printf 'ok\t%s\n' "$nm"; else printf 'bad\t%s\n' "$nm"; fi
+	done >> "$_pf"
+	if ! grep -q '^ok' "$_pf" && grep -q '^bad' "$_pf"; then
+		# not one exit answered — that is this router's connectivity, not theirs. Change nothing, and
+		# don't advance the failure counters either, so a WAN outage can't age nodes into being disabled.
+		logger -t nikki-unblock "no exit answered at all — treating as local connectivity, leaving nodes alone"
+		rm -f "$_pf" "$NODEWD_LOCK"; return 0
+	fi
+	# how many exits are live in the group right now — used as a floor below
+	_onnow=$(ordered_exit_names | while IFS= read -r n; do [ -n "$n" ] && { node_disabled "$n" || echo x; }; done | grep -c .)
+	while IFS="	" read -r _verdict nm; do
+		[ -n "$nm" ] || continue
 		sf="$NODEWD_STATE/$(san_name "$nm")"
-		if grep -qxF "$nm" "$OFF_FILE" && ! grep -qxF "$nm" "$AUTOOFF_FILE"; then
-			continue   # user disabled it by hand — not ours to touch
-		fi
-		if [ "$(mihomo_delay "$nm")" != x ]; then
+		if [ "$_verdict" = ok ]; then
 			rm -f "$sf"
 			if grep -qxF "$nm" "$AUTOOFF_FILE"; then
 				grep -vxF "$nm" "$OFF_FILE" > "$OFF_FILE.tmp"; mv "$OFF_FILE.tmp" "$OFF_FILE"
@@ -1009,13 +1025,22 @@ node_watchdog_run() {
 		else
 			n=$(( $(cat "$sf" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$sf"
 			if [ "$n" -ge "$NODEWD_FAILS" ] && ! grep -qxF "$nm" "$OFF_FILE"; then
-				printf '%s\n' "$nm" >> "$OFF_FILE"
-				printf '%s\n' "$nm" >> "$AUTOOFF_FILE"
-				logger -t nikki-unblock "node '$nm' unreachable ($n checks) -> disabled"
-				changed=1
+				# Never empty the group. With no exits left, regen_mixin writes a bare DIRECT and the
+				# tunnel silently becomes a passthrough — worse than keeping one unreachable exit, which
+				# at least fails closed and leaves something for recovery to re-test.
+				if [ "$_onnow" -le 1 ]; then
+					logger -t nikki-unblock "node '$nm' unreachable, but it is the last one enabled — keeping it"
+				else
+					printf '%s\n' "$nm" >> "$OFF_FILE"
+					printf '%s\n' "$nm" >> "$AUTOOFF_FILE"
+					_onnow=$((_onnow - 1))
+					logger -t nikki-unblock "node '$nm' unreachable ($n checks) -> disabled"
+					changed=1
+				fi
 			fi
 		fi
-	done
+	done < "$_pf"
+	rm -f "$_pf"
 	[ "$changed" = 1 ] && { regen_mixin; apply_nikki; }
 	# Housekeeping: drop entries naming exits that no longer exist, and dedup. A subscription that
 	# removes a node used to leave its name behind in these lists (fixed at the source, but installs
