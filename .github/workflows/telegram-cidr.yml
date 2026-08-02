@@ -1,0 +1,49 @@
+name: refresh telegram cidr
+
+# Keeps the Telegram preset's IP ranges current straight from Telegram's own publication, so the panel
+# doesn't need GeoIP.dat (17 MB) just to route Telegram's direct-IP connections.
+#
+# Why here and not on the router: core.telegram.org is exactly the infrastructure that gets blocked, so a
+# router fetching it while Telegram is broken would get nothing — the one moment it must not fail. CI has
+# unrestricted access, and the result rides to routers through applist, which is already proven reachable.
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pull the official CIDR list into the telegram preset
+        run: |
+          set -e
+          curl -sfL --max-time 30 -o /tmp/cidr.txt https://core.telegram.org/resources/cidr.txt
+          # a truncated or error response must never overwrite working ranges
+          n=$(grep -cE '^[0-9a-fA-F.:]+/[0-9]+$' /tmp/cidr.txt || true)
+          [ "$n" -ge 8 ] || { echo "refusing: only $n CIDRs parsed — bad response"; exit 1; }
+          python3 - <<'PY'
+          import json, io
+          cidr = [l.strip() for l in open('/tmp/cidr.txt') if l.strip() and not l.startswith('#')]
+          p = 'applist/index.json'
+          d = json.load(io.open(p, encoding='utf-8'))
+          for e in d:
+              if e.get('id') == 'telegram':
+                  e['ipcidr'] = cidr
+          io.open(p, 'w', encoding='utf-8', newline='\n').write(json.dumps(d, ensure_ascii=False, indent=2) + "\n")
+          PY
+
+      - name: Commit if it moved
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add applist/index.json
+          git diff --cached --quiet && { echo "unchanged"; exit 0; }
+          git commit -m "applist: refresh telegram IP ranges from core.telegram.org"
+          git push

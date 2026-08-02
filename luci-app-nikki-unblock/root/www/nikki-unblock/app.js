@@ -120,6 +120,16 @@ const I18N = {
     validating: "Добавляю и проверяю ноду…", nodeMs: "мс", nodeNoResp: "не отвечает", nodeSub: "подписка",
     nodeAutoOff: "не достучалась — отключена, включи после починки",
     nodeAutoOffTag: "недоступна, отключена автоматически",
+    stTitle: "Место на роутере", stFree: "Свободно / всего",
+    stOwnState: "Данные Nipret (ноды, списки, бэкапы)",
+    stGeoipWhat: "нужен только для правил GEOIP по сервисам",
+    stGeositeWhat: "категории доменов для пресетов",
+    stMmdbWhat: "страны, ставится самим nikki",
+    stGeoipDrop: "Удалить GeoIP.dat",
+    stGeoipUnused: "Ни одно правило его не использует — можно удалить без последствий.",
+    stGeoipNeeded: r => "Сейчас используется правилами: " + r + ". При удалении они будут заменены на опубликованные подсети (для Telegram — с core.telegram.org), остальные удалены.",
+    stGeoipConfirm: "Заменить GEOIP-правила на подсети и удалить базу? Страновые правила продолжат работать. Если mihomo не поднимется — изменение откатится.",
+    stLow: "Места почти нет — записи конфига могут начать падать",
     dcTitle: "Почему не открывается сайт?",
     dcHint: "Введи домен — панель скажет, какой движок его обрабатывает и работает ли этот путь прямо сейчас. Проверяется по живому конфигу mihomo, а не по настройкам панели.",
     dcBtn: "Проверить", dcPh: "instagram.com",
@@ -322,6 +332,16 @@ const I18N = {
     validating: "Adding & checking node…", nodeMs: "ms", nodeNoResp: "no response", nodeSub: "subscription",
     nodeAutoOff: "unreachable — disabled, re-enable once it's fixed",
     nodeAutoOffTag: "unreachable, auto-disabled",
+    stTitle: "Router storage", stFree: "Free / total",
+    stOwnState: "Nipret data (nodes, lists, backups)",
+    stGeoipWhat: "only needed for service-category GEOIP rules",
+    stGeositeWhat: "domain categories used by presets",
+    stMmdbWhat: "countries, shipped by nikki itself",
+    stGeoipDrop: "Delete GeoIP.dat",
+    stGeoipUnused: "No rule uses it — safe to delete.",
+    stGeoipNeeded: r => "Currently used by rules: " + r + ". Deleting replaces them with published IP ranges (Telegram's come from core.telegram.org); the rest are dropped.",
+    stGeoipConfirm: "Replace the GEOIP rules with IP ranges and delete the database? Country rules keep working. If mihomo fails to come back, the change is reverted.",
+    stLow: "Almost no free space — config writes may start failing",
     dcTitle: "Why doesn't this site open?",
     dcHint: "Enter a domain and the panel tells you which engine handles it and whether that path works right now. Checked against mihomo's live config, not the panel's settings.",
     dcBtn: "Check", dcPh: "instagram.com",
@@ -1170,6 +1190,47 @@ $("#z2Ipv6").addEventListener("change", async e => {
   if (res && res.ok) setMsg($("#z2Msg"), t("done")); else setMsg($("#z2Msg"), t("errP") + ((res && res.error) || "?"), false);
   loadZapret2();
 });
+/* ---------- storage: what is eating the flash ----------
+   Routers ship 60-128 MB and GeoIP.dat alone is ~17 MB of it; the dev box hit 100 % full unnoticed,
+   which is where config writes start failing. Rules are deliberately NOT offered as a lever — all of
+   them together weigh ~19 KB, so "turn off a preset to free space" would promise megabytes that don't
+   exist. Only the blobs move the needle. */
+const mb = kb => (kb / 1024).toFixed(1) + " MB";
+async function loadStorage(){
+  let s; try { s = await (await fetch("?api=storage")).json(); } catch(e){ return; }
+  if (!s || !s.total_kb) return;
+  const lowPct = s.free_kb / s.total_kb < 0.1, lowAbs = s.free_kb < 5120;
+  $("#stFreeVal").textContent = mb(s.free_kb) + " / " + mb(s.total_kb);
+  $("#stFreeVal").style.color = (lowPct || lowAbs) ? "var(--bad, #e05252)" : "";
+  const rows = [
+    ["GeoIP.dat", s.geoip_kb, t("stGeoipWhat")],
+    ["GeoSite.dat", s.geosite_kb, t("stGeositeWhat")],
+    ["Country.mmdb", s.mmdb_kb, t("stMmdbWhat")],
+    ["zapret2", s.z2_kb, ""],
+    [t("stOwnState"), s.state_kb, ""]
+  ].filter(r => r[1] > 0);
+  $("#stRows").innerHTML = rows.map(r =>
+    '<div class="uprow"><span class="upname">' + escH(r[0]) + (r[2] ? ' <span class="hint">' + escH(r[2]) + '</span>' : "") +
+    '</span><span class="upver">' + mb(r[1]) + '</span></div>').join("");
+  // the blob is only worth its size while a service-category rule needs it
+  const btn = $("#stGeoipBtn"), hint = $("#stHint");
+  if (s.geoip_kb > 0){
+    btn.hidden = false;
+    btn.textContent = t("stGeoipDrop") + " (" + mb(s.geoip_kb) + ")";
+    hint.hidden = false;
+    hint.textContent = s.geoip_needed ? t("stGeoipNeeded")(s.geoip_needed) : t("stGeoipUnused");
+  } else { btn.hidden = true; hint.hidden = true; }
+  if (lowPct || lowAbs) setMsg($("#stMsg"), t("stLow"), false);
+}
+$("#stGeoipBtn").addEventListener("click", async () => {
+  if (!confirm(t("stGeoipConfirm"))) return;
+  const b = $("#stGeoipBtn"); b.disabled = true; showOverlay(t("applying")); setMsg($("#stMsg"), t("applying"));
+  let r; try { r = await api("geoipdrop", {}); } catch(e){ r = { error: "timeout" }; }
+  hideOverlay(); b.disabled = false;
+  setMsg($("#stMsg"), (r && r.log) || (r && r.error) || t("errP"), !!(r && r.ok));
+  loadStorage(); loadDomains();
+});
+
 /* ---------- "why doesn't THIS site open?" — per-domain verdict ----------
    Answers the question users actually ask. Resolves the domain the way mihomo will: against the rules in
    the LIVE config, first match wins — so it reports what the router really does, not what the panel
@@ -1687,7 +1748,7 @@ $("#bkList").addEventListener("click", async e => {
 });
 /* ---------- undo / restore — global header control (both engines) ---------- */
 function refreshAllAfterRestore(){
-  loadDomains(); loadPresets(); if (CAPS.zapret2) loadZapret2(); loadSvc(); loadVersions(); loadBackup(); loadUndo();
+  loadDomains(); loadPresets(); if (CAPS.zapret2) loadZapret2(); loadSvc(); loadVersions(); loadBackup(); loadUndo(); loadStorage();
 }
 async function loadUndo(){
   try { const d = await (await fetch("?api=undolist")).json();

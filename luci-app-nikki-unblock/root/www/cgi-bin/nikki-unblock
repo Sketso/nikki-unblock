@@ -175,6 +175,19 @@ rule_exists() {
 	done
 }
 
+# echo the node (target) of the first rule with type $1 and matcher $2 — used when replacing a rule in
+# place, so the replacement keeps pointing wherever the original did
+rule_node_of() {
+	i=0
+	while uci -q get "nikki.@rule[$i]" >/dev/null 2>&1; do
+		if [ "$(uci -q get "nikki.@rule[$i].matcher")" = "$2" ] \
+			&& [ "$(uci -q get "nikki.@rule[$i].type")" = "$1" ]; then
+			uci -q get "nikki.@rule[$i].node"; return
+		fi
+		i=$((i + 1))
+	done
+}
+
 # delete first rule with type $1 and matcher $2
 delete_rule() {
 	i=0
@@ -679,9 +692,15 @@ update_start() {   # $1=op(self|nikki|geo|z2|all) ; 0=started 1=busy 2=bad op 3=
 		esac
 		case "$_op" in geo|all)
 			# enable geodata-mode (GEOIP uses GeoIP.dat categories) + auto-update, then refresh both DBs
-			printf 'echo ">> geo: enabling GeoIP (geodata-mode) + auto-update"\n'
-			printf 'uci -q set nikki.mixin.geoip_format=dat; uci -q set nikki.mixin.geox_auto_update=1; [ -n "$(uci -q get nikki.mixin.geox_update_interval)" ] || uci -q set nikki.mixin.geox_update_interval=168; uci -q commit nikki\n'
-			printf 'for gg in "GeoSite.dat %s" "GeoIP.dat %s"; do set -- $gg; echo ">> downloading $1"; if curl -sfL --max-time 120 -o "%s/$1.new" "$2"; then if [ "$(wc -c < "%s/$1.new")" -gt %s ]; then mv "%s/$1.new" "%s/$1"; echo "   $1 ok"; else echo "!! $1 too small"; rm -f "%s/$1.new"; rc=1; fi; else echo "!! $1 download failed"; rm -f "%s/$1.new"; rc=1; fi; done\n' "$GEOSITE_URL" "$GEOIP_DAT_URL" "$GEO_RUN" "$GEO_RUN" "$GEO_MIN_BYTES" "$GEO_RUN" "$GEO_RUN" "$GEO_RUN" "$GEO_RUN"
+			# GeoIP.dat is 16.7 MB and only buys SERVICE categories (GEOIP,telegram); countries resolve
+			# from Country.mmdb, which nikki ships anyway. So only enable dat-mode — and only pull that
+			# file — when a rule actually needs it, instead of costing every router a third of its flash.
+			printf 'echo ">> geo: refreshing databases"\n'
+			printf 'if "%s" _geoipneeded; then uci -q set nikki.mixin.geoip_format=dat; else echo "   no GEOIP service rules — keeping the small mmdb, skipping GeoIP.dat"; fi\n' "$SELF"
+			printf 'uci -q set nikki.mixin.geox_auto_update=1; [ -n "$(uci -q get nikki.mixin.geox_update_interval)" ] || uci -q set nikki.mixin.geox_update_interval=168; uci -q commit nikki\n'
+			# GeoSite always; GeoIP.dat only when a service-category rule needs it
+			printf 'gl="GeoSite.dat %s"; if "%s" _geoipneeded; then gl="$gl|GeoIP.dat %s"; fi\n' "$GEOSITE_URL" "$SELF" "$GEOIP_DAT_URL"
+			printf 'IFS="|"; for gg in $gl; do unset IFS; set -- $gg; echo ">> downloading $1"; if curl -sfL --max-time 120 -o "%s/$1.new" "$2"; then if [ "$(wc -c < "%s/$1.new")" -gt %s ]; then mv "%s/$1.new" "%s/$1"; echo "   $1 ok"; else echo "!! $1 too small"; rm -f "%s/$1.new"; rc=1; fi; else echo "!! $1 download failed"; rm -f "%s/$1.new"; rc=1; fi; done\n' "$GEO_RUN" "$GEO_RUN" "$GEO_MIN_BYTES" "$GEO_RUN" "$GEO_RUN" "$GEO_RUN" "$GEO_RUN"
 			printf 'echo ">> reloading nikki"; /etc/init.d/nikki reload\n' ;;
 		esac
 		case "$_op" in self|all)
@@ -2268,6 +2287,73 @@ nikkidiag_json() {
 		"$en" "$prof" "$run" "$rflag" "$ucin" "$liven" "$hit" "$eg" "$basedead" "${legacy:-0}" "$ntot" "$nen" "$(json_esc "$act")" "$adly"
 }
 
+# ---- storage: what is actually eating the flash -----------------------------
+# Routers ship 60-128 MB of flash and GeoIP.dat alone is 16.7 MB of it. The dev box silently reached
+# 100 % full during testing, which is a state where config writes start failing — so the panel now shows
+# the numbers instead of letting people discover it the hard way.
+# Deliberately NOT offered as a lever: deleting rules. All 98 rules on a real install weigh 19 KB
+# together, so "turn off a preset to free space" would promise megabytes that aren't there.
+GEOIP_DAT="$GEO_RUN/GeoIP.dat"
+GEOSITE_DAT="$GEO_RUN/GeoSite.dat"
+_kb() { [ -f "$1" ] && echo $(( $(wc -c < "$1") / 1024 )) || echo 0; }
+_dirkb() { du -sk "$1" 2>/dev/null | awk '{print $1+0}'; }
+# GEOIP rules that need the big .dat: service categories (telegram, google…) as opposed to 2-letter
+# country codes, which Country.mmdb — shipped by nikki anyway — resolves on its own.
+geoip_service_rules() {
+	_i=0
+	while uci -q get "nikki.@rule[$_i]" >/dev/null 2>&1; do
+		if [ "$(uci -q get "nikki.@rule[$_i].type")" = GEOIP ]; then
+			_m=$(uci -q get "nikki.@rule[$_i].matcher" | tr -d '!')
+			[ "${#_m}" -gt 2 ] && printf '%s\n' "$_m"
+		fi
+		_i=$((_i + 1))
+	done
+}
+storage_json() {
+	json_header
+	_tot=$(df -k / 2>/dev/null | awk 'NR==2 {print $2+0}')
+	_free=$(df -k / 2>/dev/null | awk 'NR==2 {print $4+0}')
+	_svc=$(geoip_service_rules | awk 'NF' | sort -u | tr '\n' ',' | sed 's/,$//')
+	printf '{"total_kb":%s,"free_kb":%s,"geoip_kb":%s,"geosite_kb":%s,"mmdb_kb":%s,"state_kb":%s,"backups_kb":%s,"undo_kb":%s,"z2_kb":%s,"geoip_needed":"%s"}' \
+		"${_tot:-0}" "${_free:-0}" "$(_kb "$GEOIP_DAT")" "$(_kb "$GEOSITE_DAT")" "$(_kb "$GEO_RUN/Country.mmdb")" \
+		"$(_dirkb /etc/nikki-unblock)" "$(_dirkb "$BACKUP_DIR")" "$(_dirkb "$UNDO_DIR")" \
+		"$(_dirkb /opt/zapret2)" "$(json_esc "$_svc")"
+}
+# Drop GeoIP.dat — but only after the rules that need it have a replacement. Order is the whole point:
+# deleting the blob while a GEOIP,<service> rule survives leaves mihomo with a rule it cannot resolve,
+# and in the worst case it refuses the config and the VPN goes down for the sake of 17 MB.
+# So: swap those rules for the preset's published IP ranges, verify, and only then delete.
+geoip_drop_run() {
+	_idx=$(applist_index)
+	case "$_idx" in \[?*\]) ;; *) echo "applist unreachable — refusing to touch rules"; return 1 ;; esac
+	_n=0
+	while :; do
+		_e=$(printf '%s' "$_idx" | jsonfilter -e "@[$_n]" 2>/dev/null); [ -n "$_e" ] || break
+		_lg=$(printf '%s' "$_e" | jsonfilter -e '@.geoip_legacy' 2>/dev/null)
+		if [ -n "$_lg" ] && [ "$(rule_exists GEOIP "$_lg")" = 1 ]; then
+			# this preset is on and still carries its old GEOIP rule — replace it in place
+			_node=$(rule_node_of GEOIP "$_lg"); [ -z "$_node" ] && _node=$(default_rule_node)
+			for _c in $(printf '%s' "$_e" | jsonfilter -e '@.ipcidr[*]' 2>/dev/null); do
+				[ "$(rule_exists IP-CIDR "$_c")" = 1 ] || add_rule IP-CIDR "$_c" "$_node"
+			done
+			delete_rule GEOIP "$_lg"
+			echo "replaced GEOIP,$_lg with published IP ranges"
+		fi
+		_n=$((_n + 1))
+	done
+	uci commit nikki
+	_left=$(geoip_service_rules | awk 'NF' | tr '\n' ' ')
+	[ -n "$_left" ] && { echo "still needed by: $_left — keeping GeoIP.dat"; apply_nikki; return 2; }
+	# nothing needs the service categories now: back to mmdb (countries still resolve) and drop the blob
+	uci -q set nikki.mixin.geoip_format=mmdb; uci -q commit nikki
+	rm -f "$GEOIP_DAT"
+	apply_nikki; sleep 6
+	pgrep -f /usr/bin/mihomo >/dev/null && { echo "GeoIP.dat removed"; return 0; }
+	echo "mihomo did not come back — reverting the format switch"
+	uci -q set nikki.mixin.geoip_format=dat; uci -q commit nikki; apply_nikki
+	return 1
+}
+
 # ---- "why doesn't THIS site open?" ------------------------------------------
 # The system-wide check answers "is the plumbing sound"; this answers the question people actually ask,
 # about one site. It resolves the domain the way mihomo will: against the rules in the LIVE config, in
@@ -2412,6 +2498,8 @@ nodes_json() {
 [ "$1" = "z2update" ] && { z2_run_update "$2" "$3"; exit $?; }
 # detached install runner hook (called from the generated update script; stdout → shared update log)
 [ "$1" = "nikkiinstall" ] && { nikki_install_run; exit $?; }
+# true when some rule still needs the big GeoIP.dat (a service category, not a 2-letter country)
+[ "$1" = "_geoipneeded" ] && { geoip_service_rules | grep -q . ; exit $?; }
 # detached atomic nikki-preset apply (both facets) — status streamed to $PRESET_OP
 [ "$1" = "_presetapply" ] && { preset_apply_run "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9"; exit 0; }
 [ "$1" = "_z2presetapply" ] && { z2_preset_apply_run "$2" "$3" "$4"; exit 0; }
@@ -3294,6 +3382,19 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		json_header; printf '{"ok":true,"kind":"provider","id":"%s","nikki_down":%s}' "$pid" "$nikki_down"; exit 0
 
 		;;
+	geoipdrop)
+		# free the 16.7 MB blob, replacing the rules that needed it first (see geoip_drop_run)
+		undo_push geoipdrop
+		_out=$(geoip_drop_run 2>&1); _rc=$?
+		json_header
+		case "$_rc" in
+			0) printf '{"ok":true,"log":"%s"}' "$(json_esc "$_out")" ;;
+			2) printf '{"ok":false,"error":"still needed","log":"%s"}' "$(json_esc "$_out")" ;;
+			*) printf '{"ok":false,"error":"failed","log":"%s"}' "$(json_esc "$_out")" ;;
+		esac
+		exit 0
+
+		;;
 	domaincheck)
 		domaincheck_json; exit 0
 
@@ -3531,6 +3632,7 @@ devicesall_json() {
 [ "$API" = "z2stratraw" ] && { z2stratraw_json; exit 0; }
 [ "$API" = "ytdiag" ] && { ytdiag_json; exit 0; }
 [ "$API" = "nikkidiag" ] && { nikkidiag_json; exit 0; }
+[ "$API" = "storage" ] && { storage_json; exit 0; }
 [ "$API" = "z2hosts" ] && { z2hosts_json; exit 0; }
 [ "$API" = "z2presets" ] && { z2presets_json; exit 0; }
 [ "$API" = "presets" ] && {
