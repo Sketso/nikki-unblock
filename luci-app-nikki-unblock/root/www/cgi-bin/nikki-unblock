@@ -1055,7 +1055,7 @@ sub_sync() {   # $1=subid $2=url $3=name-prefix
 		onm=$(printf '%s' "$line" | cut -f1); oid=$(printf '%s' "$line" | cut -f2)
 		[ -z "$oid" ] && continue
 		grep -qxF "$onm" "$KEEP" || { rm -f "$NODES_DIR/$oid.yaml" "$NODES_DIR/$oid.src"
-			for L in "$ORDER_FILE" "$OFF_FILE"; do [ -f "$L" ] && [ -n "$onm" ] && { grep -vxF "$onm" "$L" > "$L.t" 2>/dev/null; mv "$L.t" "$L"; }; done; }
+			for L in "$ORDER_FILE" "$OFF_FILE" "$AUTOOFF_FILE"; do [ -f "$L" ] && [ -n "$onm" ] && { grep -vxF "$onm" "$L" > "$L.t" 2>/dev/null; mv "$L.t" "$L"; }; done; }
 	done < "$OWN"
 	rm -f "$LL" "$OWN" "$KEEP"; return 0
 }
@@ -2362,8 +2362,18 @@ geoip_drop_run() {
 # being guesswork.
 # GEOSITE rules can't be evaluated here (they need the .dat blobs), so any that precede the match are
 # reported as an explicit caveat rather than silently ignored.
-domain_rule_match() {   # $1=domain -> "TYPE|VALUE|TARGET|GEOSITE_SEEN_BEFORE"
-	awk -v d="$1" '
+# Which GeoSite categories a domain belongs to, uppercased, space-wrapped for substring testing.
+# nikki ships `geoview`, which reads the same .dat mihomo does — so GEOSITE rules can be evaluated for
+# real instead of being reported as "couldn't check". Without this the answer for the single domain
+# people ask about most (telegram.org, covered by GEOSITE,telegram) was an unhelpful caveat.
+domain_geosite_cats() {   # $1=domain
+	command -v geoview >/dev/null 2>&1 || return 0
+	[ -s "$GEOSITE_DAT" ] || return 0
+	printf ' %s ' "$(geoview -action lookup -type geosite -input "$GEOSITE_DAT" -strict=false \
+		-list all -value "$1" 2>/dev/null | tr '\n' ' ')"
+}
+domain_rule_match() {   # $1=domain $2=" CAT1 CAT2 " -> "TYPE|VALUE|TARGET|GEOSITE_UNRESOLVED"
+	awk -v d="$1" -v cats="$2" '
 		function sfx(dd, vv) { return (dd == vv) || (length(dd) > length(vv) + 1 && substr(dd, length(dd) - length(vv)) == "." vv) }
 		/^rules:/ { f = 1; next }
 		f && /^[^[:space:]-]/ { exit }
@@ -2376,7 +2386,11 @@ domain_rule_match() {   # $1=domain -> "TYPE|VALUE|TARGET|GEOSITE_SEEN_BEFORE"
 			if (t == "DOMAIN"         && d == v)        { print t "|" v "|" tgt "|" geo; found = 1; exit }
 			if (t == "DOMAIN-SUFFIX"  && sfx(d, v))     { print t "|" v "|" tgt "|" geo; found = 1; exit }
 			if (t == "DOMAIN-KEYWORD" && index(d, v))   { print t "|" v "|" tgt "|" geo; found = 1; exit }
-			if (t == "GEOSITE") geo++
+			if (t == "GEOSITE") {
+				# resolved for real when geoview could answer; only count as "unknown" when it could not
+				if (cats != "") { if (index(cats, " " toupper(v) " ")) { print t "|" v "|" tgt "|0"; found = 1; exit } }
+				else geo++
+			}
 		}
 		END { if (!found) print "|||" geo }
 	' "$NIKKI_RUN_CONFIG" 2>/dev/null
@@ -2396,7 +2410,7 @@ domaincheck_json() {
 	json_header
 	_d=$(get_param domain | tr 'A-Z' 'a-z' | sed 's#^https\?://##; s#/.*##; s/[^a-z0-9.*-]//g; s/^\*\.//')
 	case "$_d" in *.*) ;; *) printf '{"ok":false,"error":"bad domain"}'; return ;; esac
-	_r=$(domain_rule_match "$_d")
+	_r=$(domain_rule_match "$_d" "$(domain_geosite_cats "$_d")")
 	_ty=$(printf '%s' "$_r" | cut -d'|' -f1); _va=$(printf '%s' "$_r" | cut -d'|' -f2)
 	_tg=$(printf '%s' "$_r" | cut -d'|' -f3); _geo=$(printf '%s' "$_r" | cut -d'|' -f4)
 	# if it lands on a proxy group, is that group actually able to carry traffic right now?
@@ -3519,7 +3533,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		sid=$(get_param id | sed 's/[^a-z0-9_-]//g')
 		for oid in $(sub_owned_ids "$sid"); do
 			onm=$(node_name_of "$oid"); rm -f "$NODES_DIR/$oid.yaml" "$NODES_DIR/$oid.src"
-			for L in "$ORDER_FILE" "$OFF_FILE"; do [ -f "$L" ] && [ -n "$onm" ] && { grep -vxF "$onm" "$L" > "$L.t" 2>/dev/null; mv "$L.t" "$L"; }; done
+			for L in "$ORDER_FILE" "$OFF_FILE" "$AUTOOFF_FILE"; do [ -f "$L" ] && [ -n "$onm" ] && { grep -vxF "$onm" "$L" > "$L.t" 2>/dev/null; mv "$L.t" "$L"; }; done
 		done
 		rm -f "$SUBS_DIR/$sid.conf"
 		regen_mixin; apply_nikki
