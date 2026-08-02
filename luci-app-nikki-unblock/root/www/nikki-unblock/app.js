@@ -508,7 +508,7 @@ document.querySelectorAll(".tab").forEach(tb => tb.addEventListener("click", () 
   if (tb.dataset.view === "nodes") loadNodes().then(autoPingNodes);
   else if (tb.dataset.view === "domains") presetOp.ensure();   // resume a preset spinner if one is applying
   else if (tb.dataset.view === "mgmt") loadSvc();
-  else if (tb.dataset.view === "common") { loadVersions(); loadUpdCheck(); loadBackup(); loadZ2Backup(); loadAuth(); loadUndo(); }   // Общее: updates + backup + security
+  else if (tb.dataset.view === "common") { loadVersions(); loadUpdCheck(); loadBackup(); loadZ2Backup(); loadAuth(); loadUndo(); loadStorage(); }   // Общее: updates + backup + security + storage
   else if (tb.dataset.view === "devices") loadDevices();
   else if (tb.dataset.view.indexOf("z2") === 0) { loadZapret2(); z2PresetOp.ensure(); }   // any zapret2 sub-view
 }));
@@ -2143,7 +2143,7 @@ async function bootKiosk(){
   if (CAPS.nikki){ loadIps(); loadAutosync(); loadNodes(); loadSvc(); presetOp.ensure(); }
   if (CAPS.zapret2) z2PresetOp.ensure();   // resume a z2-preset spinner if one is applying
   if (CAPS.nikki || CAPS.zapret2) loadDevices();
-  loadVersions(); loadUpdCheck(); loadBackup(); loadZ2Backup(); loadAuth(); loadUndo();   // one availability check per session (cached)
+  loadVersions(); loadUpdCheck(); loadBackup(); loadZ2Backup(); loadAuth(); loadUndo(); loadStorage();   // one availability check per session (cached)
   // resume the log view if an update is already running (started from another tab/session)
   try { const s = await (await fetch("?api=updatestatus")).json(); if (s && s.running) pollUpdate(); } catch(e){}
 })();

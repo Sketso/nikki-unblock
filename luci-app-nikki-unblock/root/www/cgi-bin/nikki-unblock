@@ -667,7 +667,14 @@ update_start() {   # $1=op(self|nikki|geo|z2|all) ; 0=started 1=busy 2=bad op 3=
 	# refuse to start on a nearly-full filesystem: apk downloads via /tmp (tmpfs), geo DBs land in
 	# $GEO_RUN (~40 MB peak). z2 is NOT guarded here — z2_run_update has its own graceful check.
 	case "$_op" in self|nikki|all) fs_has_room /tmp 20480 || return 3 ;; esac
-	case "$_op" in geo|all) fs_has_room "$GEO_RUN" 40960 || return 3 ;; esac
+	# Geo headroom depends on WHAT will be fetched: GeoSite.dat is ~4 MB (8 MB peak while the .new copy
+	# sits beside it), GeoIP.dat another ~17 MB — and that one is only downloaded when a service-category
+	# rule needs it. Demanding the old flat 40 MB after the blob was dropped made "update all" fail on a
+	# router that had plenty of room for what it was actually going to do.
+	case "$_op" in geo|all)
+		if geoip_service_rules | grep -q .; then _geoneed=40960; else _geoneed=10240; fi
+		fs_has_room "$GEO_RUN" "$_geoneed" || return 3 ;;
+	esac
 	: > "$UPD_LOG"
 	{
 		printf '#!/bin/sh\nexec >> "%s" 2>&1\nrc=0\n' "$UPD_LOG"
