@@ -96,7 +96,7 @@
   },
   {
     "id": "social",
-    "name": "Соцсети — все",
+    "name": "Соцсети и авторские платформы",
     "list": true,
     "geosites": [
       "twitter",
@@ -113,10 +113,6 @@
   {
     "id": "messengers",
     "name": "Мессенджеры (WhatsApp · Viber · Signal · Telegram)"
-  },
-  {
-    "id": "social-more",
-    "name": "Соцсети: Patreon · LinkedIn · Pinterest"
   },
   {
     "id": "vendors",

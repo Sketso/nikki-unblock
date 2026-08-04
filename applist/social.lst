@@ -1,5 +1,6 @@
-# Social networks (Meta / X). Most of these are also covered by the GEOSITE meta/twitter buttons;
-# this list exists as an example of a domain-list preset (edit freely).
+# Соцсети и авторские платформы одним списком. Meta и X частично покрыты
+# GEOSITE-категориями этого же пресета — дубль безвреден, зато список работает
+# и без гео-базы, если её удалили ради места.
 instagram.com
 cdninstagram.com
 facebook.com
@@ -8,9 +9,26 @@ fb.com
 fbsbx.com
 m.me
 messenger.com
+threads.net
+threads.com
 x.com
 twitter.com
 twimg.com
 t.co
-threads.net
-threads.com
+patreon.com
+patreonusercontent.com
+linkedin.com
+licdn.com
+lnkd.in
+pinterest.com
+pinterest.ru
+pinimg.com
+pin.it
+tumblr.com
+medium.com
+substack.com
+substackcdn.com
+soundcloud.com
+sndcdn.com
+vimeo.com
+vimeocdn.com
