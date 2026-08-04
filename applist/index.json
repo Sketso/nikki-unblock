@@ -102,10 +102,6 @@
       "twitter",
       "facebook",
       "tiktok"
-    ],
-    "geoips": [
-      "twitter",
-      "facebook"
     ]
   },
   {
@@ -113,5 +109,17 @@
     "name": "Ads → block",
     "geosite": "category-ads-all",
     "node": "REJECT"
+  },
+  {
+    "id": "messengers",
+    "name": "Мессенджеры (WhatsApp · Viber · Signal · Telegram)"
+  },
+  {
+    "id": "social-more",
+    "name": "Соцсети: Patreon · LinkedIn · Pinterest"
+  },
+  {
+    "id": "vendors",
+    "name": "ИТ-вендоры: драйверы и ПО"
   }
 ]

@@ -1,0 +1,22 @@
+# Мессенджеры. Telegram включён и сюда, и в свой отдельный пресет — они не мешают
+# друг другу: правила совпадают по домену и дублируются без последствий.
+telegram.org
+t.me
+telegram.me
+telesco.pe
+telegra.ph
+tdesktop.com
+cdn-telegram.org
+whatsapp.com
+whatsapp.net
+wa.me
+viber.com
+viber.net
+signal.org
+signal.art
+sgnl.link
+whispersystems.org
+signalusercontent.org
+bip.com
+kakao.com
+kakaocdn.net

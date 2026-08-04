@@ -1,0 +1,42 @@
+# Сайты ИТ-вендоров: драйверы, прошивки, документация и загрузки ПО, которые
+# закрыты или ограничены для РФ. Блокировка тут почти всегда по стране на стороне
+# самого вендора, а не DPI — поэтому лечится туннелем, а не десинком.
+dell.com
+hp.com
+hpe.com
+lenovo.com
+intel.com
+amd.com
+nvidia.com
+asus.com
+acer.com
+msi.com
+gigabyte.com
+supermicro.com
+seagate.com
+westerndigital.com
+qualcomm.com
+logitech.com
+ui.com
+synology.com
+qnap.com
+cisco.com
+vmware.com
+broadcom.com
+oracle.com
+ibm.com
+redhat.com
+suse.com
+docker.com
+docker.io
+jetbrains.com
+gitlab.com
+atlassian.com
+adobe.com
+autodesk.com
+unity.com
+unity3d.com
+figma.com
+notion.so
+slack.com
+zoom.us
