@@ -300,6 +300,8 @@ applist_index() {
 	cat "$IDX_CACHE" 2>/dev/null   # offline: a stale index beats none
 }
 
+csv_dedup() { printf '%s' "$1" | tr ',' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ',' | sed 's/,$//'; }
+
 # Shallow read of ONE index.json entry — no "includes" resolution, so it can be called for an
 # included preset without recursing. Sets PR_* only.
 preset_raw_at() {   # $1=array index $2=index.json body
@@ -366,6 +368,11 @@ preset_fields_at() {   # $1=array index $2=index.json body
 		PF_IPS=$(printf '%s,%s' "$PF_IPS" "$PR_IPS" | sed 's/,,*/,/g; s/^,//; s/,$//')
 		[ "$PR_HASLIST" = 1 ] && PF_LISTS=$(printf '%s %s' "$PF_LISTS" "$_inc" | sed 's/^ *//; s/  */ /g')
 	done
+	# A preset may name a category BOTH directly and through an include — that is deliberate, because
+	# only versions from 2.32.0 understand "includes" and older panels still need the plain field to
+	# read (applist is shared by every installed version). Collapse the repeats here so the merged view
+	# stays clean.
+	PF_CAT=$(csv_dedup "$PF_CAT"); PF_GEOIP=$(csv_dedup "$PF_GEOIP"); PF_IPS=$(csv_dedup "$PF_IPS")
 	# kept for callers that only ask "does this preset carry domains at all"
 	PF_HASLIST=0; [ -n "$PF_LISTS" ] && PF_HASLIST=1
 }

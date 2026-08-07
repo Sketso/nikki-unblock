@@ -29,16 +29,19 @@ jobs:
           n=$(grep -cE '^[0-9a-fA-F.:]+/[0-9]+$' /tmp/cidr.txt || true)
           [ "$n" -ge 8 ] || { echo "refusing: only $n CIDRs parsed — bad response"; exit 1; }
           python3 - <<'PY'
-          # Rewrites "ipcidr" ONLY. Ranges Telegram announces but doesn't publish here (95.161.64.0/20 —
-          # AS62041, Amsterdam, serves media) live in "ipcidr_extra", which this job must never touch:
-          # folding them into one array would make every nightly run silently revert them.
+          # "ipcidr_extra" is the hand-kept half: ranges Telegram announces but does not publish here
+          # (95.161.64.0/20 — AS62041, Amsterdam, serves media). This job OWNS "ipcidr" and must never
+          # edit "ipcidr_extra" — writing both into one array would make every nightly run silently
+          # revert them. It does append them to "ipcidr", though: panels older than 2.32.0 read only
+          # that field, and applist is shared by every installed version. Newer panels merge and
+          # de-duplicate, so the repetition costs nothing.
           import json, io
           cidr = [l.strip() for l in open('/tmp/cidr.txt') if l.strip() and not l.startswith('#')]
           p = 'applist/index.json'
           d = json.load(io.open(p, encoding='utf-8'))
           for e in d:
               if e.get('id') == 'telegram':
-                  e['ipcidr'] = cidr
+                  e['ipcidr'] = cidr + [x for x in e.get('ipcidr_extra', []) if x not in cidr]
           io.open(p, 'w', encoding='utf-8', newline='\n').write(json.dumps(d, ensure_ascii=False, indent=2) + "\n")
           PY
 
