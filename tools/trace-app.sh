@@ -87,12 +87,19 @@ wait 2>/dev/null
 # Первая четвёрка — оригинал, вторая — обратное направление. При REDIRECT в mihomo обратный src
 # становится IP роутера, а sport — redir/tproxy-портом; если там настоящий адрес назначения —
 # поток ушёл В ИНТЕРНЕТ МИМО mihomo.
-awk -v client="$CLIENT" -v router="$ROUTER_IP" -v lannet="$LANNET" -v redir="$REDIR" -v tproxy="$TPROXY" '
+RESERVED=$(uci -q get nikki.proxy.reserved_ip 2>/dev/null | tr '\n' ' ')
+awk -v client="$CLIENT" -v router="$ROUTER_IP" -v lannet="$LANNET" -v redir="$REDIR" -v tproxy="$TPROXY" \
+    -v reserved="$RESERVED" '
 function ip2n(a,  p) { split(a, p, "."); return ((p[1]*256+p[2])*256+p[3])*256+p[4] }
 function innet(a, cidr,  q, n, b, m) {
 	if (a !~ /^[0-9.]+$/ || cidr == "") return 0
-	split(cidr, q, "/"); n = ip2n(a); b = ip2n(q[1]); m = q[2]
+	split(cidr, q, "/"); n = ip2n(a); b = ip2n(q[1]); m = (q[2] == "" ? 32 : q[2])   # bare IP = /32
 	return int(n / 2^(32-m)) == int(b / 2^(32-m))
+}
+function isreserved(a,  i, r) {
+	# nikki skips these destinations on purpose (VPN node IPs live here) — never call that a leak
+	for (i = 1; i <= NR_RES; i++) if (innet(a, RES[i])) return 1
+	return 0
 }
 function tg(a,  n, i, base, bits) {
 	if (a !~ /^[0-9.]+$/) return 0
@@ -104,6 +111,7 @@ function tg(a,  n, i, base, bits) {
 	return 0
 }
 BEGIN {
+	NR_RES = split(reserved, RES, " ")
 	# официальный https://core.telegram.org/resources/cidr.txt (только IPv4)
 	split("91.108.56.0/22 91.108.4.0/22 91.108.8.0/22 91.108.16.0/22 91.108.12.0/22 " \
 	      "149.154.160.0/20 91.105.192.0/23 91.108.20.0/22 185.76.151.0/24 95.161.64.0/20", L, " ")
@@ -112,6 +120,7 @@ BEGIN {
 {
 	proto = $3
 	if (proto != "tcp" && proto != "udp") next   # nikki proxies TCP/UDP only; ICMP has no ports to align
+	state = (proto == "tcp" ? $6 : "")
 	ns = 0; nd = 0; np = 0; nq = 0; npk = 0; nby = 0
 	osrc = odst = osp = odp = rsrc = rsp = ""; pk = 0; by = 0; rby = 0
 	for (f = 1; f <= NF; f++) {
@@ -137,11 +146,14 @@ BEGIN {
 	if (rby + 0 > rbyts[key]) rbyts[key] = rby + 0
 	if (!(key in bmin)) { bmin[key] = by + 0; rmin[key] = rby + 0 }
 	seen[key]++
+	if (state == "SYN_SENT") syn[key]++
 	if (tg(odst)) istg[key] = 1
+	if (isreserved(odst)) isres[key] = 1
 }
 END {
-	for (k in via) printf "%s\t%s\t%d\t%d\t%d\t%d\t%s\t%d\t%d\n", via[k], k, pkts[k], byts[k], rbyts[k], \
-		seen[k], (k in istg ? "TELEGRAM" : "-"), byts[k] - bmin[k], rbyts[k] - rmin[k]
+	for (k in via) printf "%s\t%s\t%d\t%d\t%d\t%d\t%s\t%d\t%d\t%d\t%d\n", via[k], k, pkts[k], byts[k], rbyts[k], \
+		seen[k], (k in istg ? "TELEGRAM" : "-"), byts[k] - bmin[k], rbyts[k] - rmin[k], syn[k] + 0, \
+		(k in isres ? 1 : 0)
 }
 ' "$W/ct.raw" | sort > "$W/flows.tsv"
 
@@ -171,8 +183,8 @@ if [ "$esc" -gt 0 ]; then
 	echo "     proto  источник         назначение              порт   пакетов  отпр.Б    принято   метка      почему"
 	awk -F'\t' '$1=="ESCAPED" {
 		split($2, a, "|")
-		printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a[1], a[2], a[3], a[4], $3, $4, $7, $5
-	}' "$W/flows.tsv" | sort -t"$(printf '\t')" -k2 | head -60 | while IFS="$(printf '\t')" read -r pr src dst dp pk by tag rb; do
+		printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a[1], a[2], a[3], a[4], $3, $4, $7, $5, $11
+	}' "$W/flows.tsv" | sort -t"$(printf '\t')" -k2 | head -60 | while IFS="$(printf '\t')" read -r pr src dst dp pk by tag rb res; do
 		why="соединение старше правил (напр. установлено в окно перезагрузки nikki)"
 		case " $EXC " in *" $src "*) why="устройство исключено из проксирования" ;; esac
 		if [ "$pr" = udp ]; then
@@ -183,6 +195,7 @@ if [ "$esc" -gt 0 ]; then
 		else
 			why="$pr не проксируется"
 		fi
+		[ "$res" = 1 ] && why="адрес в reserved_ip — перехват для него отключён намеренно"
 		[ "$rb" = 0 ] && [ "$by" -gt 0 ] 2>/dev/null && tag="${tag}!"
 		printf "     %-6s %-16s %-23s %-6s %-8s %-9s %-9s %-10s %s\n" "$pr" "$src" "$dst" "$dp" "$pk" "$by" "$rb" "$tag" "$why"
 	done
@@ -191,6 +204,25 @@ if [ "$esc" -gt 0 ]; then
 	echo "  ^ строки с меткой TELEGRAM — это и есть «неотловленные источники»:"
 	echo "    прямой доступ к DC Telegram из RU-сетей режется, поэтому такое соединение просто виснет,"
 	echo "    и в панели/логах mihomo этого НЕ ВИДНО — трафик до него не доходил."
+fi
+
+# Третий класс, и именно он даёт «висит минуту, потом резко всё заработало»: соединение НЕ УСТАНАВЛИВАЕТСЯ.
+# SYN уходит, ответа нет, ядро молча ретранслирует его десятками секунд — приложение всё это время ждёт.
+# Замер идёт раз в 2 с, так что два и более попадания в SYN_SENT = висело минимум 4 с, чего при живом
+# адресате не бывает никогда.
+syns=$(awk -F'\t' '$10 >= 2' "$W/flows.tsv" | wc -l)
+if [ "$syns" -gt 0 ]; then
+	echo
+	echo "--- НЕ СМОГЛИ УСТАНОВИТЬ СОЕДИНЕНИЕ (висели в SYN_SENT) ---"
+	echo "     путь      назначение              порт   секунд в SYN_SENT  метка"
+	awk -F'\t' '$10 >= 2 {
+		split($2, a, "|")
+		printf "     %-9s %-23s %-6s %-18s %s\n", ($1=="tunnel" ? "в тоннель" : "напрямую"), a[3], a[4], $10 * 2, $7
+	}' "$W/flows.tsv" | sort -k3 | head -25
+	echo
+	echo "  ^ вот на этом приложение и висит. Адресат не отвечает на SYN: либо его режет DPI/провайдер,"
+	echo "    либо это наш дроп. Через несколько таких таймаутов клиент откатывается на другой адрес —"
+	echo "    отсюда и «сначала минуту ничего, потом сразу всё»."
 fi
 
 # Второй класс отказа: поток В ТОННЕЛЕ, но ответа нет. Именно так выглядит «картинка не грузится»:
