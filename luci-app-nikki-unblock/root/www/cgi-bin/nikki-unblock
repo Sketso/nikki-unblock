@@ -2136,6 +2136,36 @@ ipv6_set() {   # $1 = 1(disable) | 0(enable)
 	/etc/init.d/network reload >/dev/null 2>&1
 	/etc/init.d/odhcpd restart >/dev/null 2>&1
 }
+# ---- intercept every TCP port ----------------------------------------------
+# nikki only hands mihomo the destination ports listed in proxy_tcp_dport, and a common setup narrows
+# that to 80/443. Anything a service does on another port then leaves the router WITHOUT ever
+# reaching mihomo — invisible in its logs and in this panel, because the traffic never got there.
+# Real case that cost an evening: Telegram falls back to its MTProto transport on TCP 5222, that SYN
+# went out unproxied, and since RU networks blackhole Telegram's DCs it got no answer at all — media
+# simply hung while everything on 443 worked. nikki's own default is the whole range; this restores it.
+# Cost, measured on a NC-1812 with 50 MB transfers: none. Bypassing mihomo gave 27.6/30.1 MB/s,
+# through it 29.7/26.0 MB/s, and 10 short requests took 220 ms vs 219 ms — the ceiling is the link.
+# What it does NOT change: reserved_ip and excluded devices still skip mihomo whatever the port.
+PORTS_NARROW="80 443"
+allports_on() { [ "$(uci -q get nikki.proxy.proxy_tcp_dport 2>/dev/null)" = "0-65535" ]; }
+allports_set() {   # $1 = on(0/1)
+	uci -q get nikki-unblock.config >/dev/null 2>&1 || uci set nikki-unblock.config=config
+	if [ "$1" = 1 ]; then
+		allports_on && return 0
+		# remember what was there so turning this off restores the user's own list, not our guess
+		uci set nikki-unblock.config.ports_prev="$(uci -q get nikki.proxy.proxy_tcp_dport 2>/dev/null)"
+		uci set nikki.proxy.proxy_tcp_dport="0-65535"
+	else
+		allports_on || return 0
+		_pp=$(uci -q get nikki-unblock.config.ports_prev 2>/dev/null)
+		[ -z "$_pp" ] && _pp="$PORTS_NARROW"
+		uci set nikki.proxy.proxy_tcp_dport="$_pp"
+		uci -q delete nikki-unblock.config.ports_prev
+	fi
+	uci commit nikki; uci commit nikki-unblock
+	/etc/init.d/nikki reload >/dev/null 2>&1
+}
+
 # ---- Block-QUIC (zapret2 companion) -----------------------------------------
 # Drop forwarded UDP/443 so browsers fall back to TCP, where the zapret2 desync works.
 # Same include pattern as the MSS clamp: fw4 wraps /etc/nftables.d snippets into table inet fw4.
@@ -2180,10 +2210,12 @@ purge_run() {   # $1 = "zapret2" to also remove /opt/zapret2 (nikki is never tou
 
 	# 1) system toggles first — each already carries the correct nft/fw4 teardown, so reuse them instead
 	#    of re-deriving the chain names (mss_clamp_all / nipret_block_quic) and the fw4-reload dance.
-	_plog "reverting IPv6 / MSS-clamp / Block-QUIC"
+	_plog "reverting IPv6 / MSS-clamp / Block-QUIC / port interception"
 	ipv6_set 0 2>/dev/null
 	mssclamp_set 0 2>/dev/null
 	quicblock_set 0 2>/dev/null
+	# proxy_tcp_dport lives in NIKKI's config, so leaving it widened would outlive our removal
+	allports_set 0 2>/dev/null
 
 	# 2) zapret2 per-client desync: our hook file + the nft table that carries the DESYNC_MARK. This is
 	#    OUR companion to zapret2, not zapret2's own rules — remove it whether or not zapret2 stays.
@@ -3794,6 +3826,12 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		mssclamp_set "$on"
 		json_header; printf '{"ok":true,"enabled":%s}' "$([ "$on" = 1 ] && echo true || echo false)"; exit 0
 		;;
+	allports)
+		on=$(get_param on | sed 's/[^01]//g'); [ -z "$on" ] && on=0
+		allports_set "$on"
+		ap=0; allports_on && ap=1
+		json_header; printf '{"ok":true,"allports":%d}' "$ap"; exit 0
+		;;
 	esac
 
 	json_header; printf '{"ok":false,"error":"unknown action"}'; exit 0
@@ -3884,14 +3922,15 @@ devicesall_json() {
 	[ "$running" = 1 ] && { curl -s -m 5 -H "Authorization: Bearer $(mihomo_secret)" \
 		"$MIHOMO_API/proxies/$(urlenc_all "$BASE_GROUP")" 2>/dev/null | grep -q '"name"' || base_ok=0; }
 	mss=0; mssclamp_on && mss=1
+	ap=0; allports_on && ap=1
 	# "Unconfigured" is a distinct state from "broken": a freshly installed nikki is disabled and has no
 	# profile, so mihomo never starts and NOTHING routed through it can work. Report it separately so the
 	# panel can offer the one-click fix instead of leaving people to guess (this cost a user an afternoon).
 	svc_en=$(uci -q get nikki.config.enabled 2>/dev/null)
 	prof_ok=0; nikki_profile_ok && prof_ok=1
 	unconf=0; [ "$running" = 0 ] && { [ "$prof_ok" = 0 ] || [ "$svc_en" = 0 ]; } && unconf=1
-	printf '{"running":%d,"boot":%d,"base_group":"%s","base_ok":%d,"mss":%d,"profile_ok":%d,"enabled":%d,"unconfigured":%d}' \
-		"$running" "$booten" "$BASE_GROUP" "$base_ok" "$mss" "$prof_ok" "$([ "$svc_en" = 0 ] && echo 0 || echo 1)" "$unconf"; exit 0
+	printf '{"running":%d,"boot":%d,"base_group":"%s","base_ok":%d,"mss":%d,"allports":%d,"profile_ok":%d,"enabled":%d,"unconfigured":%d}' \
+		"$running" "$booten" "$BASE_GROUP" "$base_ok" "$mss" "$ap" "$prof_ok" "$([ "$svc_en" = 0 ] && echo 0 || echo 1)" "$unconf"; exit 0
 }
 
 # ---- HTML page -------------------------------------------------------------

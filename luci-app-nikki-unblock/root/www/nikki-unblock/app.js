@@ -192,7 +192,7 @@ const I18N = {
     svcReload: "Перечитать конфиг", svcAutostart: "Автозапуск вкл/выкл",
     svcRunning: "nikki работает", svcStopped: "nikki остановлен",
     svcBoot: "Автозапуск при загрузке", svcOn: "вкл", svcOff: "выкл",
-    mssLabel: "Фикс зависаний загрузок (MSS-clamp)", mssHint: "Включи, если через VPN большие загрузки или сайты зависают / грузятся наполовину, а мелочь при этом работает. Чинит размер сетевых пакетов под туннель. Оставлять включённым безопасно.",
+    apLabel: "Перехватывать все порты", apHint: "Без этого в туннель попадает только трафик на портах 80 и 443, а всё остальное уходит мимо — и этого не видно ни в панели, ни в логах. Так ломались медиа в Telegram: он уходит на порт 5222, ответа не получает, картинка висит. Замеры на роутере разницы в скорости и задержке не показали. Переключение перезапускает nikki — сеть моргнёт на несколько секунд.", mssLabel: "Фикс зависаний загрузок (MSS-clamp)", mssHint: "Включи, если через VPN большие загрузки или сайты зависают / грузятся наполовину, а мелочь при этом работает. Чинит размер сетевых пакетов под туннель. Оставлять включённым безопасно.",
     bkGroupTitle: "Бэкап настроек",
     bkTitle: "Nikki (VPN)", bkDownload: "Создать и скачать", bkRestore: "Восстановить из файла", bkAuto: "Авто-бэкап (день/неделя/месяц)",
     bkHint: "Сохраняет правила, ноды, подписки и mixin nikki (без гео-баз, ~КБ). Восстановление заменяет текущие настройки; перед этим делается снимок для отката.",
@@ -423,7 +423,7 @@ const I18N = {
     svcReload: "Reload config", svcAutostart: "Toggle autostart",
     svcRunning: "nikki running", svcStopped: "nikki stopped",
     svcBoot: "Start on boot", svcOn: "on", svcOff: "off",
-    mssLabel: "Fix download stalls (MSS clamp)", mssHint: "Turn on if large downloads or sites stall / load only halfway through the VPN while small stuff works fine. Fixes network packet size for the tunnel. Safe to leave on.",
+    apLabel: "Intercept every port", apHint: "Without this only ports 80 and 443 reach the tunnel and everything else leaves unproxied — invisible in this panel and in the logs. That is how Telegram media broke: it falls back to port 5222, gets no answer, and the picture just hangs. Measured on the router, it costs no speed and no latency. Toggling restarts nikki, so the network blinks for a few seconds.", mssLabel: "Fix download stalls (MSS clamp)", mssHint: "Turn on if large downloads or sites stall / load only halfway through the VPN while small stuff works fine. Fixes network packet size for the tunnel. Safe to leave on.",
     bkGroupTitle: "Settings backup",
     bkTitle: "Nikki (VPN)", bkDownload: "Create & download", bkRestore: "Restore from file", bkAuto: "Auto-backup (daily/weekly/monthly)",
     bkHint: "Saves nikki's rules, nodes, subscriptions and mixin (no geo databases, ~KB). Restore replaces current settings; a snapshot is taken first for rollback.",
@@ -1815,6 +1815,7 @@ function renderSvc(s){
   $("#svcRun").checked = run;
   $("#svcBootChk").checked = s.boot === 1;
   $("#mssChk").checked = s.mss === 1;
+  $("#apChk").checked = s.allports === 1;
 }
 let LASTSVC = null;
 function renderGuard(s){
@@ -2087,6 +2088,15 @@ $("#mssChk").addEventListener("change", async e => {
   const res = await api("mssclamp", { on: e.currentTarget.checked ? 1 : 0 });
   e.currentTarget.disabled = false;
   setMsg($("#svcMsg"), res && res.ok ? t("done") : t("errP"), !res || res.ok);
+});
+// Widening the port range restarts nikki, so the whole LAN blinks for a few seconds — the toggle
+// reloads the status afterwards instead of trusting its own checkbox.
+$("#apChk").addEventListener("change", async e => {
+  e.currentTarget.disabled = true; setMsg($("#svcMsg"), t("applying"));
+  const res = await api("allports", { on: e.currentTarget.checked ? 1 : 0 });
+  e.currentTarget.disabled = false;
+  setMsg($("#svcMsg"), res && res.ok ? t("done") : t("errP"), !res || res.ok);
+  loadSvc();
 });
 $("#svcRestart").addEventListener("click", e => svcDo("restart", e.currentTarget));
 $("#svcReload").addEventListener("click", e => svcDo("reload", e.currentTarget));
