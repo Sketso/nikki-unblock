@@ -46,6 +46,19 @@ ROUTER_IP=$(uci -q get network.lan.ipaddr); [ -z "$ROUTER_IP" ] && ROUTER_IP=$(i
 LANNET=$(ip -4 route show dev br-lan proto kernel 2>/dev/null | awk '{print $1; exit}')
 [ -z "$LANNET" ] && LANNET="${ROUTER_IP%.*}.0/24"
 
+# nikki's port list is space-separated and may contain ranges ("0-65535", "80 443"), so a plain
+# substring test would call every port "not intercepted" the moment a range is used.
+port_covered() {   # $1=port $2=list — 0(true) if the port falls inside the list
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	for _r in $2; do
+		case "$_r" in
+			*-*) [ "$1" -ge "${_r%%-*}" ] && [ "$1" -le "${_r##*-}" ] && return 0 ;;
+			*)   [ "$1" = "$_r" ] && return 0 ;;
+		esac
+	done
+	return 1
+}
+
 W=/tmp/trace-app.$$
 mkdir -p "$W" || exit 1
 trap 'rm -rf "$W"' EXIT INT TERM
@@ -155,12 +168,12 @@ if [ "$esc" -gt 0 ]; then
 		split($2, a, "|")
 		printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a[1], a[2], a[3], a[4], $3, $4, $7
 	}' "$W/flows.tsv" | sort -t"$(printf '\t')" -k2 | head -60 | while IFS="$(printf '\t')" read -r pr src dst dp pk by tag; do
-		why="соединение старше правил / другой интерфейс"
+		why="соединение старше правил (напр. установлено в окно перезагрузки nikki)"
 		case " $EXC " in *" $src "*) why="устройство исключено из проксирования" ;; esac
 		if [ "$pr" = udp ]; then
-			case " $UPORTS " in *" $dp "*) : ;; *) why="UDP-порт вне перехвата ($UPORTS)" ;; esac
+			port_covered "$dp" "$UPORTS" || why="UDP-порт вне перехвата ($UPORTS)"
 		elif [ "$pr" = tcp ]; then
-			case " $PORTS " in *" $dp "*) : ;; *) why="TCP-порт вне перехвата ($PORTS)" ;; esac
+			port_covered "$dp" "$PORTS" || why="TCP-порт вне перехвата ($PORTS)"
 		else
 			why="$pr не проксируется"
 		fi
