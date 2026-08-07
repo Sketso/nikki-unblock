@@ -313,7 +313,13 @@ preset_raw_at() {   # $1=array index $2=index.json body
 	_ga=$(printf '%s' "$2" | jsonfilter -e "@[$1].geoips[*]" 2>/dev/null | tr '\n' ',')
 	PR_GEOIP=$(printf '%s,%s' "$_g" "$_ga" | sed 's/,,*/,/g; s/^,//; s/,$//')
 	PR_NODE=$(printf '%s' "$2" | jsonfilter -e "@[$1].node" 2>/dev/null)
-	PR_IPS=$(printf '%s' "$2" | jsonfilter -e "@[$1].ipcidr[*]" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+	# "ipcidr" is rewritten wholesale by the telegram-cidr workflow from Telegram's published list;
+	# "ipcidr_extra" is the hand-kept half it must never touch. Ranges Telegram announces but does NOT
+	# publish live there — 95.161.64.0/20 (AS62041, Amsterdam) serves media and was silently missing.
+	# Keeping them in one array would let the next nightly refresh quietly revert the fix.
+	_ip=$(printf '%s' "$2" | jsonfilter -e "@[$1].ipcidr[*]" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+	_ipx=$(printf '%s' "$2" | jsonfilter -e "@[$1].ipcidr_extra[*]" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+	PR_IPS=$(printf '%s,%s' "$_ip" "$_ipx" | sed 's/,,*/,/g; s/^,//; s/,$//')
 	PR_INC=$(printf '%s' "$2" | jsonfilter -e "@[$1].includes[*]" 2>/dev/null | tr '\n' ' ')
 	# hybrid rule: the domain list applies when there is no geosite, or when the entry sets "list": true
 	_wl=$(printf '%s' "$2" | jsonfilter -e "@[$1].list" 2>/dev/null)
@@ -2475,7 +2481,8 @@ geoip_drop_run() {
 		if [ -n "$_lg" ] && [ "$(rule_exists GEOIP "$_lg")" = 1 ]; then
 			# this preset is on and still carries its old GEOIP rule — replace it in place
 			_node=$(rule_node_of GEOIP "$_lg"); [ -z "$_node" ] && _node=$(default_rule_node)
-			for _c in $(printf '%s' "$_e" | jsonfilter -e '@.ipcidr[*]' 2>/dev/null); do
+			for _c in $(printf '%s' "$_e" | jsonfilter -e '@.ipcidr[*]' 2>/dev/null
+			            printf '%s' "$_e" | jsonfilter -e '@.ipcidr_extra[*]' 2>/dev/null); do
 				[ "$(rule_exists IP-CIDR "$_c")" = 1 ] || add_rule IP-CIDR "$_c" "$_node"
 			done
 			delete_rule GEOIP "$_lg"
