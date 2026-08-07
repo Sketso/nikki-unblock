@@ -27,7 +27,20 @@
   {
     "id": "youtube",
     "name": "YouTube",
-    "geosite": "youtube"
+    "geosite": "youtube",
+    "note": {
+      "ru": "Весь YouTube целиком в туннель, включая видео — это заметный трафик на узел. Если видео уже работает через обход DPI и мешает только приложение на смартфоне, возьмите пресет «YouTube: приложение через VPN, видео напрямую».",
+      "en": "All of YouTube through the tunnel, video included — that is real traffic on the node. If video already works via DPI bypass and only the phone app is broken, take the \"YouTube: app via VPN, video direct\" preset instead."
+    }
+  },
+  {
+    "id": "youtube-app",
+    "name": "YouTube: приложение через VPN, видео напрямую",
+    "list": true,
+    "note": {
+      "ru": "Точечное лечение случая «обход DPI работает, но не везде»: на телевизоре и в браузере YouTube идёт, а приложение на смартфоне висит на запуске по минуте и дольше. Причина в том, что весь свой API приложение держит на youtubei.googleapis.com, а этот хост режется по SNI, и десинк на нём не помогает. Пресет уводит в туннель ТОЛЬКО его и подсказки поиска — видео, превью и googlevideo продолжают идти напрямую. Нагрузка на VPN почти нулевая. Включайте вместо полного пресета YouTube, если видео и так работает.",
+      "en": "A targeted fix for \"DPI bypass works, but not everywhere\": YouTube is fine on a TV and in the browser, yet the phone app hangs on startup for a minute or more. The app keeps its whole API on youtubei.googleapis.com, that host is blocked by SNI, and desync does not save it. This preset tunnels ONLY that host and search suggestions — video, thumbnails and googlevideo keep going direct. Almost no load on the VPN. Use it instead of the full YouTube preset when video already works."
+    }
   },
   {
     "id": "google",
@@ -42,7 +55,11 @@
   },
   {
     "id": "discord-web",
-    "name": "Discord: сайт через VPN, голос напрямую"
+    "name": "Discord: сайт через VPN, голос напрямую",
+    "note": {
+      "ru": "Сайт и текстовые чаты идут через VPN, а голос — напрямую, чтобы не ловить задержку и не грузить узел. Тот же приём, что и у пресета для приложения YouTube: в туннель уходит только то, что иначе не работает. Если голос при этом молчит, попробуйте полный пресет Discord.",
+      "en": "The site and text chats go through the VPN while voice stays direct, so calls keep their latency and the node stays free. Same idea as the YouTube app preset: only what is actually broken goes into the tunnel. If voice stays silent, try the full Discord preset instead."
+    }
   },
   {
     "id": "twitch",

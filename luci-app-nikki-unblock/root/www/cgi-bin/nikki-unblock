@@ -321,6 +321,11 @@ preset_raw_at() {   # $1=array index $2=index.json body
 	_ipx=$(printf '%s' "$2" | jsonfilter -e "@[$1].ipcidr_extra[*]" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
 	PR_IPS=$(printf '%s,%s' "$_ip" "$_ipx" | sed 's/,,*/,/g; s/^,//; s/,$//')
 	PR_INC=$(printf '%s' "$2" | jsonfilter -e "@[$1].includes[*]" 2>/dev/null | tr '\n' ' ')
+	# "note": {"ru": …, "en": …} — the human explanation of WHEN to use this preset. It lives in the
+	# manifest, not in app.js, so it can be rewritten without cutting a release: applist changes reach
+	# routers through Pages on their own. Rendered escaped — this is remote content.
+	PR_NOTE_RU=$(printf '%s' "$2" | jsonfilter -e "@[$1].note.ru" 2>/dev/null)
+	PR_NOTE_EN=$(printf '%s' "$2" | jsonfilter -e "@[$1].note.en" 2>/dev/null)
 	# hybrid rule: the domain list applies when there is no geosite, or when the entry sets "list": true
 	_wl=$(printf '%s' "$2" | jsonfilter -e "@[$1].list" 2>/dev/null)
 	PR_HASLIST=0; { [ -z "$PR_CAT" ] || [ -n "$_wl" ]; } && PR_HASLIST=1
@@ -347,6 +352,8 @@ preset_index_of() {   # $1=id $2=index.json body — prints the array index, emp
 preset_fields_at() {   # $1=array index $2=index.json body
 	preset_raw_at "$1" "$2"
 	PF_NAME="$PR_NAME"; PF_CAT="$PR_CAT"; PF_GEOIP="$PR_GEOIP"; PF_IPS="$PR_IPS"; PF_INC="$PR_INC"
+	# the note describes THIS preset, so an included preset's note is deliberately not merged in
+	PF_NOTE_RU="$PR_NOTE_RU"; PF_NOTE_EN="$PR_NOTE_EN"
 	PF_NODE="$PR_NODE"; [ -z "$PF_NODE" ] && PF_NODE=$(default_rule_node)
 	# ids whose .lst must be synced: our own (when we have a list) plus every included one that has one
 	PF_LISTS=""
@@ -393,8 +400,9 @@ presets_json() {
 		inc=$(printf '%s' "$PF_INC" | tr ' ' '\n' | awk 'NF { printf "%s\"%s\"", sep, $0; sep="," }')
 		lst=$(printf '%s' "$PF_LISTS" | tr ' ' '\n' | awk 'NF { printf "%s\"%s\"", sep, $0; sep="," }')
 		[ "$first" = 1 ] || printf ','; first=0
-		printf '{"id":"%s","name":"%s","geosite":"%s","geoip":"%s","node":"%s","ipcidr":[%s],"domains":[%s],"includes":[%s],"lists":[%s]}' \
-			"$id" "$PF_NAME" "$PF_CAT" "$PF_GEOIP" "$PF_NODE" "$ips" "$dom" "$inc" "$lst"
+		printf '{"id":"%s","name":"%s","geosite":"%s","geoip":"%s","node":"%s","ipcidr":[%s],"domains":[%s],"includes":[%s],"lists":[%s],"note_ru":"%s","note_en":"%s"}' \
+			"$id" "$PF_NAME" "$PF_CAT" "$PF_GEOIP" "$PF_NODE" "$ips" "$dom" "$inc" "$lst" \
+			"$(json_esc "$PF_NOTE_RU")" "$(json_esc "$PF_NOTE_EN")"
 		i=$((i + 1))
 	done
 	printf ']'

@@ -214,6 +214,8 @@
   .modal-body { padding: .8rem 1rem 1rem; overflow: auto; }
   .pmrow { font-size: .9rem; margin-bottom: .3rem; }
   .pmnote { font-size: .82rem; opacity: .7; margin: .3rem 0 .5rem; }
+  /* the "why this preset" note leads the dialog, so it reads as guidance rather than a footnote */
+  .pmwhy { opacity: .9; margin: 0 0 .7rem; padding-left: .55rem; border-left: 2px solid #3b82f6; }
   .pmsub { font-size: .8rem; opacity: .7; margin: .6rem 0 .2rem; }
   .exopt { display: block; width: 100%; text-align: left; margin: .3rem 0; }
   .exopt small { opacity: .7; }

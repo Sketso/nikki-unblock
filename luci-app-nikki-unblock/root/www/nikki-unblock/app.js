@@ -780,6 +780,10 @@ function showPresetInfo(p){
   $("#pmTitle").textContent = p.name;
   const tgt = escH(p.node || "VPN");
   let h = "";
+  // The manifest's own explanation of when this preset is the right one, first thing in the dialog —
+  // the lists below say WHAT is inside, this says WHY. Escaped: it arrives over the network.
+  const note = (LANG === "en" ? p.note_en : p.note_ru) || p.note_ru || p.note_en;
+  if (note) h += '<div class="pmnote pmwhy">' + escH(note) + '</div>';
   // a folded-in preset is named up front: the rest of the dialog already shows its merged contents,
   // so without this line it looks like the entries were copied into this preset by hand
   const inc = p.includes || [];
