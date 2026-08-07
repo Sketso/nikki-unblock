@@ -110,7 +110,9 @@ BEGIN {
 	for (k in L) { split(L[k], q, "/"); NC++; CB[NC] = ip2n(q[1]); CM[NC] = q[2] }
 }
 {
-	proto = $3; ns = 0; nd = 0; np = 0; nq = 0; npk = 0; nby = 0
+	proto = $3
+	if (proto != "tcp" && proto != "udp") next   # nikki proxies TCP/UDP only; ICMP has no ports to align
+	ns = 0; nd = 0; np = 0; nq = 0; npk = 0; nby = 0
 	osrc = odst = osp = odp = rsrc = rsp = ""; pk = 0; by = 0; rby = 0
 	for (f = 1; f <= NF; f++) {
 		if ($f ~ /^src=/)   { ns++; if (ns == 1) osrc = substr($f, 5); else rsrc = substr($f, 5) }
@@ -163,23 +165,29 @@ if [ "$esc" -gt 0 ]; then
 	done
 	echo
 	echo "--- УШЛИ МИМО ТОННЕЛЯ (nftables их не перехватил, mihomo их не видел) ---"
-	echo "     proto  источник         назначение              порт   пакетов  байт      метка      почему"
+	# QUIC is dropped SILENTLY by the panel's block toggle, so those flows look identical to any other
+	# unproxied UDP — name them, or the report buries the cause among ordinary port misses
+	QB=0; nft list chain inet fw4 nipret_block_quic >/dev/null 2>&1 && QB=1
+	echo "     proto  источник         назначение              порт   пакетов  отпр.Б    принято   метка      почему"
 	awk -F'\t' '$1=="ESCAPED" {
 		split($2, a, "|")
-		printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a[1], a[2], a[3], a[4], $3, $4, $7
-	}' "$W/flows.tsv" | sort -t"$(printf '\t')" -k2 | head -60 | while IFS="$(printf '\t')" read -r pr src dst dp pk by tag; do
+		printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a[1], a[2], a[3], a[4], $3, $4, $7, $5
+	}' "$W/flows.tsv" | sort -t"$(printf '\t')" -k2 | head -60 | while IFS="$(printf '\t')" read -r pr src dst dp pk by tag rb; do
 		why="соединение старше правил (напр. установлено в окно перезагрузки nikki)"
 		case " $EXC " in *" $src "*) why="устройство исключено из проксирования" ;; esac
 		if [ "$pr" = udp ]; then
 			port_covered "$dp" "$UPORTS" || why="UDP-порт вне перехвата ($UPORTS)"
+			[ "$dp" = 443 ] && [ "$QB" = 1 ] && why="QUIC: пакеты ДРОПАЕТ тумблер «Блокировать QUIC»"
 		elif [ "$pr" = tcp ]; then
 			port_covered "$dp" "$PORTS" || why="TCP-порт вне перехвата ($PORTS)"
 		else
 			why="$pr не проксируется"
 		fi
-		printf "     %-6s %-16s %-23s %-6s %-8s %-9s %-10s %s\n" "$pr" "$src" "$dst" "$dp" "$pk" "$by" "$tag" "$why"
+		[ "$rb" = 0 ] && [ "$by" -gt 0 ] 2>/dev/null && tag="${tag}!"
+		printf "     %-6s %-16s %-23s %-6s %-8s %-9s %-9s %-10s %s\n" "$pr" "$src" "$dst" "$dp" "$pk" "$by" "$rb" "$tag" "$why"
 	done
 	echo
+	echo "  ^ «!» в метке = отправлено что-то, принято НОЛЬ: адресат не ответил вообще."
 	echo "  ^ строки с меткой TELEGRAM — это и есть «неотловленные источники»:"
 	echo "    прямой доступ к DC Telegram из RU-сетей режется, поэтому такое соединение просто виснет,"
 	echo "    и в панели/логах mihomo этого НЕ ВИДНО — трафик до него не доходил."
