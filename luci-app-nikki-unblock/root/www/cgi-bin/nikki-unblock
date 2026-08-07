@@ -354,6 +354,9 @@ preset_index_of() {   # $1=id $2=index.json body — prints the array index, emp
 preset_fields_at() {   # $1=array index $2=index.json body
 	preset_raw_at "$1" "$2"
 	PF_NAME="$PR_NAME"; PF_CAT="$PR_CAT"; PF_GEOIP="$PR_GEOIP"; PF_IPS="$PR_IPS"; PF_INC="$PR_INC"
+	# facets BEFORE includes are folded in — "is this preset applied" must be judged by its own
+	# entries, or a composite would look applied merely because something it includes is on
+	PF_OWNCAT="$PR_CAT"; PF_OWNIPS="$PR_IPS"
 	# the note describes THIS preset, so an included preset's note is deliberately not merged in
 	PF_NOTE_RU="$PR_NOTE_RU"; PF_NOTE_EN="$PR_NOTE_EN"
 	PF_NODE="$PR_NODE"; [ -z "$PF_NODE" ] && PF_NODE=$(default_rule_node)
@@ -512,18 +515,73 @@ rules_tagged() {
 }
 
 # cron/CLI: sync every currently-enabled domain-list preset
+# Is this preset currently applied? Domain-list presets are known by their src tags; the rest have no
+# tag to go by, so a fully present geosite set is the evidence they were applied at some point (a
+# geosite is added first and practically never leaves a manifest, unlike the IP ranges below it).
+preset_applied() {   # $1=id — reads PF_OWN* of the entry just decoded by preset_fields_at
+	rules_tagged "$1" && return 0
+	if [ -n "$PF_OWNCAT" ]; then
+		for _pc in $(printf '%s' "$PF_OWNCAT" | tr ',' ' '); do
+			[ -n "$_pc" ] && [ "$(rule_exists GEOSITE "$_pc")" != 1 ] && return 1
+		done
+		return 0
+	fi
+	for _pi in $(printf '%s' "$PF_OWNIPS" | tr ',' ' '); do
+		_pi=$(clean_ip "$_pi"); [ -n "$_pi" ] && [ "$(rule_exists IP-CIDR "$_pi")" = 1 ] && return 0
+	done
+	return 1
+}
+# Where this preset's existing rules point. Never assume the default: the ads preset routes to REJECT,
+# and a "helpful" sync that retargets it to the VPN would silently start tunnelling ad traffic.
+preset_node_hint() {
+	for _nc in $(printf '%s' "$PF_CAT" | tr ',' ' '); do
+		[ -n "$_nc" ] && { _nn=$(rule_node_of GEOSITE "$_nc"); [ -n "$_nn" ] && { printf '%s' "$_nn"; return; }; }
+	done
+	for _ni in $(printf '%s' "$PF_IPS" | tr ',' ' '); do
+		_ni=$(clean_ip "$_ni"); [ -n "$_ni" ] && { _nn=$(rule_node_of IP-CIDR "$_ni"); [ -n "$_nn" ] && { printf '%s' "$_nn"; return; }; }
+	done
+	printf '%s' "$PF_NODE"
+}
+
+# Bring every APPLIED preset back in line with the manifest. Domain lists are synced both ways (their
+# rules carry a src tag, so what the sync added it may also remove), while geosites/geoips/IP ranges
+# are only ever ADDED.
+#
+# That asymmetry is deliberate, not laziness. Those rule types carry no ownership tag, so a rule for
+# 91.108.0.0/16 added by hand is indistinguishable from one a preset created — and this very router
+# has such hand-made rules. Removing "what is no longer in the manifest" would quietly delete them.
+# Deletion stays where the intent is explicit: switching the preset off.
 sync_all() {
 	idx=$(applist_index)
-	SYNC_ADDED=0; SYNC_REMOVED=0; i=0
+	SYNC_ADDED=0; SYNC_REMOVED=0; SYNC_FACETS=0; i=0
 	while :; do
 		id=$(printf '%s' "$idx" | jsonfilter -e "@[$i].id" 2>/dev/null)
 		[ -z "$id" ] && break
-		rules_tagged "$id" && do_preset_sync "$id"
+		preset_fields_at "$i" "$idx"
+		if preset_applied "$id"; then
+			_snode=$(preset_node_hint)
+			for c in $(printf '%s' "$PF_CAT" | tr ',' ' '); do
+				[ -n "$c" ] && [ "$(rule_exists GEOSITE "$c")" != 1 ] \
+					&& { add_rule GEOSITE "$c" "$_snode"; SYNC_FACETS=$((SYNC_FACETS + 1)); }
+			done
+			if [ -n "$PF_GEOIP" ] && geoip_ready; then
+				for g in $(printf '%s' "$PF_GEOIP" | tr ',' ' '); do
+					[ -n "$g" ] && [ "$(rule_exists GEOIP "$g")" != 1 ] \
+						&& { add_rule GEOIP "$g" "$_snode"; SYNC_FACETS=$((SYNC_FACETS + 1)); }
+				done
+			fi
+			for ip in $(printf '%s' "$PF_IPS" | tr ',' ' '); do
+				ip=$(clean_ip "$ip"); [ -z "$ip" ] && continue
+				[ "$(rule_exists IP-CIDR "$ip")" != 1 ] \
+					&& { add_rule IP-CIDR "$ip" "$_snode"; uci set "nikki.@rule[-1].no_resolve=1"; SYNC_FACETS=$((SYNC_FACETS + 1)); }
+			done
+			rules_tagged "$id" && do_preset_sync "$id"
+		fi
 		i=$((i + 1))
 	done
-	[ $((SYNC_ADDED + SYNC_REMOVED)) -gt 0 ] && { uci commit nikki; apply_nikki; }
+	[ $((SYNC_ADDED + SYNC_REMOVED + SYNC_FACETS)) -gt 0 ] && { uci commit nikki; apply_nikki; }
 	rm -f "$PRESET_CACHE"   # applist lists were just re-fetched — drop the display cache so the UI shows fresh
-	logger -t nikki-unblock "autosync: +$SYNC_ADDED -$SYNC_REMOVED"
+	logger -t nikki-unblock "autosync: домены +$SYNC_ADDED -$SYNC_REMOVED, категории/IP +$SYNC_FACETS"
 }
 
 # ---- detached-op status files (generic) --------------------------------------------------------
