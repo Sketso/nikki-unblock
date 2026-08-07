@@ -123,7 +123,7 @@ const I18N = {
     exclusions: "Исключения", system: "системный", ipNode: "нода",
     phDomain: "example.com", phGeosite: "telegram, youtube, netflix…", phGeoip: "ru · telegram · google…", phIp: "1.2.3.0/24  ·  1.2.3.4",
     done: "Готово", errP: "Ошибка: ", dup: "Уже есть в списке", listsNA: "Списки недоступны",
-    pmShow: "Показать состав", pmGeo: "Поддерживаемая категория доменов/IP — обновляется автоматически из базы. Ниже показаны только дополнительные IP-подсети и домены.",
+    pmShow: "Показать состав", pmIncl: "Включает пресет:", pmGeo: "Поддерживаемая категория доменов/IP — обновляется автоматически из базы. Ниже показаны только дополнительные IP-подсети и домены.",
     tabNodes: "Ноды", nUnblock: "→ VPN (+ноды)",
     nodesHint: "Свои VPN-выходы. Перетащи .conf или вставь конфиг/ссылку: AmneziaWG/WireGuard, vless://…, подписку https://…, или сырой clash-YAML. Добавленные ноды образуют группу UNBLOCK — выбирай «→ VPN (+ноды)» как действие правила.",
     nodeDrop: "Перетащи сюда файл .conf", nodeName: "имя (необязательно)", nodeAdd: "Добавить и проверить",
@@ -354,7 +354,7 @@ const I18N = {
     exclusions: "Exclusions", system: "system", ipNode: "node",
     phDomain: "example.com", phGeosite: "telegram, youtube, netflix…", phGeoip: "ru · telegram · google…", phIp: "1.2.3.0/24  ·  1.2.3.4",
     done: "Done", errP: "Error: ", dup: "Already in the list", listsNA: "Lists unavailable",
-    pmShow: "Show contents", pmGeo: "A maintained domain/IP category — auto-updated from the DB. Only the extra IP subnets and domains are listed below.",
+    pmShow: "Show contents", pmIncl: "Includes preset:", pmGeo: "A maintained domain/IP category — auto-updated from the DB. Only the extra IP subnets and domains are listed below.",
     tabNodes: "Nodes", nUnblock: "→ VPN (+nodes)",
     nodesHint: "Your own VPN exits. Drop a .conf or paste a config/link: AmneziaWG/WireGuard, vless://…, a subscription https://…, or raw clash YAML. Added nodes form the UNBLOCK group — pick «→ VPN (+nodes)» as a rule action.",
     nodeDrop: "Drop a .conf file here", nodeName: "name (optional)", nodeAdd: "Add & check",
@@ -693,7 +693,10 @@ function taggedSet(id){
 // on/off/partial for one facet
 function listFacet(p){
   const L = new Set(p.domains || []);
-  const tagged = taggedSet(p.id);
+  // a composite preset carries several lists (its own + each included preset's); rules stay tagged
+  // with the id of the list they came from, so the tag set is the union over all of them
+  const ids = (p.lists && p.lists.length) ? p.lists : [p.id];
+  const tagged = new Set(ids.flatMap(id => [...taggedSet(id)]));
   const have = suffixMatchers();
   const inSync = tagged.size === L.size && [...L].every(d => tagged.has(d));
   const presentAny = [...L].some(d => have.has(d));
@@ -709,6 +712,12 @@ function presetState(p){
   // geoip facet only counts when the GeoIP DB is enabled — otherwise the rule can't be added and the
   // card would be stuck "partial". While GeoIP is off, geosite + IP-CIDR fully define the preset.
   const gips = geoList(p.geoip); if (gips.length && GEO_OK) facets.push(facetOf(gips, "GEOIP"));
+  // IP-CIDR must count too, otherwise a range ADDED to the manifest later never reaches anyone who
+  // already has the preset on: the card would stay green while the new range is missing from the
+  // rules, and autosync only ever touches domain lists. Counting it turns the card orange instead,
+  // and one click completes the sync. (Found when Telegram's 95.161.64.0/20 — announced by AS62041
+  // but absent from Telegram's published cidr.txt — turned out to be missing from the preset.)
+  if ((p.ipcidr || []).length) facets.push(facetOf(p.ipcidr, "IP-CIDR"));
   if ((p.domains || []).length) facets.push(listFacet(p));
   if (!facets.length) return { on: false, part: false };
   if (facets.every(f => f === "on")) return { on: true, part: false };
@@ -771,6 +780,13 @@ function showPresetInfo(p){
   $("#pmTitle").textContent = p.name;
   const tgt = escH(p.node || "VPN");
   let h = "";
+  // a folded-in preset is named up front: the rest of the dialog already shows its merged contents,
+  // so without this line it looks like the entries were copied into this preset by hand
+  const inc = p.includes || [];
+  if (inc.length){
+    const names = inc.map(id => (PRESETS.find(x => x.id === id) || {}).name || id);
+    h += '<div class="pmrow">' + t("pmIncl") + ' <b>' + escH(names.join(", ")) + '</b></div>';
+  }
   // concrete contents first (GEOSITE/GEOIP categories, then the extra IP/domain lists)…
   geoList(p.geosite).forEach(c => h += '<div class="pmrow"><b>GEOSITE</b> · <code>' + escH(c) + '</code> → ' + tgt + '</div>');
   geoList(p.geoip).forEach(g => h += '<div class="pmrow"><b>GEOIP</b> · <code>' + escH(g) + '</code> → ' + tgt + (GEO_OK ? "" : " · " + t("geoOff")) + '</div>');

@@ -10,6 +10,7 @@
       "91.108.16.0/22",
       "91.108.12.0/22",
       "149.154.160.0/20",
+      "95.161.64.0/20",
       "91.105.192.0/23",
       "91.108.20.0/22",
       "185.76.151.0/24",
@@ -98,9 +99,9 @@
     "id": "social",
     "name": "Соцсети и авторские платформы",
     "list": true,
-    "geosites": [
+    "includes": [
       "twitter",
-      "facebook",
+      "meta",
       "tiktok"
     ]
   },
@@ -112,7 +113,10 @@
   },
   {
     "id": "messengers",
-    "name": "Мессенджеры (WhatsApp · Viber · Signal · Telegram)"
+    "name": "Мессенджеры (WhatsApp · Viber · Signal · Telegram)",
+    "includes": [
+      "telegram"
+    ]
   },
   {
     "id": "vendors",

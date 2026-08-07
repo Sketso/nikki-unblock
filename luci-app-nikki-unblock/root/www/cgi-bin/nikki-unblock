@@ -300,25 +300,61 @@ applist_index() {
 	cat "$IDX_CACHE" 2>/dev/null   # offline: a stale index beats none
 }
 
-# SINGLE decoder of an index.json entry — the display path (presets_json) and the apply path
-# (preset_apply) both resolve a preset's fields here, so the schema semantics live in ONE place and
-# the client can no longer feed the server arbitrary geosites/IPs. Sets PF_NAME PF_CAT PF_GEOIP
-# PF_IPS PF_NODE PF_HASLIST.
-preset_fields_at() {   # $1=array index $2=index.json body
-	PF_NAME=$(printf '%s' "$2" | jsonfilter -e "@[$1].name" 2>/dev/null)
+# Shallow read of ONE index.json entry — no "includes" resolution, so it can be called for an
+# included preset without recursing. Sets PR_* only.
+preset_raw_at() {   # $1=array index $2=index.json body
+	PR_NAME=$(printf '%s' "$2" | jsonfilter -e "@[$1].name" 2>/dev/null)
 	# geosite/geoip may be a single string OR a "geosites"/"geoips" array (combo preset like "all
 	# social") — combine into one comma-separated value. Old CGIs ignore the array fields (safe).
 	_g=$(printf '%s' "$2" | jsonfilter -e "@[$1].geosite" 2>/dev/null)
 	_ga=$(printf '%s' "$2" | jsonfilter -e "@[$1].geosites[*]" 2>/dev/null | tr '\n' ',')
-	PF_CAT=$(printf '%s,%s' "$_g" "$_ga" | sed 's/,,*/,/g; s/^,//; s/,$//')
+	PR_CAT=$(printf '%s,%s' "$_g" "$_ga" | sed 's/,,*/,/g; s/^,//; s/,$//')
 	_g=$(printf '%s' "$2" | jsonfilter -e "@[$1].geoip" 2>/dev/null)
 	_ga=$(printf '%s' "$2" | jsonfilter -e "@[$1].geoips[*]" 2>/dev/null | tr '\n' ',')
-	PF_GEOIP=$(printf '%s,%s' "$_g" "$_ga" | sed 's/,,*/,/g; s/^,//; s/,$//')
-	PF_NODE=$(printf '%s' "$2" | jsonfilter -e "@[$1].node" 2>/dev/null); [ -z "$PF_NODE" ] && PF_NODE=$(default_rule_node)
-	PF_IPS=$(printf '%s' "$2" | jsonfilter -e "@[$1].ipcidr[*]" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+	PR_GEOIP=$(printf '%s,%s' "$_g" "$_ga" | sed 's/,,*/,/g; s/^,//; s/,$//')
+	PR_NODE=$(printf '%s' "$2" | jsonfilter -e "@[$1].node" 2>/dev/null)
+	PR_IPS=$(printf '%s' "$2" | jsonfilter -e "@[$1].ipcidr[*]" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+	PR_INC=$(printf '%s' "$2" | jsonfilter -e "@[$1].includes[*]" 2>/dev/null | tr '\n' ' ')
 	# hybrid rule: the domain list applies when there is no geosite, or when the entry sets "list": true
 	_wl=$(printf '%s' "$2" | jsonfilter -e "@[$1].list" 2>/dev/null)
-	PF_HASLIST=0; { [ -z "$PF_CAT" ] || [ -n "$_wl" ]; } && PF_HASLIST=1
+	PR_HASLIST=0; { [ -z "$PR_CAT" ] || [ -n "$_wl" ]; } && PR_HASLIST=1
+}
+preset_index_of() {   # $1=id $2=index.json body — prints the array index, empty if absent
+	_ii=0
+	while :; do
+		_iid=$(printf '%s' "$2" | jsonfilter -e "@[$_ii].id" 2>/dev/null)
+		[ -z "$_iid" ] && return 1
+		[ "$_iid" = "$1" ] && { echo "$_ii"; return 0; }
+		_ii=$((_ii + 1))
+	done
+}
+
+# SINGLE decoder of an index.json entry — the display path (presets_json) and the apply path
+# (preset_apply) both resolve a preset's fields here, so the schema semantics live in ONE place and
+# the client can no longer feed the server arbitrary geosites/IPs. Sets PF_NAME PF_CAT PF_GEOIP
+# PF_IPS PF_NODE PF_INC PF_LISTS.
+#
+# "includes": ["telegram"] folds another preset in WHOLE — its geosites, geoips, IP ranges and domain
+# list all become part of this one, so a range added to Telegram reaches every preset that includes
+# it without being copied. Resolution is ONE level deep on purpose: an included preset's own
+# "includes" is ignored, which keeps cycles impossible without a visited-set in POSIX sh.
+preset_fields_at() {   # $1=array index $2=index.json body
+	preset_raw_at "$1" "$2"
+	PF_NAME="$PR_NAME"; PF_CAT="$PR_CAT"; PF_GEOIP="$PR_GEOIP"; PF_IPS="$PR_IPS"; PF_INC="$PR_INC"
+	PF_NODE="$PR_NODE"; [ -z "$PF_NODE" ] && PF_NODE=$(default_rule_node)
+	# ids whose .lst must be synced: our own (when we have a list) plus every included one that has one
+	PF_LISTS=""
+	[ "$PR_HASLIST" = 1 ] && PF_LISTS=$(printf '%s' "$2" | jsonfilter -e "@[$1].id" 2>/dev/null)
+	for _inc in $PF_INC; do
+		_ix=$(preset_index_of "$_inc" "$2") || continue
+		preset_raw_at "$_ix" "$2"
+		PF_CAT=$(printf '%s,%s' "$PF_CAT" "$PR_CAT" | sed 's/,,*/,/g; s/^,//; s/,$//')
+		PF_GEOIP=$(printf '%s,%s' "$PF_GEOIP" "$PR_GEOIP" | sed 's/,,*/,/g; s/^,//; s/,$//')
+		PF_IPS=$(printf '%s,%s' "$PF_IPS" "$PR_IPS" | sed 's/,,*/,/g; s/^,//; s/,$//')
+		[ "$PR_HASLIST" = 1 ] && PF_LISTS=$(printf '%s %s' "$PF_LISTS" "$_inc" | sed 's/^ *//; s/  */ /g')
+	done
+	# kept for callers that only ask "does this preset carry domains at all"
+	PF_HASLIST=0; [ -n "$PF_LISTS" ] && PF_HASLIST=1
 }
 preset_fields() {   # $1=id [$2=index.json body] — scan by id; 1 if the id isn't in the manifest
 	_pfidx="$2"; [ -z "$_pfidx" ] && _pfidx=$(applist_index)
@@ -345,14 +381,14 @@ presets_json() {
 		id=$(printf '%s' "$idx" | jsonfilter -e "@[$i].id" 2>/dev/null)
 		[ -z "$id" ] && break
 		preset_fields_at "$i" "$idx"; [ -z "$PF_NAME" ] && PF_NAME="$id"
-		dom=""
-		if [ "$PF_HASLIST" = 1 ]; then
-			# unified fetch + shape filter (applist_domains); quote the clean lines into JSON
-			dom=$(applist_domains "$id" | awk '{ printf "%s\"%s\"", sep, $0; sep="," }')
-		fi
+		# domains = union over every list this preset owns (its own + those of included presets)
+		dom=$(for _l in $PF_LISTS; do applist_domains "$_l"; done | awk '!s[$0]++ { printf "%s\"%s\"", sep, $0; sep="," }')
 		ips=$(printf '%s' "$PF_IPS" | tr ',' '\n' | awk 'NF { printf "%s\"%s\"", sep, $0; sep="," }')
+		inc=$(printf '%s' "$PF_INC" | tr ' ' '\n' | awk 'NF { printf "%s\"%s\"", sep, $0; sep="," }')
+		lst=$(printf '%s' "$PF_LISTS" | tr ' ' '\n' | awk 'NF { printf "%s\"%s\"", sep, $0; sep="," }')
 		[ "$first" = 1 ] || printf ','; first=0
-		printf '{"id":"%s","name":"%s","geosite":"%s","geoip":"%s","node":"%s","ipcidr":[%s],"domains":[%s]}' "$id" "$PF_NAME" "$PF_CAT" "$PF_GEOIP" "$PF_NODE" "$ips" "$dom"
+		printf '{"id":"%s","name":"%s","geosite":"%s","geoip":"%s","node":"%s","ipcidr":[%s],"domains":[%s],"includes":[%s],"lists":[%s]}' \
+			"$id" "$PF_NAME" "$PF_CAT" "$PF_GEOIP" "$PF_NODE" "$ips" "$dom" "$inc" "$lst"
 		i=$((i + 1))
 	done
 	printf ']'
@@ -513,8 +549,8 @@ op_start() {   # $1=file $2=id $3=name $4=on $5…=CLI verb+args — seed the st
 _pop_write() {   # $1=phase $2=done $3=ok   (PA_* set by preset_apply_run)
 	op_write "$PRESET_OP" "$$" "$PA_ID" "$PA_NAME" "$PA_ON" "$1" "$2" "$3"
 }
-preset_apply_run() {   # $1=id $2=on $3=cat $4=geoip $5=ips $6=node $7=haslist $8=name
-	PA_ID="$1"; PA_ON="$2"; _cat="$3"; _geoip="$4"; _ips="$5"; _node="$6"; _hl="$7"; PA_NAME="$8"
+preset_apply_run() {   # $1=id $2=on $3=cat $4=geoip $5=ips $6=node $7=lists $8=name
+	PA_ID="$1"; PA_ON="$2"; _cat="$3"; _geoip="$4"; _ips="$5"; _node="$6"; _lists="$7"; PA_NAME="$8"
 	case "$_node" in PROXY|DIRECT|REJECT|"$EXIT_GROUP") ;; *) _node="$EXIT_GROUP" ;; esac
 	_pop_write geo 0 0
 	_ch=0
@@ -540,13 +576,18 @@ preset_apply_run() {   # $1=id $2=on $3=cat $4=geoip $5=ips $6=node $7=haslist $
 		fi
 		[ "$_ch" = 1 ] && { uci commit nikki; apply_nikki; }
 	fi
-	if [ "$_hl" = 1 ]; then
+	if [ -n "$_lists" ]; then
 		_pop_write list 0 0
+		# every list this preset owns — its own and those it pulls in via "includes"; each keeps its
+		# OWN src tag, so turning the included preset on/off separately still adds/removes cleanly
 		if [ "$PA_ON" = 1 ]; then
 			SYNC_ADDED=0; SYNC_REMOVED=0
-			do_preset_sync "$PA_ID" && { [ $((SYNC_ADDED + SYNC_REMOVED)) -gt 0 ] && { uci commit nikki; apply_nikki; }; }
+			for _lid in $_lists; do do_preset_sync "$_lid"; done
+			[ $((SYNC_ADDED + SYNC_REMOVED)) -gt 0 ] && { uci commit nikki; apply_nikki; }
 		else
-			OFF_REMOVED=0; do_preset_off "$PA_ID"; [ "$OFF_REMOVED" -gt 0 ] && { uci commit nikki; apply_nikki; }
+			OFF_REMOVED=0
+			for _lid in $_lists; do do_preset_off "$_lid"; done
+			[ "$OFF_REMOVED" -gt 0 ] && { uci commit nikki; apply_nikki; }
 		fi
 	fi
 	_ok=1; pgrep -f /usr/bin/mihomo >/dev/null 2>&1 || _ok=0
@@ -3388,7 +3429,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		on=$(get_param on | sed 's/[^01]//g'); [ -z "$on" ] && on=0
 		preset_fields "$id" || { json_header; printf '{"ok":false,"error":"unknown preset"}'; exit 0; }
 		undo_push preset   # ONE undo point for the whole apply
-		op_start "$PRESET_OP" "$id" "$PF_NAME" "$on" _presetapply "$id" "$on" "$PF_CAT" "$PF_GEOIP" "$PF_IPS" "$PF_NODE" "$PF_HASLIST" "$PF_NAME"
+		op_start "$PRESET_OP" "$id" "$PF_NAME" "$on" _presetapply "$id" "$on" "$PF_CAT" "$PF_GEOIP" "$PF_IPS" "$PF_NODE" "$PF_LISTS" "$PF_NAME"
 		json_header; printf '{"ok":true,"started":true}'; exit 0
 
 		;;

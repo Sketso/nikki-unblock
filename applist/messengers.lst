@@ -1,12 +1,6 @@
-# Мессенджеры. Telegram включён и сюда, и в свой отдельный пресет — они не мешают
-# друг другу: правила совпадают по домену и дублируются без последствий.
-telegram.org
-t.me
-telegram.me
-telesco.pe
-telegra.ph
-tdesktop.com
-cdn-telegram.org
+# Мессенджеры. Telegram сюда НЕ дублируется — он подключён целиком через "includes"
+# в index.json, поэтому и домены, и IP-диапазоны берутся из пресета Telegram и
+# правятся в одном месте.
 whatsapp.com
 whatsapp.net
 wa.me
