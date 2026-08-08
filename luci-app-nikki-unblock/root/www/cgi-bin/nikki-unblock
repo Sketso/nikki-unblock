@@ -2478,30 +2478,41 @@ ipv6_set() {   # $1 = 1(disable) | 0(enable)
 # through it 29.7/26.0 MB/s, and 10 short requests took 220 ms vs 219 ms — the ceiling is the link.
 # What it does NOT change: reserved_ip and excluded devices still skip mihomo whatever the port.
 PORTS_NARROW="80 443"
-# The port list is space-separated and may hold ranges ("0-65535", "1 3478 50000-65535"), so a
-# substring test would both miss a port inside a range and match 443 inside 4433.
-port_in_list() {   # $1=port $2=list -> 0(true) if the port is already covered
-	case "$1" in ''|*[!0-9]*) return 1 ;; esac
-	for _pr in $2; do
-		case "$_pr" in
-			*-*) [ "$1" -ge "${_pr%%-*}" ] && [ "$1" -le "${_pr##*-}" ] && return 0 ;;
-			*)   [ "$1" = "$_pr" ] && return 0 ;;
-		esac
-	done
-	return 1
-}
-# UDP is widened ONE PORT AT A TIME, deliberately — there is no "intercept every UDP port" button.
-# proxy_udp_dport already carries the ports that want proxying (STUN 3478, the RTP range); handing
-# mihomo the whole range would drag QUIC, games and every discovery protocol into the tunnel, and the
-# damage from that is much harder to notice than the miss it would fix.
-udpport_add() {   # $1=port — 0 if added, 1 if it was already covered
-	_cur=$(uci -q get nikki.proxy.proxy_udp_dport 2>/dev/null)
-	port_in_list "$1" "$_cur" && return 1
-	undo_push udpport
-	uci set nikki.proxy.proxy_udp_dport="${_cur:+$_cur }$1"
-	uci commit nikki
+# ---- UDP interception -------------------------------------------------------
+# Same idea as the TCP switch above, and for the same reason — but it took a wrong turn first, so the
+# reasoning is written down. Adding ONE port per finding (a button per report row) was: whack-a-mole,
+# because a service picks its ports per session; invisible, because nothing in the UI showed the
+# accumulated list; and unremovable, because nothing could take a port back out. It is gone.
+#
+# What replaces it is the coarse gate the rest of the panel already assumes: hand mihomo the traffic,
+# and let RULES on domains and IPs decide where it goes. nikki's own LuCI offers exactly this as a
+# preset for proxy_udp_dport ("All Port" = 0-65535), so it is a supported configuration, not a hack.
+#
+# 53 is left out on purpose. nikki decides DNS with a SEPARATE switch (ipv4_dns_hijack), and on a
+# router with https-dns-proxy in the path (fw4 redirects udp/53) nikki's prerouting mangle runs first
+# — so folding 53 in here would quietly move every client's DNS somewhere else as a side effect of a
+# port setting. 443 IS included: the QUIC drop lives in the forward hook, which an intercepted packet
+# still traverses, so the "Block QUIC" toggle stays authoritative — and when it is off, QUIC finally
+# becomes routable by rule instead of escaping everything.
+UPORTS_ALL="1-52 54-65535"
+alludp_on() { [ "$(uci -q get nikki.proxy.proxy_udp_dport 2>/dev/null)" = "$UPORTS_ALL" ]; }
+alludp_set() {   # $1 = on(0/1)
+	uci -q get nikki-unblock.config >/dev/null 2>&1 || uci set nikki-unblock.config=config
+	if [ "$1" = 1 ]; then
+		alludp_on && return 0
+		undo_push alludp
+		uci set nikki-unblock.config.uports_prev="$(uci -q get nikki.proxy.proxy_udp_dport 2>/dev/null)"
+		uci set nikki.proxy.proxy_udp_dport="$UPORTS_ALL"
+	else
+		alludp_on || return 0
+		undo_push alludp
+		_up=$(uci -q get nikki-unblock.config.uports_prev 2>/dev/null)
+		[ -z "$_up" ] && _up="1 3478 50000-65535"
+		uci set nikki.proxy.proxy_udp_dport="$_up"
+		uci -q delete nikki-unblock.config.uports_prev
+	fi
+	uci commit nikki; uci commit nikki-unblock
 	/etc/init.d/nikki reload >/dev/null 2>&1
-	return 0
 }
 allports_on() { [ "$(uci -q get nikki.proxy.proxy_tcp_dport 2>/dev/null)" = "0-65535" ]; }
 allports_set() {   # $1 = on(0/1)
@@ -4191,13 +4202,11 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		ap=0; allports_on && ap=1
 		json_header; printf '{"ok":true,"allports":%d}' "$ap"; exit 0
 		;;
-	udpport)
-		p=$(get_param port | sed 's/[^0-9]//g')
-		{ [ -n "$p" ] && [ "$p" -ge 1 ] && [ "$p" -le 65535 ]; } 2>/dev/null \
-			|| { json_header; printf '{"ok":false,"error":"bad port"}'; exit 0; }
-		alr=false; udpport_add "$p" || alr=true
-		json_header; printf '{"ok":true,"already":%s,"ports":"%s"}' "$alr" \
-			"$(json_esc "$(uci -q get nikki.proxy.proxy_udp_dport 2>/dev/null)")"; exit 0
+	alludp)
+		on=$(get_param on | sed 's/[^01]//g'); [ -z "$on" ] && on=0
+		alludp_set "$on"
+		au=0; alludp_on && au=1
+		json_header; printf '{"ok":true,"alludp":%d}' "$au"; exit 0
 		;;
 	tracestart)
 		c=$(clean_ip "$(get_param client)")
@@ -4325,14 +4334,15 @@ devicesall_json() {
 		"$MIHOMO_API/proxies/$(urlenc_all "$BASE_GROUP")" 2>/dev/null | grep -q '"name"' || base_ok=0; }
 	mss=0; mssclamp_on && mss=1
 	ap=0; allports_on && ap=1
+	au=0; alludp_on && au=1
 	# "Unconfigured" is a distinct state from "broken": a freshly installed nikki is disabled and has no
 	# profile, so mihomo never starts and NOTHING routed through it can work. Report it separately so the
 	# panel can offer the one-click fix instead of leaving people to guess (this cost a user an afternoon).
 	svc_en=$(uci -q get nikki.config.enabled 2>/dev/null)
 	prof_ok=0; nikki_profile_ok && prof_ok=1
 	unconf=0; [ "$running" = 0 ] && { [ "$prof_ok" = 0 ] || [ "$svc_en" = 0 ]; } && unconf=1
-	printf '{"running":%d,"boot":%d,"base_group":"%s","base_ok":%d,"mss":%d,"allports":%d,"profile_ok":%d,"enabled":%d,"unconfigured":%d}' \
-		"$running" "$booten" "$BASE_GROUP" "$base_ok" "$mss" "$ap" "$prof_ok" "$([ "$svc_en" = 0 ] && echo 0 || echo 1)" "$unconf"; exit 0
+	printf '{"running":%d,"boot":%d,"base_group":"%s","base_ok":%d,"mss":%d,"allports":%d,"alludp":%d,"profile_ok":%d,"enabled":%d,"unconfigured":%d}' \
+		"$running" "$booten" "$BASE_GROUP" "$base_ok" "$mss" "$ap" "$au" "$prof_ok" "$([ "$svc_en" = 0 ] && echo 0 || echo 1)" "$unconf"; exit 0
 }
 
 # ---- HTML page -------------------------------------------------------------

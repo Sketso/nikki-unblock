@@ -199,11 +199,11 @@ const I18N = {
     taEscReserved: w => "Мимо туннеля: " + w + " — адрес в списке исключений (reserved_ip). Это норма.",
     taEscOld: w => "Мимо туннеля: " + w + " — соединение старше правил (например, установлено до перезапуска nikki).",
     taAllPorts: "Перехватывать все порты",
-    taUdpPort: p => "Перехватывать UDP-порт " + p,
-    taUdpNote: "Порт добавлен в перехват. Если не помогло — теперь трафик хотя бы доходит до mihomo, но правила, которое увело бы этот адрес в туннель, всё ещё нет.",
+    taAllUdp: "Перехватывать весь UDP",
+    taUdpNote: "Теперь UDP доходит до mihomo, и адрес можно завернуть в туннель обычным правилом — по домену или IP, как всё остальное. Само по себе это никуда не заворачивает: без правила трафик уйдёт напрямую, только уже через mihomo.",
     taRestartFix: "Перезапустить nikki",
     taStale: "Отчёт снят ДО этой починки, поэтому строки выше показывают прошлое состояние. Чтобы увидеть результат, запишите заново.",
-    act_udpport: "перехват UDP-порта",
+    act_alludp: "перехват всего UDP",
     taSyn: (w, s) => "Соединение не установилось: " + w + " — " + s + " с тишины в ответ на запрос",
     taSynTun: "через туннель", taSynDir: "напрямую",
     taStall: (w, b) => "Запрос ушёл в туннель, ответа нет: " + w + " — отправлено " + b + " Б, принято 0",
@@ -214,6 +214,7 @@ const I18N = {
     taSniDead: "С роутера не открывается ни с именем, ни без него. На SNI это не указывает — адресат просто недоступен.",
     taSniOk: "С роутера имя открывается прямо сейчас — значит, обрыв был кратковременным или касается только этого устройства.",
     taSniCaveat: "Проверка идёт с роутера и через mihomo, поэтому адрес мог быть выбран им, а не взят из отчёта.",
+    taEscFine: n => "Ещё потоков ушло мимо туннеля, но они получали ответ и работали: " + n + ". Это не поломка — адреса не показываем.",
     taHealthy: n => "Здоровых потоков через туннель: " + n,
     taClean: "Проблемных потоков за окно не нашли.",
     taNoTraffic: "За окно устройство не открыло через ЭТОТ роутер ни одного соединения. Обычно это значит, что оно подключено к другому роутеру или к мобильному интернету; реже — что приложение так и не запустили.",
@@ -229,6 +230,7 @@ const I18N = {
     svcReload: "Перечитать конфиг", svcAutostart: "Автозапуск вкл/выкл",
     svcRunning: "nikki работает", svcStopped: "nikki остановлен",
     svcBoot: "Автозапуск при загрузке", svcOn: "вкл", svcOff: "выкл",
+    audpLabel: "Перехватывать весь UDP", audpHint: "То же самое для UDP: без этого до mihomo доходят только порты из списка nikki, а всё остальное (STUN и медиа звонков, игровой трафик, QUIC при выключенной блокировке) уходит мимо — и правило по домену или IP на него уже не подействует, потому что трафик до правил не доехал. Порт 53 намеренно не включается: DNS у nikki решает отдельный тумблер. Переключение перезапускает nikki — сеть моргнёт на несколько секунд.",
     apLabel: "Перехватывать все порты", apHint: "Без этого в туннель попадает только трафик на портах 80 и 443, а всё остальное уходит мимо — и этого не видно ни в панели, ни в логах. Так ломались медиа в Telegram: он уходит на порт 5222, ответа не получает, картинка висит. Замеры на роутере разницы в скорости и задержке не показали. Переключение перезапускает nikki — сеть моргнёт на несколько секунд.", mssLabel: "Фикс зависаний загрузок (MSS-clamp)", mssHint: "Включи, если через VPN большие загрузки или сайты зависают / грузятся наполовину, а мелочь при этом работает. Чинит размер сетевых пакетов под туннель. Оставлять включённым безопасно.",
     bkGroupTitle: "Бэкап настроек",
     bkTitle: "Nikki (VPN)", bkDownload: "Создать и скачать", bkRestore: "Восстановить из файла", bkAuto: "Авто-бэкап (день/неделя/месяц)",
@@ -467,11 +469,11 @@ const I18N = {
     taEscReserved: w => "Past the tunnel: " + w + " — the address is on the exclusion list (reserved_ip). This is normal.",
     taEscOld: w => "Past the tunnel: " + w + " — the connection is older than the rules (e.g. opened before nikki restarted).",
     taAllPorts: "Intercept every port",
-    taUdpPort: p => "Intercept UDP port " + p,
-    taUdpNote: "The port is now intercepted. If that didn't help — the traffic at least reaches mihomo now, but there is still no rule to send this destination into the tunnel.",
+    taAllUdp: "Intercept all UDP",
+    taUdpNote: "UDP now reaches mihomo, so this destination can be sent into the tunnel by an ordinary rule — by domain or IP, like everything else. This alone routes nothing: without a rule the traffic still goes direct, just via mihomo.",
     taRestartFix: "Restart nikki",
     taStale: "This report was taken BEFORE the fix, so the rows above show the earlier state. Record again to see the result.",
-    act_udpport: "UDP port interception",
+    act_alludp: "intercept all UDP",
     taSyn: (w, s) => "Connection never established: " + w + " — " + s + " s of silence in reply",
     taSynTun: "through the tunnel", taSynDir: "direct",
     taStall: (w, b) => "Request went into the tunnel, no answer: " + w + " — " + b + " B sent, 0 received",
@@ -482,6 +484,7 @@ const I18N = {
     taSniDead: "Opens from the router neither with the name nor without it. Nothing here points at SNI — the destination is simply unreachable.",
     taSniOk: "The name opens from the router right now — so the break was brief, or specific to this device.",
     taSniCaveat: "The test runs from the router and through mihomo, so the address contacted may be its choice rather than the one in the report.",
+    taEscFine: n => "More flows left past the tunnel but were answered and worked: " + n + ". Not a fault — addresses withheld.",
     taHealthy: n => "Healthy flows through the tunnel: " + n,
     taClean: "No problem flows in this window.",
     taNoTraffic: "The device opened no connections THROUGH THIS ROUTER during the window. Usually that means it is on a different router or on mobile data; less often, that the app was never launched.",
@@ -497,6 +500,7 @@ const I18N = {
     svcReload: "Reload config", svcAutostart: "Toggle autostart",
     svcRunning: "nikki running", svcStopped: "nikki stopped",
     svcBoot: "Start on boot", svcOn: "on", svcOff: "off",
+    audpLabel: "Intercept all UDP", audpHint: "The same thing for UDP: without it only the ports on nikki's list reach mihomo, and everything else (call STUN and media, game traffic, QUIC when the block is off) leaves unproxied — where a domain or IP rule can no longer touch it, because the traffic never got as far as the rules. Port 53 is deliberately left out: nikki decides DNS with a separate switch. Toggling restarts nikki, so the network blinks for a few seconds.",
     apLabel: "Intercept every port", apHint: "Without this only ports 80 and 443 reach the tunnel and everything else leaves unproxied — invisible in this panel and in the logs. That is how Telegram media broke: it falls back to port 5222, gets no answer, and the picture just hangs. Measured on the router, it costs no speed and no latency. Toggling restarts nikki, so the network blinks for a few seconds.", mssLabel: "Fix download stalls (MSS clamp)", mssHint: "Turn on if large downloads or sites stall / load only halfway through the VPN while small stuff works fine. Fixes network packet size for the tunnel. Safe to leave on.",
     bkGroupTitle: "Settings backup",
     bkTitle: "Nikki (VPN)", bkDownload: "Create & download", bkRestore: "Restore from file", bkAuto: "Auto-backup (daily/weekly/monthly)",
@@ -1509,7 +1513,7 @@ $("#nkDiagBtn").addEventListener("click", nkDiagCheck);
    All the analysis lives in /usr/bin/nikki-unblock-trace — the same tool that prints the text report
    over ssh. The server runs it with --json through the standard detached-op machinery; nothing about
    conntrack is re-implemented here or in the CGI. */
-const TA = { client: null, polling: false };
+const TA = { client: null, polling: false, tick: null, left: null };
 async function loadTraceDevs(){
   const sel = $("#taDev"); if (!sel) return;
   let d; try { d = await (await fetch("?api=devicesall")).json(); } catch(e){ d = null; }
@@ -1533,13 +1537,27 @@ function taOpen(){
   loadTraceDevs();
   if (!TA.polling) taPoll();                      // a capture started before a page reload resumes here
 }
+/* The countdown ticks LOCALLY once a second. Driving it straight off the poll made it jump in
+   3-second steps — the runner only rewrites its phase that often — and a timer that skips looks
+   broken to the person watching it, who has been asked to keep reproducing the problem until it ends.
+   The server phase stays the authority: it corrects the local count on every poll. */
 function taShowRun(phase){
-  const n = parseInt(phase, 10), counting = !isNaN(n) && n > 0;
+  const n = parseInt(phase, 10);
+  TA.left = isNaN(n) ? null : n;
+  taPaint();
+  if (!TA.tick) TA.tick = setInterval(() => {
+    if (TA.left === null || TA.left <= 0) return;
+    TA.left--; taPaint();
+  }, 1000);
+}
+function taPaint(){
+  const counting = TA.left !== null && TA.left > 0;
   $("#taRun").hidden = false;
   $("#taNow").hidden = !counting;
-  $("#taCount").textContent = counting ? n + " " + t("taSec") : "";
+  $("#taCount").textContent = counting ? TA.left + " " + t("taSec") : "";
   $("#taPhase").textContent = counting ? "" : t("taParsing");
 }
+function taStopTick(){ if (TA.tick){ clearInterval(TA.tick); TA.tick = null; } TA.left = null; }
 async function taPoll(){
   TA.polling = true;
   let s = null; try { s = await (await fetch("?api=traceop")).json(); } catch(e){}
@@ -1552,6 +1570,7 @@ async function taPoll(){
   // Accept a completion only for OUR operation. A poll that takes any done=1 it happens to see was the
   // exact bug that produced three false diagnoses in a row while this was being built.
   if (!s || !s.done || (TA.client && s.id !== TA.client)) return;
+  taStopTick();
   $("#taRun").hidden = true; $("#taBtn").disabled = false; TA.client = null;
   if (s.ok !== 1){ setMsg($("#taMsg"), t("taFail"), false); return; }
   // The runner renames the report into place BEFORE marking the op done, so it is already there. One
@@ -1582,27 +1601,35 @@ function taRender(d){
   const add = (state, msg, fix) => rows.push({ state, msg, fix });
   const where = r => (r.host || r.dst) + ":" + r.port;
   const many = r => where(r) + (r.n > 1 ? " ×" + r.n : "");
-  taGroup(d.escaped, r => r.why + "|" + r.proto + "|" + where(r)).forEach(r => {
-    const w = many(r), dead = (r.recv === 0 && r.sent > 0) ? " · " + t("taNoAnswer") : "";
-    // The fix exists only for TCP: "intercept every port" widens proxy_tcp_dport and nothing else, so
-    // offering it on a UDP miss would promise a repair it cannot make.
+  // Leaving past the tunnel is NOT a fault by itself — plenty of traffic is supposed to, and plenty
+  // more works perfectly while doing it. Only a flow that got NOTHING BACK is evidence of a problem.
+  // Reported: a working IPsec flow (traffic in both directions) was listed as broken and offered a
+  // "fix", which is how a diagnostic loses the reader's trust in one screen.
+  const escAll = taGroup(d.escaped, r => r.why + "|" + r.proto + "|" + where(r));
+  const silent = escAll.filter(r => r.recv === 0 && r.sent > 0);
+  const talking = escAll.filter(r => !(r.recv === 0 && r.sent > 0));
+  silent.forEach(r => {
+    const w = many(r);
     if (r.why === "port" && r.proto === "tcp")
-      add("bad", t("taEscPort")(w, r.port) + dead, { label: t("taAllPorts"), action: "allports", params: { on: 1 } });
-    // UDP gets ONE port at a time, not an "every port" switch: proxy_udp_dport is a curated list, and
-    // handing mihomo the whole range would pull QUIC, games and discovery traffic into the tunnel.
+      add("bad", t("taEscPort")(w, r.port), { label: t("taAllPorts"), action: "allports", params: { on: 1 } });
+    // One switch, not a button per port. A service picks its ports per session, so adding the one that
+    // happened to show up here is whack-a-mole; the gate belongs open, and rules decide the routing.
     else if (r.why === "port")
-      add("warn", t("taEscPortU")(w, r.port) + dead,
-          { label: t("taUdpPort")(r.port), action: "udpport", params: { port: r.port }, note: "taUdpNote" });
+      add("bad", t("taEscPortU")(w, r.port),
+          { label: t("taAllUdp"), action: "alludp", params: { on: 1 }, note: "taUdpNote" });
     else if (r.why === "quic") add("info", t("taEscQuic")(w));
     else if (r.why === "excluded") add("info", t("taEscExcluded")(w));
     else if (r.why === "reserved") add("info", t("taEscReserved")(w));
     // A flow older than the rules stays direct until it is re-established — restarting nikki is what
     // makes the app reconnect into the current rules.
-    else add("info", t("taEscOld")(w) + dead,
-            { label: t("taRestartFix"), action: "svc", params: { op: "restart" } });
-    // NOTE: no "add this IP to the rules" button anywhere above. For an escaped flow a rule is useless
-    // by construction — the traffic never reached mihomo, so no rule of ours could have matched it.
+    else add("info", t("taEscOld")(w), { label: t("taRestartFix"), action: "svc", params: { op: "restart" } });
   });
+  // The rest left the tunnel and worked. One counting line, no addresses: it is context, not a finding.
+  if (talking.length) add("info", t("taEscFine")(talking.length));
+  // NOTE: no "add this IP to the rules" button anywhere above. For an escaped flow a rule is useless
+  // by construction — the traffic never reached mihomo, so no rule of ours could have matched it.
+  // Widening the interception is the only thing that can change that, which is why it is the only fix
+  // offered here.
   taGroup(d.syn, r => where(r)).forEach(r => {
     const msg = t("taSyn")(many(r), r.secs) + " · " + (r.path === "tunnel" ? t("taSynTun") : t("taSynDir"));
     // Testable only when a name is known for the address — that is what tells "the address is dead"
@@ -1669,6 +1696,7 @@ $("#taBtn").addEventListener("click", async () => {
   TA.client = ip; taShowRun(60);
   const r = await api("tracestart", { client: ip });
   if (!(r && r.ok && r.started)){
+    taStopTick();
     $("#taRun").hidden = true; $("#taBtn").disabled = false; TA.client = null;
     setMsg($("#taMsg"), (r && r.error === "busy") ? t("taBusy")
                       : (r && r.error === "foreign") ? t("taForeign")(ip, r.lan || "?")
@@ -2080,6 +2108,7 @@ function renderSvc(s){
   $("#svcBootChk").checked = s.boot === 1;
   $("#mssChk").checked = s.mss === 1;
   $("#apChk").checked = s.allports === 1;
+  $("#audpChk").checked = s.alludp === 1;
 }
 let LASTSVC = null;
 function renderGuard(s){
@@ -2358,6 +2387,13 @@ $("#mssChk").addEventListener("change", async e => {
 $("#apChk").addEventListener("change", async e => {
   e.currentTarget.disabled = true; setMsg($("#svcMsg"), t("applying"));
   const res = await api("allports", { on: e.currentTarget.checked ? 1 : 0 });
+  e.currentTarget.disabled = false;
+  setMsg($("#svcMsg"), res && res.ok ? t("done") : t("errP"), !res || res.ok);
+  loadSvc();
+});
+$("#audpChk").addEventListener("change", async e => {
+  e.currentTarget.disabled = true; setMsg($("#svcMsg"), t("applying"));
+  const res = await api("alludp", { on: e.currentTarget.checked ? 1 : 0 });
   e.currentTarget.disabled = false;
   setMsg($("#svcMsg"), res && res.ok ? t("done") : t("errP"), !res || res.ok);
   loadSvc();
