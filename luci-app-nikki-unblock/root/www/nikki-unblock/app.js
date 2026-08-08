@@ -1509,7 +1509,7 @@ $("#nkDiagBtn").addEventListener("click", nkDiagCheck);
    All the analysis lives in /usr/bin/nikki-unblock-trace — the same tool that prints the text report
    over ssh. The server runs it with --json through the standard detached-op machinery; nothing about
    conntrack is re-implemented here or in the CGI. */
-const TA = { client: null, polling: false, tick: null, left: null };
+const TA = { client: null, polling: false, tick: null, deadline: null };
 async function loadTraceDevs(){
   const sel = $("#taDev"); if (!sel) return;
   let d; try { d = await (await fetch("?api=devicesall")).json(); } catch(e){ d = null; }
@@ -1533,27 +1533,34 @@ function taOpen(){
   loadTraceDevs();
   if (!TA.polling) taPoll();                      // a capture started before a page reload resumes here
 }
-/* The countdown ticks LOCALLY once a second. Driving it straight off the poll made it jump in
-   3-second steps — the runner only rewrites its phase that often — and a timer that skips looks
-   broken to the person watching it, who has been asked to keep reproducing the problem until it ends.
-   The server phase stays the authority: it corrects the local count on every poll. */
+/* The countdown runs off a DEADLINE, not off the poll — and not off a local counter either.
+   Both of the obvious ways are wrong. Painting whatever the poll returns makes it jump in 3-second
+   steps, because that is how often the runner rewrites its phase. Ticking locally and "correcting" on
+   each poll makes it stutter BACKWARDS (60→59→60→57→58→57): the phase the server hands back is up to
+   3 s stale, so it is usually HIGHER than the local tick has already reached, and the two fight over
+   one number.
+   A deadline has no such conflict: the clock decides what to show, and the server can only ever pull
+   the deadline EARLIER — never push it back out. It also survives a backgrounded tab, where the
+   browser throttles timers and any counter-based approach silently falls behind. */
 function taShowRun(phase){
   const n = parseInt(phase, 10);
-  TA.left = isNaN(n) ? null : n;
+  if (isNaN(n)) TA.deadline = null;   // phase stopped being a number: capture done, parsing now
+  else {
+    const srv = Date.now() + n * 1000;
+    if (TA.deadline === null || srv < TA.deadline) TA.deadline = srv;
+  }
   taPaint();
-  if (!TA.tick) TA.tick = setInterval(() => {
-    if (TA.left === null || TA.left <= 0) return;
-    TA.left--; taPaint();
-  }, 1000);
+  if (!TA.tick) TA.tick = setInterval(taPaint, 1000);
 }
 function taPaint(){
-  const counting = TA.left !== null && TA.left > 0;
+  const left = TA.deadline === null ? 0 : Math.max(0, Math.ceil((TA.deadline - Date.now()) / 1000));
+  const counting = left > 0;
   $("#taRun").hidden = false;
   $("#taNow").hidden = !counting;
-  $("#taCount").textContent = counting ? TA.left + " " + t("taSec") : "";
+  $("#taCount").textContent = counting ? left + " " + t("taSec") : "";
   $("#taPhase").textContent = counting ? "" : t("taParsing");
 }
-function taStopTick(){ if (TA.tick){ clearInterval(TA.tick); TA.tick = null; } TA.left = null; }
+function taStopTick(){ if (TA.tick){ clearInterval(TA.tick); TA.tick = null; } TA.deadline = null; }
 async function taPoll(){
   TA.polling = true;
   let s = null; try { s = await (await fetch("?api=traceop")).json(); } catch(e){}
@@ -1688,7 +1695,12 @@ $("#taBtn").addEventListener("click", async () => {
   const ip = $("#taDev").value;
   if (!ip){ setMsg($("#taMsg"), t("taPickDev"), false); return; }
   $("#taBtn").disabled = true; $("#taResult").hidden = true;
-  TA.client = ip; taShowRun(60);
+  // The box opens right away, but the deadline is set from the SERVER's window length, not from a
+  // number hardcoded here — a local guess that disagreed with the runner would end the countdown at
+  // the wrong moment, and the deadline can only ever be pulled earlier afterwards.
+  TA.client = ip; TA.deadline = null;
+  $("#taRun").hidden = false; $("#taNow").hidden = false;
+  $("#taCount").textContent = "…"; $("#taPhase").textContent = "";
   const r = await api("tracestart", { client: ip });
   if (!(r && r.ok && r.started)){
     taStopTick();
@@ -1699,6 +1711,7 @@ $("#taBtn").addEventListener("click", async () => {
     return;
   }
   setMsg($("#taMsg"), "");
+  taShowRun(r.secs || 60);
   if (!TA.polling) taPoll();
 });
 
