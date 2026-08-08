@@ -1187,7 +1187,7 @@ sharelink_to_yaml() {
 	_query=""; case "$_rest" in *\?*) _query="${_rest#*\?}"; _rest="${_rest%%\?*}" ;; esac
 	case "$_scheme" in
 	vless|trojan)
-		_uup="${_rest%@*}"; _hostport="${_rest#*@}"; _host="${_hostport%:*}"; _port="${_hostport##*:}"
+		_uup="${_rest%@*}"; _hostport="${_rest#*@}"; _hostport="${_hostport%%/*}"; _host="${_hostport%:*}"; _port="${_hostport##*:}"
 		_sni=$(urldec "$(qparam "$_query" sni)"); [ -z "$_sni" ] && _sni=$(urldec "$(qparam "$_query" peer)")
 		_net=$(qparam "$_query" type); [ -z "$_net" ] && _net=tcp
 		_sec=$(qparam "$_query" security); _fp=$(qparam "$_query" fp); _path=$(urldec "$(qparam "$_query" path)"); _hosth=$(urldec "$(qparam "$_query" host)")
@@ -1211,15 +1211,17 @@ sharelink_to_yaml() {
 		return 0 ;;   # never let a trailing conditional (e.g. empty path) set a non-zero exit
 	ss)
 		# ss://base64(method:pass)@host:port  OR  ss://base64(method:pass@host:port)
-		_b="${_rest%@*}"; _hp="${_rest#*@}"
+		_b="${_rest%@*}"; _hp="${_rest#*@}"; _hp="${_hp%%/*}"
 		case "$_rest" in *@*) _mp=$(b64dec "$_b"); _host="${_hp%:*}"; _port="${_hp##*:}" ;;
-		                 *) _dec=$(b64dec "$_rest"); _mp="${_dec%@*}"; _hp2="${_dec#*@}"; _host="${_hp2%:*}"; _port="${_hp2##*:}" ;; esac
+		                 *) _dec=$(b64dec "$_rest"); _mp="${_dec%@*}"; _hp2="${_dec#*@}"; _hp2="${_hp2%%/*}"; _host="${_hp2%:*}"; _port="${_hp2##*:}" ;; esac
 		_method="${_mp%%:*}"; _pass="${_mp#*:}"
 		echo "  - name: $_n"; echo "    type: ss"; echo "    server: $_host"; echo "    port: $_port"
 		echo "    cipher: $_method"; echo "    password: $_pass"; echo "    udp: true"
 		return 0 ;;
 	hysteria2|hy2)
-		_uup="${_rest%@*}"; _hp="${_rest#*@}"; _host="${_hp%:*}"; _port="${_hp##*:}"
+		# remnawave emits `hysteria2://uuid@host:10455/` — the trailing path must go before the port is
+		# split off, or `port: 10455/` lands in the node and mihomo refuses to start (nikki dies silently)
+		_uup="${_rest%@*}"; _hp="${_rest#*@}"; _hp="${_hp%%/*}"; _host="${_hp%:*}"; _port="${_hp##*:}"
 		_sni=$(urldec "$(qparam "$_query" sni)")
 		echo "  - name: $_n"; echo "    type: hysteria2"; echo "    server: $_host"; echo "    port: $_port"
 		echo "    password: $_uup"; [ -n "$_sni" ] && echo "    sni: $_sni"
