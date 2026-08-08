@@ -67,6 +67,8 @@ const I18N = {
     z2ResOkRedir: c => "открывается (переадресация " + c + ")",
     unitKb: "КБ", unitB: "Б",
     z2ResDpi: "не открывается — DPI рвёт соединение, попробуй другую стратегию",
+    z2ResDns: "имя не разрешается — дело в DNS роутера, не в DPI",
+    z2ResTcp: "порт не открывается — блокировка по адресу, стратегия тут бессильна",
     z2ResThrottled: sz => "завис на " + sz + " — удушение по IP, десинк не поможет",
     z2ResChallenge: "проверка Cloudflare — в браузере пройдёт",
     z2ResTunnel: g => "идёт не через zapret2, а в VPN (" + g + ")",
@@ -145,7 +147,10 @@ const I18N = {
     dcOpenOk: (c, sz) => "Открывается: код " + c + ", получено " + sz,
     dcOpenRedir: c => "Открывается: переадресация " + c + " (тела нет, это нормально)",
     dcOpenThrottled: (sz, s) => "Ответ начался и завис на " + sz + " (" + s + " с до таймаута) — это удушение по IP, десинк тут не поможет, нужен туннель",
-    dcOpenDpi: "Соединение не устанавливается вообще — DPI рвёт рукопожатие, нужна другая стратегия zapret2",
+    dcOpenDns: "Имя не разрешается — до блокировок дело не доходит, проблема в DNS роутера",
+    dcOpenTcp: "Соединение не устанавливается: порт не открывается вообще. Это блокировка по адресу, десинк тут не поможет — нужен туннель",
+    dcOpenTls: "TCP-соединение встаёт, но рвётся, как только в рукопожатии звучит имя сайта. Классический DPI по SNI — его и обходит zapret2",
+    dcOpenCutoff: "Рукопожатие прошло, а ответ не пришёл вовсе — соединение обрывают уже после установки",
     dcOpenChallenge: "Cloudflare показывает проверку — в браузере она проходит сама, это не блокировка",
     dcProbeCaveat: "Проверка идёт с роутера по TCP: у клиента результат может отличаться, если браузер уйдёт по QUIC или будет резолвить домен своим DNS",
     dcTitle: "Почему не открывается сайт?",
@@ -335,6 +340,8 @@ const I18N = {
     z2ResOkRedir: c => "opens (redirect " + c + ")",
     unitKb: "KB", unitB: "B",
     z2ResDpi: "does not open — DPI breaks the connection, try another strategy",
+    z2ResDns: "the name doesn't resolve — it's the router's DNS, not DPI",
+    z2ResTcp: "the port never opens — an address-level block; no strategy reaches that",
     z2ResThrottled: sz => "stalled at " + sz + " — IP throttling, desync cannot fix it",
     z2ResChallenge: "Cloudflare challenge — a browser passes it",
     z2ResTunnel: g => "not going through zapret2 — routed to VPN (" + g + ")",
@@ -413,7 +420,10 @@ const I18N = {
     dcOpenOk: (c, sz) => "Opens: code " + c + ", " + sz + " received",
     dcOpenRedir: c => "Opens: redirect " + c + " (no body, which is normal)",
     dcOpenThrottled: (sz, s) => "Response started then stalled at " + sz + " (" + s + " s to timeout) — IP-level throttling; no desync fixes this, it needs a tunnel",
-    dcOpenDpi: "No connection at all — DPI is breaking the handshake; try another zapret2 strategy",
+    dcOpenDns: "The name doesn't resolve — this never gets as far as any blocking; it's the router's DNS",
+    dcOpenTcp: "No connection: the port never opens at all. That is an address-level block; desync won't help, it needs a tunnel",
+    dcOpenTls: "TCP connects fine, then dies the moment the handshake announces the site's name. Textbook SNI-based DPI — exactly what zapret2 defeats",
+    dcOpenCutoff: "The handshake completed but no response ever came — the connection is cut after it is established",
     dcOpenChallenge: "Cloudflare is showing a challenge — a browser solves it, this is not a block",
     dcProbeCaveat: "Probed from the router over TCP: a client may differ if the browser uses QUIC or resolves the domain itself",
     dcTitle: "Why doesn't this site open?",
@@ -1435,7 +1445,11 @@ async function dcCheck(dom){
   if (p && p.ok){
       if (p.verdict === "ok") render({ state: "ok", msg: (p.code >= 300 && p.code < 400) ? t("dcOpenRedir")(p.code) : t("dcOpenOk")(p.code, sizeStr(p.bytes)) });
     else if (p.verdict === "throttled") render({ state: "bad", msg: t("dcOpenThrottled")(sizeStr(p.bytes), p.secs) });
-    else if (p.verdict === "dpi") render({ state: "bad", msg: t("dcOpenDpi") });
+    // the layer the request died at names the fix: DNS, address, SNI, or after the handshake
+    else if (p.verdict === "dns") render({ state: "bad", msg: t("dcOpenDns") });
+    else if (p.verdict === "tcp") render({ state: "bad", msg: t("dcOpenTcp") });
+    else if (p.verdict === "tls") render({ state: "bad", msg: t("dcOpenTls") });
+    else if (p.verdict === "cutoff") render({ state: "bad", msg: t("dcOpenCutoff") });
     else if (p.verdict === "challenge") render({ state: "info", msg: t("dcOpenChallenge") });
     render({ state: "info", msg: t("dcProbeCaveat") });
   }
@@ -1802,9 +1816,15 @@ async function z2Try(dom){
     return;
   }
   if (r.verdict === "challenge"){ cell.textContent = t("z2ResChallenge"); return; }
-  cell.textContent = r.verdict === "throttled" ? t("z2ResThrottled")(sizeStr(r.bytes)) : t("z2ResDpi");
+  // Which layer died decides whether zapret2 can even be the answer. Dying at TLS is desync's home
+  // ground; a port that never opens, or a name that won't resolve, is not something a strategy change
+  // can reach — so those must not read as "try another strategy".
+  cell.textContent = r.verdict === "throttled" ? t("z2ResThrottled")(sizeStr(r.bytes))
+                   : r.verdict === "dns" ? t("z2ResDns")
+                   : r.verdict === "tcp" ? t("z2ResTcp")
+                   : t("z2ResDpi");
   // only offer the move where routing is genuinely the answer
-  if (r.verdict === "throttled"){
+  if (r.verdict === "throttled" || r.verdict === "tcp"){
     const b = document.createElement("button");
     b.className = "ghost"; b.textContent = t("z2MoveBtn");
     b.addEventListener("click", async () => {
