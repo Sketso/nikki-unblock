@@ -199,11 +199,10 @@ const I18N = {
     taEscReserved: w => "Мимо туннеля: " + w + " — адрес в списке исключений (reserved_ip). Это норма.",
     taEscOld: w => "Мимо туннеля: " + w + " — соединение старше правил (например, установлено до перезапуска nikki).",
     taAllPorts: "Перехватывать все порты",
-    taAllUdp: "Перехватывать весь UDP",
-    taUdpNote: "Теперь UDP доходит до mihomo, и адрес можно завернуть в туннель обычным правилом — по домену или IP, как всё остальное. Само по себе это никуда не заворачивает: без правила трафик уйдёт напрямую, только уже через mihomo.",
+    taUdpNote: "Теперь трафик доходит до mihomo, и адрес можно завернуть в туннель обычным правилом — по домену или IP, как всё остальное. Само по себе это никуда не заворачивает: без правила трафик уйдёт напрямую, только уже через mihomo.",
     taRestartFix: "Перезапустить nikki",
     taStale: "Отчёт снят ДО этой починки, поэтому строки выше показывают прошлое состояние. Чтобы увидеть результат, запишите заново.",
-    act_alludp: "перехват всего UDP",
+    act_allports: "перехват всех портов",
     taSyn: (w, s) => "Соединение не установилось: " + w + " — " + s + " с тишины в ответ на запрос",
     taSynTun: "через туннель", taSynDir: "напрямую",
     taStall: (w, b) => "Запрос ушёл в туннель, ответа нет: " + w + " — отправлено " + b + " Б, принято 0",
@@ -230,8 +229,7 @@ const I18N = {
     svcReload: "Перечитать конфиг", svcAutostart: "Автозапуск вкл/выкл",
     svcRunning: "nikki работает", svcStopped: "nikki остановлен",
     svcBoot: "Автозапуск при загрузке", svcOn: "вкл", svcOff: "выкл",
-    audpLabel: "Перехватывать весь UDP", audpHint: "То же самое для UDP: без этого до mihomo доходят только порты из списка nikki, а всё остальное (STUN и медиа звонков, игровой трафик, QUIC при выключенной блокировке) уходит мимо — и правило по домену или IP на него уже не подействует, потому что трафик до правил не доехал. Порт 53 намеренно не включается: DNS у nikki решает отдельный тумблер. Переключение перезапускает nikki — сеть моргнёт на несколько секунд.",
-    apLabel: "Перехватывать все порты", apHint: "Без этого в туннель попадает только трафик на портах 80 и 443, а всё остальное уходит мимо — и этого не видно ни в панели, ни в логах. Так ломались медиа в Telegram: он уходит на порт 5222, ответа не получает, картинка висит. Замеры на роутере разницы в скорости и задержке не показали. Переключение перезапускает nikki — сеть моргнёт на несколько секунд.", mssLabel: "Фикс зависаний загрузок (MSS-clamp)", mssHint: "Включи, если через VPN большие загрузки или сайты зависают / грузятся наполовину, а мелочь при этом работает. Чинит размер сетевых пакетов под туннель. Оставлять включённым безопасно.",
+    apLabel: "Перехватывать все порты (TCP и UDP)", apHint: "Без этого до mihomo доходит лишь горстка портов, а всё остальное уходит мимо — и этого не видно ни в панели, ни в логах, потому что трафик туда просто не попадал. Правило по домену или IP на такой трафик тоже не подействует: он утёк раньше, чем правила его увидели. Так ломались медиа в Telegram (порт 5222) и звонки со STUN на нестандартных портах. Замеры на роутере разницы в скорости и задержке для TCP не показали; UDP идёт лишним хопом через mihomo, на типе NAT для P2P и консольных игр это может сказаться. Локальная сеть не затрагивается вообще. Переключение перезапускает nikki — сеть моргнёт на несколько секунд.", mssLabel: "Фикс зависаний загрузок (MSS-clamp)", mssHint: "Включи, если через VPN большие загрузки или сайты зависают / грузятся наполовину, а мелочь при этом работает. Чинит размер сетевых пакетов под туннель. Оставлять включённым безопасно.",
     bkGroupTitle: "Бэкап настроек",
     bkTitle: "Nikki (VPN)", bkDownload: "Создать и скачать", bkRestore: "Восстановить из файла", bkAuto: "Авто-бэкап (день/неделя/месяц)",
     bkHint: "Сохраняет правила, ноды, подписки и mixin nikki (без гео-баз, ~КБ). Восстановление заменяет текущие настройки; перед этим делается снимок для отката.",
@@ -469,11 +467,10 @@ const I18N = {
     taEscReserved: w => "Past the tunnel: " + w + " — the address is on the exclusion list (reserved_ip). This is normal.",
     taEscOld: w => "Past the tunnel: " + w + " — the connection is older than the rules (e.g. opened before nikki restarted).",
     taAllPorts: "Intercept every port",
-    taAllUdp: "Intercept all UDP",
-    taUdpNote: "UDP now reaches mihomo, so this destination can be sent into the tunnel by an ordinary rule — by domain or IP, like everything else. This alone routes nothing: without a rule the traffic still goes direct, just via mihomo.",
+    taUdpNote: "The traffic now reaches mihomo, so this destination can be sent into the tunnel by an ordinary rule — by domain or IP, like everything else. This alone routes nothing: without a rule the traffic still goes direct, just via mihomo.",
     taRestartFix: "Restart nikki",
     taStale: "This report was taken BEFORE the fix, so the rows above show the earlier state. Record again to see the result.",
-    act_alludp: "intercept all UDP",
+    act_allports: "intercept every port",
     taSyn: (w, s) => "Connection never established: " + w + " — " + s + " s of silence in reply",
     taSynTun: "through the tunnel", taSynDir: "direct",
     taStall: (w, b) => "Request went into the tunnel, no answer: " + w + " — " + b + " B sent, 0 received",
@@ -500,8 +497,7 @@ const I18N = {
     svcReload: "Reload config", svcAutostart: "Toggle autostart",
     svcRunning: "nikki running", svcStopped: "nikki stopped",
     svcBoot: "Start on boot", svcOn: "on", svcOff: "off",
-    audpLabel: "Intercept all UDP", audpHint: "The same thing for UDP: without it only the ports on nikki's list reach mihomo, and everything else (call STUN and media, game traffic, QUIC when the block is off) leaves unproxied — where a domain or IP rule can no longer touch it, because the traffic never got as far as the rules. Port 53 is deliberately left out: nikki decides DNS with a separate switch. Toggling restarts nikki, so the network blinks for a few seconds.",
-    apLabel: "Intercept every port", apHint: "Without this only ports 80 and 443 reach the tunnel and everything else leaves unproxied — invisible in this panel and in the logs. That is how Telegram media broke: it falls back to port 5222, gets no answer, and the picture just hangs. Measured on the router, it costs no speed and no latency. Toggling restarts nikki, so the network blinks for a few seconds.", mssLabel: "Fix download stalls (MSS clamp)", mssHint: "Turn on if large downloads or sites stall / load only halfway through the VPN while small stuff works fine. Fixes network packet size for the tunnel. Safe to leave on.",
+    apLabel: "Intercept every port (TCP and UDP)", apHint: "Without this only a handful of ports reach mihomo and everything else leaves unproxied — invisible in this panel and in the logs, because the traffic never got there. A domain or IP rule can't touch it either: it escaped before the rules ever saw it. That is how Telegram media broke (port 5222) and how calls break when STUN uses an off-list port. Measured on the router, TCP costs no speed and no latency; UDP takes an extra hop through mihomo, which can affect NAT type for P2P and console games. LAN traffic is untouched. Toggling restarts nikki, so the network blinks for a few seconds.", mssLabel: "Fix download stalls (MSS clamp)", mssHint: "Turn on if large downloads or sites stall / load only halfway through the VPN while small stuff works fine. Fixes network packet size for the tunnel. Safe to leave on.",
     bkGroupTitle: "Settings backup",
     bkTitle: "Nikki (VPN)", bkDownload: "Create & download", bkRestore: "Restore from file", bkAuto: "Auto-backup (daily/weekly/monthly)",
     bkHint: "Saves nikki's rules, nodes, subscriptions and mixin (no geo databases, ~KB). Restore replaces current settings; a snapshot is taken first for rollback.",
@@ -1616,7 +1612,7 @@ function taRender(d){
     // happened to show up here is whack-a-mole; the gate belongs open, and rules decide the routing.
     else if (r.why === "port")
       add("bad", t("taEscPortU")(w, r.port),
-          { label: t("taAllUdp"), action: "alludp", params: { on: 1 }, note: "taUdpNote" });
+          { label: t("taAllPorts"), action: "allports", params: { on: 1 }, note: "taUdpNote" });
     else if (r.why === "quic") add("info", t("taEscQuic")(w));
     else if (r.why === "excluded") add("info", t("taEscExcluded")(w));
     else if (r.why === "reserved") add("info", t("taEscReserved")(w));
@@ -2108,7 +2104,6 @@ function renderSvc(s){
   $("#svcBootChk").checked = s.boot === 1;
   $("#mssChk").checked = s.mss === 1;
   $("#apChk").checked = s.allports === 1;
-  $("#audpChk").checked = s.alludp === 1;
 }
 let LASTSVC = null;
 function renderGuard(s){
@@ -2387,13 +2382,6 @@ $("#mssChk").addEventListener("change", async e => {
 $("#apChk").addEventListener("change", async e => {
   e.currentTarget.disabled = true; setMsg($("#svcMsg"), t("applying"));
   const res = await api("allports", { on: e.currentTarget.checked ? 1 : 0 });
-  e.currentTarget.disabled = false;
-  setMsg($("#svcMsg"), res && res.ok ? t("done") : t("errP"), !res || res.ok);
-  loadSvc();
-});
-$("#audpChk").addEventListener("change", async e => {
-  e.currentTarget.disabled = true; setMsg($("#svcMsg"), t("applying"));
-  const res = await api("alludp", { on: e.currentTarget.checked ? 1 : 0 });
   e.currentTarget.disabled = false;
   setMsg($("#svcMsg"), res && res.ok ? t("done") : t("errP"), !res || res.ok);
   loadSvc();
