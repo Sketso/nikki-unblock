@@ -1542,25 +1542,34 @@ function taOpen(){
    A deadline has no such conflict: the clock decides what to show, and the server can only ever pull
    the deadline EARLIER — never push it back out. It also survives a backgrounded tab, where the
    browser throttles timers and any counter-based approach silently falls behind. */
+/* ONE painter, and it wakes exactly when the digit changes.
+   A 1-second interval plus a repaint on every poll meant two painters at drifting phases (a poll
+   cycle is 1000 ms PLUS a round-trip), and whichever landed first after a boundary decided when the
+   digit visibly changed — so every few seconds one second went by in half the time. The value was
+   never wrong, only shown at an uneven moment.
+   taTick computes the remaining time from the deadline and schedules itself for the exact instant
+   that number drops, so each digit is on screen for its full second and there is nothing to keep in
+   sync. The poll no longer paints at all: it only moves the deadline, and only ever earlier. */
+function taTick(){
+  clearTimeout(TA.tick); TA.tick = null;
+  const ms = TA.deadline === null ? 0 : TA.deadline - Date.now();
+  const left = Math.max(0, Math.ceil(ms / 1000));
+  $("#taRun").hidden = false;
+  $("#taNow").hidden = left <= 0;
+  $("#taCount").textContent = left > 0 ? left + " " + t("taSec") : "";
+  $("#taPhase").textContent = left > 0 ? "" : t("taParsing");
+  if (left > 0) TA.tick = setTimeout(taTick, ms - (left - 1) * 1000);
+}
 function taShowRun(phase){
-  const n = parseInt(phase, 10);
+  const n = parseInt(phase, 10), before = TA.deadline;
   if (isNaN(n)) TA.deadline = null;   // phase stopped being a number: capture done, parsing now
   else {
     const srv = Date.now() + n * 1000;
     if (TA.deadline === null || srv < TA.deadline) TA.deadline = srv;
   }
-  taPaint();
-  if (!TA.tick) TA.tick = setInterval(taPaint, 1000);
+  if (TA.deadline !== before) taTick();   // repaint only when the deadline actually moved
 }
-function taPaint(){
-  const left = TA.deadline === null ? 0 : Math.max(0, Math.ceil((TA.deadline - Date.now()) / 1000));
-  const counting = left > 0;
-  $("#taRun").hidden = false;
-  $("#taNow").hidden = !counting;
-  $("#taCount").textContent = counting ? left + " " + t("taSec") : "";
-  $("#taPhase").textContent = counting ? "" : t("taParsing");
-}
-function taStopTick(){ if (TA.tick){ clearInterval(TA.tick); TA.tick = null; } TA.deadline = null; }
+function taStopTick(){ clearTimeout(TA.tick); TA.tick = null; TA.deadline = null; }
 async function taPoll(){
   TA.polling = true;
   let s = null; try { s = await (await fetch("?api=traceop")).json(); } catch(e){}
