@@ -181,6 +181,37 @@ const I18N = {
     nkDiagAllOff: "Все ноды выключены — трафик идёт напрямую",
     nkDiagNodeDead: "Активная нода не отвечает",
     nkDiagNodeOk: (n, ms) => "Активная нода отвечает: " + n + " — " + ms + " мс",
+    taTitle: "Почему не работает на этом устройстве?",
+    taHint: "Для случая «на телевизоре работает, на телефоне нет». Записывает 60 секунд трафика выбранного устройства и показывает то, чего не видно ни в панели, ни в логах mihomo: что ушло мимо туннеля, что не смогло соединиться и что молчит в ответ.",
+    taWarm: "Сначала полностью выгрузите приложение из памяти — без холодного старта зависание не повторится и в запись не попадёт.",
+    taBtn: "Записать", taSec: "с",
+    taNow: "Воспроизведите проблему ПРЯМО СЕЙЧАС",
+    taParsing: "Разбираем запись…",
+    taBusy: "Запись уже идёт — дождитесь её окончания",
+    taNoDevs: "Ни одного устройства с известным адресом. Включите его и обновите страницу.",
+    taPickDev: "Выберите устройство",
+    taFail: "Записать не удалось — попробуйте ещё раз",
+    taNoAnswer: "ответа нет",
+    taEscPort: (w, p) => "Ушло мимо туннеля: " + w + " — TCP-порт " + p + " вне перехвата, mihomo этого трафика не видел",
+    taEscPortU: (w, p) => "Ушло мимо туннеля: " + w + " — UDP-порт " + p + " вне перехвата",
+    taEscQuic: w => "Мимо туннеля: " + w + " — это QUIC, его дропает тумблер «Блокировать QUIC». Так и задумано: приложение должно откатиться на TCP.",
+    taEscExcluded: w => "Мимо туннеля: " + w + " — устройство исключено из проксирования. Это норма, если вы сами так решили.",
+    taEscReserved: w => "Мимо туннеля: " + w + " — адрес в списке исключений (reserved_ip). Это норма.",
+    taEscOld: w => "Мимо туннеля: " + w + " — соединение старше правил (например, установлено до перезапуска nikki).",
+    taAllPorts: "Перехватывать все порты",
+    taSyn: (w, s) => "Соединение не установилось: " + w + " — " + s + " с тишины в ответ на запрос",
+    taSynTun: "через туннель", taSynDir: "напрямую",
+    taStall: (w, b) => "Запрос ушёл в туннель, ответа нет: " + w + " — отправлено " + b + " Б, принято 0",
+    taDirect: (h, n) => "mihomo отправил напрямую, и ответа не было: " + h + " (соединений: " + n + ")",
+    taAddDom: "Добавить домен в туннель",
+    taSniBtn: "Проверить по имени", taSniRun: "Проверяем…",
+    taSniSni: h => "Режут по имени: голый адрес отвечает, а тот же запрос с именем " + h + " — нет. Это DPI по SNI; поможет туннель или zapret2.",
+    taSniDead: "С роутера не открывается ни с именем, ни без него. На SNI это не указывает — адресат просто недоступен.",
+    taSniOk: "С роутера имя открывается прямо сейчас — значит, обрыв был кратковременным или касается только этого устройства.",
+    taSniCaveat: "Проверка идёт с роутера и через mihomo, поэтому адрес мог быть выбран им, а не взят из отчёта.",
+    taHealthy: n => "Здоровых потоков через туннель: " + n,
+    taClean: "Проблемных потоков за окно не нашли.",
+    taNoTraffic: "За окно устройство не открыло ни одного соединения — либо выбран не тот адрес, либо приложение так и не запустили.",
     nikkiUnconf: "⚠ nikki установлен, но не настроен: нет профиля или сервис выключен — mihomo не запускается, поэтому VPN-ноды и правила «→ VPN» не работают.",
     nikkiUnconfFix: "Настроить и запустить",
     nodeNikkiDown: "нода сохранена, но nikki не запущен: включи сервис и задай профиль (Services → Nikki), потом проверь ноду",
@@ -412,6 +443,37 @@ const I18N = {
     nkDiagAllOff: "Every node is off — traffic goes direct",
     nkDiagNodeDead: "The active node does not respond",
     nkDiagNodeOk: (n, ms) => "Active node responds: " + n + " — " + ms + " ms",
+    taTitle: "Why doesn't it work on THIS device?",
+    taHint: "For the «works on the TV, not on the phone» case. Records 60 seconds of the chosen device's traffic and shows what neither this panel nor mihomo's log can: what left past the tunnel, what never connected, and what went silent.",
+    taWarm: "Force-quit the app first — without a cold start the hang won't happen again and won't make it into the recording.",
+    taBtn: "Record", taSec: "s",
+    taNow: "Reproduce the problem RIGHT NOW",
+    taParsing: "Analysing the recording…",
+    taBusy: "A recording is already running — wait for it to finish",
+    taNoDevs: "No device with a known address. Turn it on and reload the page.",
+    taPickDev: "Pick a device",
+    taFail: "The recording failed — try again",
+    taNoAnswer: "no answer",
+    taEscPort: (w, p) => "Left past the tunnel: " + w + " — TCP port " + p + " is not intercepted, mihomo never saw this traffic",
+    taEscPortU: (w, p) => "Left past the tunnel: " + w + " — UDP port " + p + " is not intercepted",
+    taEscQuic: w => "Past the tunnel: " + w + " — this is QUIC, dropped by the «Block QUIC» switch. That is by design: the app should fall back to TCP.",
+    taEscExcluded: w => "Past the tunnel: " + w + " — the device is excluded from proxying. Normal, if that was your call.",
+    taEscReserved: w => "Past the tunnel: " + w + " — the address is on the exclusion list (reserved_ip). This is normal.",
+    taEscOld: w => "Past the tunnel: " + w + " — the connection is older than the rules (e.g. opened before nikki restarted).",
+    taAllPorts: "Intercept every port",
+    taSyn: (w, s) => "Connection never established: " + w + " — " + s + " s of silence in reply",
+    taSynTun: "through the tunnel", taSynDir: "direct",
+    taStall: (w, b) => "Request went into the tunnel, no answer: " + w + " — " + b + " B sent, 0 received",
+    taDirect: (h, n) => "mihomo sent it direct and nothing came back: " + h + " (connections: " + n + ")",
+    taAddDom: "Route this domain through the tunnel",
+    taSniBtn: "Test by name", taSniRun: "Testing…",
+    taSniSni: h => "Cut by name: the bare address answers, the same request carrying the name " + h + " does not. That is SNI-based DPI; the tunnel or zapret2 fixes it.",
+    taSniDead: "Opens from the router neither with the name nor without it. Nothing here points at SNI — the destination is simply unreachable.",
+    taSniOk: "The name opens from the router right now — so the break was brief, or specific to this device.",
+    taSniCaveat: "The test runs from the router and through mihomo, so the address contacted may be its choice rather than the one in the report.",
+    taHealthy: n => "Healthy flows through the tunnel: " + n,
+    taClean: "No problem flows in this window.",
+    taNoTraffic: "The device opened no connections during the window — either the wrong address, or the app was never launched.",
     nikkiUnconf: "⚠ nikki is installed but not configured: no profile, or the service is off — mihomo never starts, so VPN nodes and «→ VPN» rules do nothing.",
     nikkiUnconfFix: "Set up & start",
     nodeNikkiDown: "node saved, but nikki is not running: enable the service and give it a profile (Services → Nikki), then re-check the node",
@@ -553,7 +615,7 @@ document.querySelectorAll(".tab").forEach(tb => tb.addEventListener("click", () 
   if (tb.dataset.view === "nodes") loadNodes().then(autoPingNodes);
   else if (tb.dataset.view === "domains") presetOp.ensure();   // resume a preset spinner if one is applying
   else if (tb.dataset.view === "mgmt") loadSvc();
-  else if (tb.dataset.view === "common") { loadVersions(); loadUpdCheck(); loadBackup(); loadZ2Backup(); loadAuth(); loadUndo(); loadStorage(); }   // Общее: updates + backup + security + storage
+  else if (tb.dataset.view === "common") { loadVersions(); loadUpdCheck(); loadBackup(); loadZ2Backup(); loadAuth(); loadUndo(); loadStorage(); taOpen(); }   // Общее: updates + backup + security + storage + запись устройства
   else if (tb.dataset.view === "devices") loadDevices();
   else if (tb.dataset.view.indexOf("z2") === 0) { loadZapret2(); z2PresetOp.ensure(); }   // any zapret2 sub-view
 }));
@@ -1044,6 +1106,8 @@ function applyCaps(){
   const svc = document.querySelector('#view-mgmt .svc'); if (svc) svc.style.display = CAPS.nikki ? "" : "none";
   const zb = $("#z2bkBlock"); if (zb) zb.hidden = !CAPS.zapret2;
   const nkd = $("#nkDiagBlock"); if (nkd) nkd.hidden = !CAPS.nikki;
+  // the capture reasons about nikki's interception — without nikki there is nothing for it to say
+  const tab = $("#taBlock"); if (tab) tab.hidden = !CAPS.nikki;
   // nikki missing → offer to install it. Doing it by hand is a minefield (its feed is DPI-blocked here,
   // and picking the stable engine silently breaks XHTTP nodes), so the button is the supported path.
   const inb = $("#instNikki"); if (inb) inb.hidden = CAPS.nikki;
@@ -1422,6 +1486,155 @@ async function nkDiagCheck(){
   });
 }
 $("#nkDiagBtn").addEventListener("click", nkDiagCheck);
+
+/* ---------- "why doesn't it work on THIS device?" — a 60-second capture ----------
+   The third diagnostic, for what the other two structurally cannot answer: both of them reason about
+   ROUTING, and routing looks identical for the TV that works and the phone that doesn't. This one
+   watches one device's actual packets — conntrack sees the flows that never reached mihomo, and those
+   are exactly the ones invisible everywhere else in this panel.
+   The user is a PARTICIPANT here, unlike every other operation: nothing shows up unless they reproduce
+   the problem inside the window. Hence a countdown and an instruction instead of a spinner.
+   All the analysis lives in /usr/bin/nikki-unblock-trace — the same tool that prints the text report
+   over ssh. The server runs it with --json through the standard detached-op machinery; nothing about
+   conntrack is re-implemented here or in the CGI. */
+const TA = { client: null, polling: false };
+async function loadTraceDevs(){
+  const sel = $("#taDev"); if (!sel) return;
+  let d; try { d = await (await fetch("?api=devicesall")).json(); } catch(e){ d = null; }
+  // no address = nothing to filter conntrack by, so those rows would be dead options
+  const devs = ((d && d.devices) || []).filter(x => x.ip);
+  const keep = sel.value;
+  sel.innerHTML = devs.map(x => '<option value="' + escH(x.ip) + '">' +
+                                escH((x.name || x.mac) + " · " + x.ip) + '</option>').join("");
+  if (keep && devs.some(x => x.ip === keep)) sel.value = keep;
+  $("#taBtn").disabled = !devs.length;
+  if (!devs.length) setMsg($("#taMsg"), t("taNoDevs"), false);
+}
+function taOpen(){
+  if (MODE === "simple" || !CAPS.nikki) return;   // .adv block — hidden in simple mode, pointless without nikki
+  loadTraceDevs();
+  if (!TA.polling) taPoll();                      // a capture started before a page reload resumes here
+}
+function taShowRun(phase){
+  const n = parseInt(phase, 10), counting = !isNaN(n) && n > 0;
+  $("#taRun").hidden = false;
+  $("#taNow").hidden = !counting;
+  $("#taCount").textContent = counting ? n + " " + t("taSec") : "";
+  $("#taPhase").textContent = counting ? "" : t("taParsing");
+}
+async function taPoll(){
+  TA.polling = true;
+  let s = null; try { s = await (await fetch("?api=traceop")).json(); } catch(e){}
+  if (s && s.running){
+    if (!TA.client) TA.client = s.id;   // adopted after a reload: the op file is the only source of truth
+    taShowRun(s.phase);
+    setTimeout(taPoll, 1000); return;
+  }
+  TA.polling = false;
+  // Accept a completion only for OUR operation. A poll that takes any done=1 it happens to see was the
+  // exact bug that produced three false diagnoses in a row while this was being built.
+  if (!s || !s.done || (TA.client && s.id !== TA.client)) return;
+  $("#taRun").hidden = true; $("#taBtn").disabled = false; TA.client = null;
+  if (s.ok !== 1){ setMsg($("#taMsg"), t("taFail"), false); return; }
+  // The runner renames the report into place BEFORE marking the op done, so it is already there. One
+  // retry covers the odd filesystem that disagrees, and costs nothing when it doesn't happen.
+  let d = await api2("traceresult");
+  if (!d || !d.ok){ await new Promise(r => setTimeout(r, 500)); d = await api2("traceresult"); }
+  if (!d || !d.ok){ setMsg($("#taMsg"), t("taFail"), false); return; }
+  setMsg($("#taMsg"), t("done"));
+  taRender(d);
+}
+async function api2(name){ try { return await (await fetch("?api=" + name)).json(); } catch(e){ return null; } }
+/* One destination usually shows up as a dozen flows (a new source port each retry) — collapsing them
+   keeps the report about DESTINATIONS, which is what the reader can act on. */
+function taGroup(arr, keyf){
+  const m = new Map();
+  (arr || []).forEach(r => {
+    const k = keyf(r), g = m.get(k);
+    if (g){ g.n++; g.sent += (r.sent || 0); g.recv += (r.recv || 0); g.secs = Math.max(g.secs || 0, r.secs || 0); }
+    else m.set(k, Object.assign({ n: 1 }, r));
+  });
+  return [...m.values()];
+}
+function taRender(d){
+  const rows = [];
+  const add = (state, msg, fix) => rows.push({ state, msg, fix });
+  const where = r => (r.host || r.dst) + ":" + r.port;
+  const many = r => where(r) + (r.n > 1 ? " ×" + r.n : "");
+  taGroup(d.escaped, r => r.why + "|" + r.proto + "|" + where(r)).forEach(r => {
+    const w = many(r), dead = (r.recv === 0 && r.sent > 0) ? " · " + t("taNoAnswer") : "";
+    // The fix exists only for TCP: "intercept every port" widens proxy_tcp_dport and nothing else, so
+    // offering it on a UDP miss would promise a repair it cannot make.
+    if (r.why === "port" && r.proto === "tcp")
+      add("bad", t("taEscPort")(w, r.port) + dead, { label: t("taAllPorts"), action: "allports", params: { on: 1 } });
+    else if (r.why === "port") add("warn", t("taEscPortU")(w, r.port) + dead);
+    else if (r.why === "quic") add("info", t("taEscQuic")(w));
+    else if (r.why === "excluded") add("info", t("taEscExcluded")(w));
+    else if (r.why === "reserved") add("info", t("taEscReserved")(w));
+    else add("info", t("taEscOld")(w) + dead);
+    // NOTE: no "add this IP to the rules" button anywhere above. For an escaped flow a rule is useless
+    // by construction — the traffic never reached mihomo, so no rule of ours could have matched it.
+  });
+  taGroup(d.syn, r => where(r)).forEach(r => {
+    const msg = t("taSyn")(many(r), r.secs) + " · " + (r.path === "tunnel" ? t("taSynTun") : t("taSynDir"));
+    // Testable only when a name is known for the address — that is what tells "the address is dead"
+    // apart from "the name is what's blocked".
+    add("bad", msg, r.host ? { label: t("taSniBtn"), probe: { ip: r.dst, host: r.host, port: r.port } } : null);
+  });
+  taGroup(d.stall, r => where(r)).forEach(r => add("bad", t("taStall")(many(r), r.sent)));
+  (d.direct || []).filter(r => r.recv === 0 && /[a-z]/i.test(r.host)).forEach(r =>
+    add("bad", t("taDirect")(r.host, r.cnt),
+        { label: t("taAddDom"), action: "add", params: { type: "DOMAIN-SUFFIX", domain: r.host, node: EXITG } }));
+  const tun = (d.healthy && d.healthy.tunnel) || 0;
+  if (!rows.length) add("info", (!tun && !(d.mihomo && d.mihomo.decisions)) ? t("taNoTraffic") : t("taClean"));
+  // Healthy flows never leave the router — only their count does. The report carries every address the
+  // device talked to, with host names, and this panel gets handed to friends.
+  add("info", t("taHealthy")(tun));
+
+  const box = $("#taResult"); box.innerHTML = ""; box.hidden = false;
+  rows.forEach(e => {
+    const div = document.createElement("div"); div.className = "ytrow " + e.state;
+    div.innerHTML = '<span class="ytic">' + (e.state === "ok" ? "✓" : e.state === "bad" ? "✕" : e.state === "warn" ? "!" : "·") + '</span>' +
+                    '<span class="ytmsg">' + escH(e.msg) + '</span>';
+    if (e.fix){
+      const b = document.createElement("button"); b.className = "ghost"; b.textContent = e.fix.label;
+      b.addEventListener("click", async () => {
+        b.disabled = true;
+        if (e.fix.probe){
+          b.textContent = t("taSniRun");
+          const p = await api("snitest", e.fix.probe);
+          b.remove();
+          const v = (p && p.ok) ? p.verdict : null;
+          const line = document.createElement("div"); line.className = "ythint";
+          line.textContent = (v === "sni" ? t("taSniSni")(e.fix.probe.host) : v === "dead" ? t("taSniDead")
+                             : v === "ok" ? t("taSniOk") : t("errP")) + (v ? " " + t("taSniCaveat") : "");
+          div.insertAdjacentElement("afterend", line);
+          return;
+        }
+        showOverlay(t("applying"));
+        await api(e.fix.action, e.fix.params || {});
+        hideOverlay(); loadSvc(); loadDomains();
+        setMsg($("#taMsg"), t("done"));
+      });
+      div.appendChild(b);
+    }
+    box.appendChild(div);
+  });
+}
+$("#taBtn").addEventListener("click", async () => {
+  const ip = $("#taDev").value;
+  if (!ip){ setMsg($("#taMsg"), t("taPickDev"), false); return; }
+  $("#taBtn").disabled = true; $("#taResult").hidden = true;
+  TA.client = ip; taShowRun(60);
+  const r = await api("tracestart", { client: ip });
+  if (!(r && r.ok && r.started)){
+    $("#taRun").hidden = true; $("#taBtn").disabled = false; TA.client = null;
+    setMsg($("#taMsg"), (r && r.error === "busy") ? t("taBusy") : t("errP") + ((r && r.error) || "?"), false);
+    return;
+  }
+  setMsg($("#taMsg"), "");
+  if (!TA.polling) taPoll();
+});
 
 /* ---------- one-click YouTube diagnostics ---------- */
 async function ytCheck(){

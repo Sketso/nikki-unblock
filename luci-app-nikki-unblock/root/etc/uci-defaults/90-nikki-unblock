@@ -52,6 +52,9 @@ fi
 # when zapret2 is absent/disabled, so it's safe to schedule unconditionally (also covers zapret2 added
 # later). Idempotent: only add the cron line once.
 chmod 0755 /usr/bin/nikki-unblock-z2-watchdog 2>/dev/null
+# per-device capture tool: run by hand over ssh AND by the panel (the CGI refuses to start a capture
+# when it isn't executable, so this is what makes the third diagnostic work at all)
+chmod 0755 /usr/bin/nikki-unblock-trace 2>/dev/null
 if [ -f /etc/crontabs/root ] || touch /etc/crontabs/root; then
 	grep -q nikki-unblock-z2-watchdog /etc/crontabs/root 2>/dev/null || {
 		echo '*/5 * * * * /usr/bin/nikki-unblock-z2-watchdog' >> /etc/crontabs/root

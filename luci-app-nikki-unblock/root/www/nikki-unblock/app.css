@@ -231,6 +231,16 @@
   .devchk { display: inline-flex; align-items: center; gap: .3rem; flex: 0 0 auto; font-size: .82rem; opacity: .85; cursor: pointer; white-space: nowrap; }
   .strow { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin: .3rem 0; }
   .strow select { flex: 1; min-width: 10rem; padding: .5rem .6rem; font-size: .9rem; border-radius: 8px; border: 1px solid #8884; background: #8881; color: inherit; }
+  /* per-device capture: the one operation where the USER has work to do inside the window, so the
+     countdown and the instruction have to be impossible to miss — a spinner would say "wait", which
+     is the opposite of what has to happen. */
+  .tawarm { font-size: .85rem; opacity: .9; padding-left: .55rem; border-left: 2px solid #f59e0b; }
+  .tarun { text-align: center; padding: .9rem .6rem; border: 1px solid #2563eb66; border-radius: 12px; background: #2563eb14; }
+  .tarun[hidden] { display: none; }
+  .tanow { font-size: 1.05rem; font-weight: 700; line-height: 1.3; }
+  .tanow[hidden] { display: none; }
+  .tacount { font-size: 2.6rem; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.15; margin-top: .2rem; }
+  .tarun .hint { margin: 0; }
   .ytresult { margin: .4rem 0; display: flex; flex-direction: column; gap: .35rem; }
   .ytrow { display: flex; align-items: center; gap: .5rem; font-size: .88rem; padding: .3rem .45rem; border-radius: 7px; background: #8881; }
   .ytrow .ytic { flex: 0 0 1.1rem; text-align: center; font-weight: 700; }

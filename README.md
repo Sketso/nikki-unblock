@@ -24,6 +24,10 @@ You set it up once, then everything is buttons in your router's web panel — no
 - **Bypass DPI without a VPN (zapret2)** — for sites blocked "from inside" by your ISP (YouTube, etc.):
   turn zapret2 on/off and add domains to bypass with one-click **presets** (YouTube, Discord, Twitch,
   Twitter/X) or your own. Presets are the recommended replacement for "auto-learn", which often picks up junk.
+- **Find out why it isn't working** — three diagnostic buttons instead of reading logs: "why doesn't
+  this site open", "why isn't the VPN working", and "why doesn't it work on THIS device" (records 60
+  seconds of the chosen device's traffic while you reproduce the problem, and shows what nothing else
+  can: the traffic that left past the tunnel). Every finding comes with a fix button.
 - **One control page** — start/stop each engine, update with one click, and back up each engine
   (manual or scheduled auto-backup).
 - **Simple or full view** — a Simple/Advanced switch (top-right) hides the deep settings so
@@ -143,6 +147,10 @@ feed `/tmp/nu-prepurge.tar.gz` to **General → Backup → Restore**.
   Most people never touch this.
 - **Presets won't load / “lists unavailable”.** Your router can't reach the preset list host — check the
   router's internet/DNS, or that your VPN is up.
+- **Works on one device, not on another.** General → "Why doesn't it work on THIS device?": force-quit
+  the app, start the recording, and reproduce the problem for the whole 60 seconds. The report shows the
+  flows that left past the tunnel — invisible both in this panel and in mihomo's log, because they never
+  reached it. The same thing from a shell: `nikki-unblock-trace -t 60 -c <device-IP>`.
 
 ---
 

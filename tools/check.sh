@@ -27,6 +27,7 @@ if $SH_CHECK -n "$TMP_SH"; then ok "$SH_CHECK -n $CGI"; else err "shell syntax: 
 for f in feed.sh uninstall.sh \
          luci-app-nikki-unblock/root/etc/uci-defaults/90-nikki-unblock \
          luci-app-nikki-unblock/root/usr/bin/nikki-unblock-z2-watchdog \
+         luci-app-nikki-unblock/root/usr/bin/nikki-unblock-trace \
          tools/*.sh; do
 	[ -f "$f" ] || continue
 	tr -d '\r' < "$f" > "$TMP_JS"   # reuse tmp as scratch

@@ -1,0 +1,488 @@
+#!/bin/sh
+# nikki-unblock-trace — ловит трафик, который УШЁЛ МИМО тоннеля.
+#
+# Зачем: панель показывает правила nikki, а mihomo — только те соединения, которые до него дошли.
+# Всё, что nikki не перехватила на уровне nftables (порт вне proxy_tcp_dport, UDP, IPv6, исключённое
+# устройство), в логах mihomo НЕ ВИДНО ВООБЩЕ — а именно это и выглядит как «часть сервиса не
+# работает». Скрипт смотрит с двух сторон одновременно:
+#   1) conntrack — ВСЕ потоки устройства, включая невидимые для mihomo;
+#   2) mihomo /logs — решение по каждому потоку, который до mihomo дошёл (правило + узел).
+# Совмещение даёт три класса: ушло в тоннель / mihomo решил DIRECT / вообще мимо mihomo (утечка).
+#
+# Запуск на роутере (только чтение, ничего не меняет):
+#   nikki-unblock-trace -t 60 -c 192.168.1.151
+#   nikki-unblock-trace -t 60 -c 192.168.1.151 --json   # тот же разбор для панели
+#
+# Порядок работы: запустить, на устройстве воспроизвести проблему (открыть медиа), дождаться отчёта.
+#
+# ОДНА реализация на двоих: человекочитаемый отчёт и панель («Почему не работает на этом
+# устройстве?») считают одно и то же и расходятся только в рендере. --json отдаёт КОДЫ причин, а не
+# фразы: панель двуязычная, и русский текст с сервера обрубил бы английскую половину.
+
+T=60; CLIENT=""; DEV=""; JSON=0
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-t) T="$2"; shift 2 ;;
+		-c) CLIENT="$2"; shift 2 ;;
+		-d) DEV="$2"; shift 2 ;;
+		--json) JSON=1; shift ;;
+		-h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+		*) echo "unknown arg: $1" >&2; exit 1 ;;
+	esac
+done
+
+say() { [ "$JSON" = 1 ] || echo "$@"; }   # прогресс не должен попадать в JSON-поток
+die() {   # $1=код ошибки $2=текст
+	if [ "$JSON" = 1 ]; then printf '{"ok":false,"error":"%s"}\n' "$1"
+	else echo "$2" >&2; fi
+	exit 1
+}
+
+# -d ищет устройство по имени в аренде DHCP: перепутанный IP — самая частая причина пустой трассы
+if [ -n "$DEV" ]; then
+	CLIENT=$(awk -v n="$DEV" 'tolower($4) ~ tolower(n) {print $3; exit}' /tmp/dhcp.leases 2>/dev/null)
+	[ -z "$CLIENT" ] && die nodev "устройство '$DEV' не найдено в /tmp/dhcp.leases"
+fi
+CNAME=""
+[ -n "$CLIENT" ] && CNAME=$(awk -v ip="$CLIENT" '$3 == ip {print $4; exit}' /tmp/dhcp.leases 2>/dev/null)
+
+CT=/proc/net/nf_conntrack
+[ -r "$CT" ] || die noconntrack "нет $CT — модуль conntrack не загружен"
+
+SECRET=$(uci -q get nikki.mixin.api_secret)
+LISTEN=$(uci -q get nikki.mixin.api_listen); API="127.0.0.1:${LISTEN##*:}"
+REDIR=$(uci -q get nikki.mixin.redir_port); [ -z "$REDIR" ] && REDIR=7891
+TPROXY=$(uci -q get nikki.mixin.tproxy_port); [ -z "$TPROXY" ] && TPROXY=7892
+PORTS=$(uci -q get nikki.proxy.proxy_tcp_dport)
+UPORTS=$(uci -q get nikki.proxy.proxy_udp_dport)
+ROUTER_IP=$(uci -q get network.lan.ipaddr); [ -z "$ROUTER_IP" ] && ROUTER_IP=$(ip -4 addr show br-lan | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -1)
+LANNET=$(ip -4 route show dev br-lan proto kernel 2>/dev/null | awk '{print $1; exit}')
+[ -z "$LANNET" ] && LANNET="${ROUTER_IP%.*}.0/24"
+QB=0; nft list chain inet fw4 nipret_block_quic >/dev/null 2>&1 && QB=1
+
+# nikki's port list is space-separated and may contain ranges ("0-65535", "80 443"), so a plain
+# substring test would call every port "not intercepted" the moment a range is used.
+port_covered() {   # $1=port $2=list — 0(true) if the port falls inside the list
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	for _r in $2; do
+		case "$_r" in
+			*-*) [ "$1" -ge "${_r%%-*}" ] && [ "$1" -le "${_r##*-}" ] && return 0 ;;
+			*)   [ "$1" = "$_r" ] && return 0 ;;
+		esac
+	done
+	return 1
+}
+
+# Рабочие каталоги прошлых запусков, чьи процессы уже мертвы (SIGKILL, ребут посреди записи): trap на
+# EXIT их не убрал бы никогда, а лежат они в tmpfs, которой на роутере считанные мегабайты.
+for _d in /tmp/trace-app.*; do
+	[ -d "$_d" ] || continue
+	_p=${_d##*.}
+	case "$_p" in ''|*[!0-9]*) continue ;; esac
+	kill -0 "$_p" 2>/dev/null || rm -rf "$_d"
+done
+
+W=/tmp/trace-app.$$
+mkdir -p "$W" || die nowork "не удалось создать $W"
+trap 'rm -rf "$W"' EXIT INT TERM
+# Затравочная строка в справочниках намеренная: join'ы ниже идут по идиоме FNR==NR, а она на ПУСТОМ
+# первом файле молча принимает второй файл за справочник и портит вывод.
+: > "$W/ct.raw"; : > "$W/dec.txt"
+printf -- '-\t-\n' > "$W/hosts.tsv"; printf -- '-\t0\n' > "$W/hostrecv.tsv"
+
+say "== trace-app: ${T}с, клиент=${CLIENT:-все}${CNAME:+ ($CNAME)}, роутер=$ROUTER_IP"
+say "== nikki перехватывает TCP-порты: ${PORTS:-?}   UDP-порты: ${UPORTS:-?}"
+say "== воспроизводите проблему на устройстве ПРЯМО СЕЙЧАС..."
+
+# 1) поток решений mihomo (что дошло до прокси и куда ушло)
+if [ -n "$SECRET" ]; then
+	curl -sN -m "$T" -H "Authorization: Bearer $SECRET" "http://$API/logs?level=info" > "$W/mihomo.log" 2>/dev/null &
+	curl -s -m 10 -H "Authorization: Bearer $SECRET" "http://$API/connections" > "$W/conn.start" 2>/dev/null
+fi
+
+# 2) семплирование conntrack: короткоживущие потоки иначе исчезнут между замерами.
+#    С заданным клиентом отбираем его строки сразу: 30 полных дампов таблицы занятого роутера — это
+#    сотни тысяч строк в tmpfs, а разбор всё равно фильтрует по src. grep оставлен грубым (src=
+#    встречается дважды), окончательный отбор — в awk.
+i=0
+while [ "$i" -lt "$T" ]; do
+	if [ -n "$CLIENT" ]; then grep -F "src=$CLIENT " "$CT" >> "$W/ct.raw" 2>/dev/null
+	else cat "$CT" >> "$W/ct.raw" 2>/dev/null; fi
+	i=$((i + 2)); sleep 2
+done
+[ -n "$SECRET" ] && curl -s -m 10 -H "Authorization: Bearer $SECRET" "http://$API/connections" > "$W/conn.end" 2>/dev/null
+wait 2>/dev/null
+
+# --- разбор conntrack -------------------------------------------------------
+# Формат: ... src=A dst=B sport=P dport=Q packets=.. bytes=.. src=C dst=D sport=R ...
+# Первая четвёрка — оригинал, вторая — обратное направление. При REDIRECT в mihomo обратный src
+# становится IP роутера, а sport — redir/tproxy-портом; если там настоящий адрес назначения —
+# поток ушёл В ИНТЕРНЕТ МИМО mihomo.
+RESERVED=$(uci -q get nikki.proxy.reserved_ip 2>/dev/null | tr '\n' ' ')
+awk -v client="$CLIENT" -v router="$ROUTER_IP" -v lannet="$LANNET" -v redir="$REDIR" -v tproxy="$TPROXY" \
+    -v reserved="$RESERVED" '
+function ip2n(a,  p) { split(a, p, "."); return ((p[1]*256+p[2])*256+p[3])*256+p[4] }
+function innet(a, cidr,  q, n, b, m) {
+	if (a !~ /^[0-9.]+$/ || cidr == "") return 0
+	split(cidr, q, "/"); n = ip2n(a); b = ip2n(q[1]); m = (q[2] == "" ? 32 : q[2])   # bare IP = /32
+	return int(n / 2^(32-m)) == int(b / 2^(32-m))
+}
+function isreserved(a,  i, r) {
+	# nikki skips these destinations on purpose (VPN node IPs live here) — never call that a leak
+	for (i = 1; i <= NR_RES; i++) if (innet(a, RES[i])) return 1
+	return 0
+}
+function tg(a,  n, i, base, bits) {
+	if (a !~ /^[0-9.]+$/) return 0
+	n = ip2n(a)
+	for (i = 1; i <= NC; i++) {
+		base = CB[i]; bits = CM[i]
+		if (int(n / 2^(32-bits)) == int(base / 2^(32-bits))) return 1
+	}
+	return 0
+}
+BEGIN {
+	NR_RES = split(reserved, RES, " ")
+	# официальный https://core.telegram.org/resources/cidr.txt (только IPv4)
+	split("91.108.56.0/22 91.108.4.0/22 91.108.8.0/22 91.108.16.0/22 91.108.12.0/22 " \
+	      "149.154.160.0/20 91.105.192.0/23 91.108.20.0/22 185.76.151.0/24 95.161.64.0/20", L, " ")
+	for (k in L) { split(L[k], q, "/"); NC++; CB[NC] = ip2n(q[1]); CM[NC] = q[2] }
+}
+{
+	proto = $3
+	if (proto != "tcp" && proto != "udp") next   # nikki proxies TCP/UDP only; ICMP has no ports to align
+	state = (proto == "tcp" ? $6 : "")
+	ns = 0; nd = 0; np = 0; nq = 0; npk = 0; nby = 0
+	osrc = odst = osp = odp = rsrc = rsp = ""; pk = 0; by = 0; rby = 0
+	for (f = 1; f <= NF; f++) {
+		if ($f ~ /^src=/)   { ns++; if (ns == 1) osrc = substr($f, 5); else rsrc = substr($f, 5) }
+		if ($f ~ /^dst=/)   { nd++; if (nd == 1) odst = substr($f, 5) }
+		if ($f ~ /^sport=/) { np++; if (np == 1) osp = substr($f, 7); else rsp = substr($f, 7) }
+		if ($f ~ /^dport=/) { nq++; if (nq == 1) odp = substr($f, 7) }
+		if ($f ~ /^packets=/) { npk++; if (npk == 1) pk = substr($f, 9) }
+		if ($f ~ /^bytes=/)   { nby++; if (nby == 1) by = substr($f, 7); else rby = substr($f, 7) }
+	}
+	# ТОЛЬКО клиенты LAN. Трафик самого роутера отбрасываем: исходящие соединения mihomo (и тоннель
+	# к узлу) в conntrack выглядят как «неперехваченные» и дали бы гору ложных срабатываний.
+	if (!innet(osrc, lannet) || osrc == router) next
+	if (client != "" && osrc != client) next
+	if (innet(odst, lannet) || odst ~ /^127\.|^224\.|^239\.|^255\./) next
+	key = proto "|" osrc "|" odst "|" odp "|" osp
+	if (rsrc == router && (rsp == redir || rsp == tproxy)) via[key] = "tunnel"
+	else if (!(key in via)) via[key] = "ESCAPED"
+	# sport в ключе обязателен: без него переподключения к тому же адресу слипаются и счётчики,
+	# которые растут только внутри одного соединения, перестают быть монотонными.
+	if (pk + 0 > pkts[key]) pkts[key] = pk + 0
+	if (by + 0 > byts[key]) byts[key] = by + 0
+	if (rby + 0 > rbyts[key]) rbyts[key] = rby + 0
+	if (!(key in bmin)) { bmin[key] = by + 0; rmin[key] = rby + 0 }
+	seen[key]++
+	if (state == "SYN_SENT") syn[key]++
+	if (tg(odst)) istg[key] = 1
+	if (isreserved(odst)) isres[key] = 1
+}
+END {
+	for (k in via) printf "%s\t%s\t%d\t%d\t%d\t%d\t%s\t%d\t%d\t%d\t%d\n", via[k], k, pkts[k], byts[k], rbyts[k], \
+		seen[k], (k in istg ? "TELEGRAM" : "-"), byts[k] - bmin[k], rbyts[k] - rmin[k], syn[k] + 0, \
+		(k in isres ? 1 : 0)
+}
+' "$W/ct.raw" | sort > "$W/flows.tsv"
+
+esc=$(awk -F'\t' '$1=="ESCAPED"' "$W/flows.tsv" | wc -l)
+tun=$(awk -F'\t' '$1=="tunnel"' "$W/flows.tsv" | wc -l)
+
+# --- соединения mihomo: имена хостов и сколько по ним реально пришло ---------
+# Даёт то, чего в conntrack нет: имя за IP (без него кнопки «проверить по имени» и «добавить домен»
+# не к чему прицепить) и скачанные за окно байты. Считается ДО рендера — оба рендера этим пользуются.
+conn_tsv() {   # $1=json $2=выходной TSV: id sourceIP dest port download host
+	# jsonfilter печатает по строке на элемент, включая пустые, — параллельные списки не разъезжаются
+	for _f in id metadata.sourceIP metadata.destinationIP metadata.destinationPort download metadata.host; do
+		jsonfilter -i "$1" -e "@.connections[*].$_f" > "$W/fld_${_f##*.}" 2>/dev/null
+	done
+	awk 'FILENAME ~ /fld_id$/          { id[FNR] = $0; n = FNR }
+	     FILENAME ~ /fld_sourceIP$/    { sip[FNR] = $0 }
+	     FILENAME ~ /fld_destinationIP$/   { dip[FNR] = $0 }
+	     FILENAME ~ /fld_destinationPort$/ { dpt[FNR] = $0 }
+	     FILENAME ~ /fld_download$/    { dl[FNR] = $0 }
+	     FILENAME ~ /fld_host$/        { h[FNR] = $0 }
+	     END { for (i = 1; i <= n; i++) printf "%s\t%s\t%s\t%s\t%s\t%s\n", id[i], sip[i],
+	            (dip[i] != "" ? dip[i] : h[i]), dpt[i], dl[i] + 0, h[i] }
+	' "$W/fld_id" "$W/fld_sourceIP" "$W/fld_destinationIP" "$W/fld_destinationPort" \
+	  "$W/fld_download" "$W/fld_host" > "$2"
+}
+HAVE_CONN=0
+if [ -s "$W/conn.start" ] && [ -s "$W/conn.end" ] && command -v jsonfilter >/dev/null 2>&1; then
+	conn_tsv "$W/conn.start" "$W/cs.tsv"; conn_tsv "$W/conn.end" "$W/ce.tsv"
+	HAVE_CONN=1
+	awk -F'\t' '$6 != "" && $3 ~ /^[0-9.]+$/ { print $3 "\t" $6 }' "$W/cs.tsv" "$W/ce.tsv" | sort -u >> "$W/hosts.tsv"
+	# принято за окно: по соединению (для отчёта) и по имени хоста (чтобы отличить «ушло напрямую и
+	# молчит» от «ушло напрямую и прекрасно качает»)
+	awk -F'\t' -v client="$CLIENT" '
+	FNR == NR { was[$1] = $5; next }
+	{
+		if (client != "" && $2 != client) next
+		d = $5 - ($1 in was ? was[$1] : 0); if (d < 0) d = $5
+		if (d > 0) printf "%d\t%s\t%s\n", d, $3, $4
+	}' "$W/cs.tsv" "$W/ce.tsv" > "$W/perconn.tsv"
+	awk -F'\t' -v client="$CLIENT" '
+	FNR == NR { was[$1] = $5; next }
+	{
+		if (client != "" && $2 != client) next
+		d = $5 - ($1 in was ? was[$1] : 0); if (d < 0) d = $5
+		h = ($6 != "" ? $6 : $3); if (h != "") rec[h] += d
+	}
+	END { for (k in rec) printf "%s\t%d\n", k, rec[k] }' "$W/cs.tsv" "$W/ce.tsv" >> "$W/hostrecv.tsv"
+fi
+# Имена подставляются ОДНИМ проходом на секцию, а не поиском на строку: строк под сотню, а форк
+# на каждую — ровно тот способ, которым простая операция здесь уже однажды превращалась в минуты.
+# «имени нет» — это "-", а НЕ пустое поле: разделитель здесь табуляция, а она входит в IFS-whitespace,
+# поэтому `read` схлопывает две табуляции подряд в одну и весь ряд уезжает на колонку влево.
+fill_host() {   # $1=файл $2=поле с IP $3=поле, куда положить имя
+	[ -s "$1" ] || return 0
+	awk -F'\t' -v OFS='\t' -v ipf="$2" -v hf="$3" '
+		FNR == NR { h[$1] = $2; next }
+		{ $hf = (($ipf) in h ? h[$ipf] : "-"); print }
+	' "$W/hosts.tsv" "$1" > "$1.h" && mv "$1.h" "$1"
+}
+
+# --- классификация «ушло мимо» ----------------------------------------------
+# IP устройств, ИСКЛЮЧЁННЫХ из проксирования (nikki матчит их по MAC — переводим в IP через ARP).
+# Цикл по uci — форк на итерацию, поэтому он один на запуск и только когда утечки вообще есть.
+EXC=""
+if [ "$esc" -gt 0 ]; then
+	j=0
+	while uci -q get "nikki.@lan_access_control[$j]" >/dev/null 2>&1; do
+		if [ "$(uci -q get "nikki.@lan_access_control[$j].proxy")" = "0" ]; then
+			m=$(uci -q get "nikki.@lan_access_control[$j].mac")
+			[ -n "$m" ] && EXC="$EXC $(ip neigh 2>/dev/null | grep -i "$m" | awk '{print $1}' | tr '\n' ' ')"
+		fi
+		j=$((j + 1))
+	done
+fi
+
+# esc.tsv: proto src dst host port pkts sent recv tag why
+# why — КОД, не фраза: port | quic | excluded | reserved | old | proto
+awk -F'\t' '$1=="ESCAPED" {
+	split($2, a, "|")
+	printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a[1], a[2], a[3], a[4], $3, $4, $5, $7
+}' "$W/flows.tsv" | sort -t"$(printf '\t')" -k2 | head -60 > "$W/esc.raw"
+: > "$W/esc.tsv"
+while IFS="$(printf '\t')" read -r pr src dst dp pk by rb tag; do
+	[ -z "$pr" ] && continue
+	why=old
+	case " $EXC " in *" $src "*) why=excluded ;; esac
+	if [ "$why" = old ]; then
+		if [ "$pr" = udp ]; then
+			port_covered "$dp" "$UPORTS" || why=port
+			[ "$dp" = 443 ] && [ "$QB" = 1 ] && why=quic
+		elif [ "$pr" = tcp ]; then
+			port_covered "$dp" "$PORTS" || why=port
+		else
+			why=proto
+		fi
+	fi
+	[ "$rb" = 0 ] && [ "$by" -gt 0 ] 2>/dev/null && tag="${tag}!"
+	printf '%s\t%s\t%s\t-\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+		"$pr" "$src" "$dst" "$dp" "$pk" "$by" "$rb" "$tag" "$why" >> "$W/esc.tsv"
+done < "$W/esc.raw"
+# «адрес в reserved_ip» знает только awk-разбор (11-е поле flows.tsv) — доклеиваем отдельным проходом.
+# Это намеренное исключение, оно перекрывает любую другую причину и НЕ является поломкой.
+awk -F'\t' '$1=="ESCAPED" && $11==1 { split($2, a, "|"); print a[3] }' "$W/flows.tsv" | sort -u > "$W/resv.list"
+if [ -s "$W/resv.list" ] && [ -s "$W/esc.tsv" ]; then
+	awk -F'\t' -v OFS='\t' 'FNR==NR { r[$1]=1; next } { if ($3 in r) $10 = "reserved"; print }' \
+		"$W/resv.list" "$W/esc.tsv" > "$W/esc.tsv.n" && mv "$W/esc.tsv.n" "$W/esc.tsv"
+fi
+fill_host "$W/esc.tsv" 3 4
+
+# Третий класс, и именно он даёт «висит минуту, потом резко всё заработало»: соединение НЕ УСТАНАВЛИВАЕТСЯ.
+# SYN уходит, ответа нет, ядро молча ретранслирует его десятками секунд — приложение всё это время ждёт.
+# Замер идёт раз в 2 с, так что два и более попадания в SYN_SENT = висело минимум 4 с, чего при живом
+# адресате не бывает никогда.
+# syn.tsv: path dst host port secs tag
+awk -F'\t' '$10 >= 2 {
+	split($2, a, "|")
+	printf "%s\t%s\t-\t%s\t%d\t%s\n", ($1=="tunnel" ? "tunnel" : "direct"), a[3], a[4], $10 * 2, $7
+}' "$W/flows.tsv" | sort -k2 | head -25 > "$W/syn.tsv"
+fill_host "$W/syn.tsv" 2 3
+
+# Второй класс отказа: поток В ТОННЕЛЕ, но ответа нет. Именно так выглядит «картинка не грузится»:
+# запрос ушёл, ответ не идёт. Признак — ПРИРОСТ за окно: отправлено выросло, принято не выросло
+# совсем. Просто «мало байт» не годится: у Telegram при простое висят keepalive-коннекты, у которых
+# трафика мало в ОБЕ стороны, и они бы засоряли отчёт.
+STALL='$1=="tunnel" && $6 >= 3 && $8 >= 200 && $9 == 0'
+awk -F'\t' "$STALL"' {
+	split($2, a, "|")
+	printf "%s\t%s\t-\t%s\t%s\t%s\n", a[2], a[3], a[4], $8, $7
+}' "$W/flows.tsv" | sort -k2 | head -30 > "$W/stall.tsv"
+fill_host "$W/stall.tsv" 2 3
+
+# --- решения mihomo ---------------------------------------------------------
+MI_SEEN=0; MI_DEC=0; MI_DIRECT=0
+: > "$W/direct.tsv"
+if [ -s "$W/mihomo.log" ]; then
+	MI_SEEN=1
+	CF="."; [ -n "$CLIENT" ] && CF="$CLIENT:"
+	grep -o '\[TCP\][^"]*' "$W/mihomo.log" | grep "$CF" > "$W/dec.txt"
+	MI_DEC=$(wc -l < "$W/dec.txt" 2>/dev/null); MI_DEC=$((MI_DEC + 0))
+	MI_DIRECT=$(grep -c 'using DIRECT' "$W/dec.txt" 2>/dev/null); MI_DIRECT=$((MI_DIRECT + 0))
+	# direct.tsv: host rule cnt recv — «mihomo отправил напрямую», и сколько по этому имени пришло.
+	# recv=0 при непустом счётчике решений и есть «ушло напрямую и молчит» — то, ради чего секция.
+	sed -n 's/.*--> \([^ ]*\) match \(.*\) using DIRECT.*/\1\t\2/p' "$W/dec.txt" \
+		| sed 's/:[0-9]*\t/\t/' | sort | uniq -c | sort -rn | head -25 \
+		| sed 's/^ *//; s/ /\t/' > "$W/direct.raw"
+	awk -F'\t' 'FNR == NR { rec[$1] = $2; next }
+	            { printf "%s\t%s\t%s\t%d\n", $2, $3, $1, ($2 in rec ? rec[$2] : 0) }' \
+		"$W/hostrecv.tsv" "$W/direct.raw" > "$W/direct.tsv"
+fi
+
+# ---------------------------------------------------------------------------
+# РЕНДЕР 1: JSON для панели. Здоровые потоки уходят ТОЛЬКО счётчиком: отчёт содержит все адреса
+# устройства с именами хостов, а панель семейная и раздаётся друзьям.
+# ---------------------------------------------------------------------------
+if [ "$JSON" = 1 ]; then
+	jesc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/[[:cntrl:]]//g'; }
+	printf '{"ok":true,"client":"%s","name":"%s","secs":%s' "$(jesc "$CLIENT")" "$(jesc "$CNAME")" "$T"
+	printf ',"tcp_ports":"%s","udp_ports":"%s","quic_block":%s' "$(jesc "$PORTS")" "$(jesc "$UPORTS")" "$QB"
+	# e() экранирует, n() ещё и превращает служебный «-» (нет имени / нет метки) обратно в пустоту:
+	# в файлах прочерк стоит потому, что shell-читалка съедает пустое поле между табуляциями.
+	ESCFN='function e(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+	       function n(s) { return (s == "-" ? "" : e(s)) }'
+	printf ',"escaped":['
+	awk -F'\t' "$ESCFN"'
+	{
+		printf "%s{\"proto\":\"%s\",\"dst\":\"%s\",\"host\":\"%s\",\"port\":%d,\"pkts\":%d,\"sent\":%d,\"recv\":%d,\"tag\":\"%s\",\"why\":\"%s\"}", \
+			(NR > 1 ? "," : ""), e($1), e($3), n($4), $5, $6, $7, $8, n($9), e($10)
+	}' "$W/esc.tsv"
+	printf '],"syn":['
+	awk -F'\t' "$ESCFN"'
+	{
+		printf "%s{\"path\":\"%s\",\"dst\":\"%s\",\"host\":\"%s\",\"port\":%d,\"secs\":%d,\"tag\":\"%s\"}", \
+			(NR > 1 ? "," : ""), e($1), e($2), n($3), $4, $5, n($6)
+	}' "$W/syn.tsv"
+	printf '],"stall":['
+	awk -F'\t' "$ESCFN"'
+	{
+		printf "%s{\"dst\":\"%s\",\"host\":\"%s\",\"port\":%d,\"sent\":%d,\"tag\":\"%s\"}", \
+			(NR > 1 ? "," : ""), e($2), n($3), $4, $5, n($6)
+	}' "$W/stall.tsv"
+	printf '],"direct":['
+	awk -F'\t' 'function e(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+	{
+		printf "%s{\"host\":\"%s\",\"rule\":\"%s\",\"cnt\":%d,\"recv\":%d}", \
+			(NR > 1 ? "," : ""), e($1), e($2), $3, $4
+	}' "$W/direct.tsv"
+	printf '],"healthy":{"tunnel":%s},"mihomo":{"seen":%s,"decisions":%s,"direct":%s}}\n' \
+		"$tun" "$MI_SEEN" "$MI_DEC" "$MI_DIRECT"
+	exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# РЕНДЕР 2: человекочитаемый отчёт (тот же разбор, только словами)
+# ---------------------------------------------------------------------------
+why_text() {   # $1=код причины $2=proto $3=порт
+	case "$1" in
+		port)     [ "$2" = udp ] && echo "UDP-порт вне перехвата ($UPORTS)" || echo "TCP-порт вне перехвата ($PORTS)" ;;
+		quic)     echo "QUIC: пакеты ДРОПАЕТ тумблер «Блокировать QUIC»" ;;
+		excluded) echo "устройство исключено из проксирования" ;;
+		reserved) echo "адрес в reserved_ip — перехват для него отключён намеренно" ;;
+		proto)    echo "$2 не проксируется" ;;
+		*)        echo "соединение старше правил (напр. установлено в окно перезагрузки nikki)" ;;
+	esac
+}
+
+echo
+echo "=========== ИТОГ ==========="
+echo "потоков перехвачено nikki: $tun,  ушло мимо nikki: $esc"
+
+if [ -s "$W/esc.tsv" ]; then
+	echo
+	echo "--- УШЛИ МИМО ТОННЕЛЯ (nftables их не перехватил, mihomo их не видел) ---"
+	echo "     proto  источник         назначение              порт   пакетов  отпр.Б    принято   метка      почему"
+	while IFS="$(printf '\t')" read -r pr src dst host dp pk by rb tag why; do
+		[ -z "$pr" ] && continue
+		case "$host" in ''|-) host="$dst" ;; esac
+		printf "     %-6s %-16s %-23s %-6s %-8s %-9s %-9s %-10s %s\n" \
+			"$pr" "$src" "$host" "$dp" "$pk" "$by" "$rb" "$tag" "$(why_text "$why" "$pr" "$dp")"
+	done < "$W/esc.tsv"
+	echo
+	echo "  ^ «!» в метке = отправлено что-то, принято НОЛЬ: адресат не ответил вообще."
+	echo "  ^ строки с меткой TELEGRAM — это и есть «неотловленные источники»:"
+	echo "    прямой доступ к DC Telegram из RU-сетей режется, поэтому такое соединение просто виснет,"
+	echo "    и в панели/логах mihomo этого НЕ ВИДНО — трафик до него не доходил."
+fi
+
+if [ -s "$W/syn.tsv" ]; then
+	echo
+	echo "--- НЕ СМОГЛИ УСТАНОВИТЬ СОЕДИНЕНИЕ (висели в SYN_SENT) ---"
+	echo "     путь      назначение              порт   секунд в SYN_SENT  метка"
+	while IFS="$(printf '\t')" read -r path dst host dp secs tag; do
+		[ -z "$path" ] && continue
+		case "$host" in ''|-) host="$dst" ;; esac
+		printf "     %-9s %-23s %-6s %-18s %s\n" \
+			"$([ "$path" = tunnel ] && echo "в тоннель" || echo "напрямую")" "$host" "$dp" "$secs" "$tag"
+	done < "$W/syn.tsv"
+	echo
+	echo "  ^ вот на этом приложение и висит. Адресат не отвечает на SYN: либо его режет DPI/провайдер,"
+	echo "    либо это наш дроп. Через несколько таких таймаутов клиент откатывается на другой адрес —"
+	echo "    отсюда и «сначала минуту ничего, потом сразу всё»."
+fi
+
+if [ -s "$W/stall.tsv" ]; then
+	echo
+	echo "--- ЗАПРОС УШЁЛ В ТОННЕЛЬ, ОТВЕТА НЕТ (за окно отправлено ≥200 Б, принято 0) ---"
+	echo "     источник         назначение              порт   отпр.+Б    метка"
+	while IFS="$(printf '\t')" read -r src dst host dp sent tag; do
+		[ -z "$src" ] && continue
+		case "$host" in ''|-) host="$dst" ;; esac
+		printf "     %-16s %-23s %-6s %-10s %s\n" "$src" "$host" "$dp" "$sent" "$tag"
+	done < "$W/stall.tsv"
+	echo
+	echo "  ^ если тут TELEGRAM — перехват работает, ломается уже ЗА тоннелем (узел или DC)."
+fi
+
+if [ "$MI_SEEN" = 1 ]; then
+	echo
+	echo "--- РЕШЕНИЯ mihomo (что дошло до прокси) ---"
+	sed 's/.*--> //; s/ match / | /; s/ using / | /' "$W/dec.txt" | sort | uniq -c | sort -rn | head -40
+	[ -s "$W/dec.txt" ] || echo "  (пусто) клиент за окно не открыл НИ ОДНОГО соединения — не тот IP или приложение молчало"
+	echo
+	echo "--- ОШИБКИ/ПРЕДУПРЕЖДЕНИЯ mihomo за окно ---"
+	grep -E '"(warning|error)"' "$W/mihomo.log" | sed 's/.*"payload":"//; s/"}$//' | grep "$CF" | head -20
+	echo
+	echo "  соединений этого клиента, отправленных mihomo НАПРЯМУЮ: $MI_DIRECT"
+	echo "  если среди них есть домены нужного сервиса — не хватает правила/пресета."
+fi
+
+# --- что именно скачал ЭТОТ клиент через тоннель ----------------------------
+# Соединения mihomo дают то, чего нет в conntrack: сколько байт реально пришло по каждому потоку за
+# окно. Разложение по клиенту важно — общая цифра ниже включает весь дом и легко вводит в заблуждение.
+if [ "$HAVE_CONN" = 1 ]; then
+	echo
+	echo "--- СКОЛЬКО ПРИНЯЛ ЭТОТ КЛИЕНТ ПО КАЖДОМУ СОЕДИНЕНИЮ ---"
+	sort -rn "$W/perconn.tsv" | head -20 | awk -F'\t' -v T="$T" \
+		'{printf "     %-28s :%-6s %9.1f КБ   %7.1f КБ/с\n", $2, $3, $1/1024, $1/1024/T}'
+	awk -F'\t' -v T="$T" '{s += $1} END {
+		printf "     ИТОГО клиенту: %.1f МБ за %d с = %.0f КБ/с\n", s/1048576, T, s/1024/T
+		if (s == 0) print "     (клиент за окно ничего не качал — репродукция не попала в окно)"
+	}' "$W/perconn.tsv"
+	echo "     учтены только соединения, дожившие до конца окна"
+fi
+
+# --- скорость по тоннелю за окно (весь дом) --------------------------------
+if [ -s "$W/conn.start" ] && [ -s "$W/conn.end" ]; then
+	echo
+	echo "--- ТРАФИК ЧЕРЕЗ ТОННЕЛЬ ЗА ОКНО ---"
+	for f in start end; do
+		tr '{' '\n' < "$W/conn.$f" | grep -o '"download":[0-9]*' | cut -d: -f2 \
+			| awk -v t="$f" '{s+=$1} END {print t, s+0}'
+	done | awk -v T="$T" '{v[$1]=$2} END {
+		d = v["end"] - v["start"]; if (d < 0) d = v["end"]
+		printf "  скачано через прокси: %.1f МБ за окно (%.0f КБ/с в среднем)\n", d/1048576, d/1024/T
+	}'
+fi
+
+echo
+echo "Подсказки:"
+echo " • пусто в «мимо тоннеля» и медиа всё равно тормозит → дело не в перехвате, смотрите узел VPN"
+echo "   (задержка/скорость) и раздел «решения mihomo»."
+echo " • TELEGRAM-строки в «мимо тоннеля» → расширить nikki.proxy.proxy_tcp_dport."

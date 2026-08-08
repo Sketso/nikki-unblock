@@ -41,7 +41,7 @@ done
 # Post-copy, idempotent and safe every run: make executables runnable, drop the LuCI/rpcd caches so a
 # freshly-restored menu.d/acl.d shows up, and syntax-check the CGI in the router's own busybox ash.
 $SSH '
-	chmod 0755 /www/cgi-bin/nikki-unblock /usr/bin/nikki-unblock-z2-watchdog 2>/dev/null
+	chmod 0755 /www/cgi-bin/nikki-unblock /usr/bin/nikki-unblock-z2-watchdog /usr/bin/nikki-unblock-trace 2>/dev/null
 	rm -f /tmp/luci-indexcache* 2>/dev/null; rm -rf /tmp/luci-modulecache 2>/dev/null
 	/etc/init.d/rpcd reload >/dev/null 2>&1
 	sh -n /www/cgi-bin/nikki-unblock && echo "router syntax OK"
