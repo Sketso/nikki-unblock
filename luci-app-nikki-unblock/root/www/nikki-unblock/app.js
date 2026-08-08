@@ -687,8 +687,12 @@ function renderList(){
   $("#count").textContent = "(" + manual.length + ")";
   fltRerender(BAR_LIST);
 }
+// Which DOMAINS this preset put in. Type matters since 2.34: category and IP rules carry the same src
+// tag now, and counting them here inflated the set against the preset's domain list — every preset
+// that has both a list and categories (ai, Соцсети, Мессенджеры) then showed as forever partial.
 function taggedSet(id){
-  return new Set(RULES.filter(r => (" " + (r.src || "") + " ").indexOf(" " + id + " ") >= 0).map(r => r.matcher));
+  return new Set(RULES.filter(r => r.type === "DOMAIN-SUFFIX"
+    && (" " + (r.src || "") + " ").indexOf(" " + id + " ") >= 0).map(r => r.matcher));
 }
 // on/off/partial for one facet
 function listFacet(p){
