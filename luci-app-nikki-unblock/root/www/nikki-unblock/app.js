@@ -1601,10 +1601,9 @@ function taRender(d){
   // more works perfectly while doing it. Only a flow that got NOTHING BACK is evidence of a problem.
   // Reported: a working IPsec flow (traffic in both directions) was listed as broken and offered a
   // "fix", which is how a diagnostic loses the reader's trust in one screen.
-  const escAll = taGroup(d.escaped, r => r.why + "|" + r.proto + "|" + where(r));
-  const silent = escAll.filter(r => r.recv === 0 && r.sent > 0);
-  const talking = escAll.filter(r => !(r.recv === 0 && r.sent > 0));
-  silent.forEach(r => {
+  // The split happens on the router — d.escaped is already only the silent ones, d.escaped_ok counts
+  // the rest — so a chatty device can't push the flows that matter out of the report's size cap.
+  taGroup(d.escaped, r => r.why + "|" + r.proto + "|" + where(r)).forEach(r => {
     const w = many(r);
     if (r.why === "port" && r.proto === "tcp")
       add("bad", t("taEscPort")(w, r.port), { label: t("taAllPorts"), action: "allports", params: { on: 1 } });
@@ -1621,7 +1620,7 @@ function taRender(d){
     else add("info", t("taEscOld")(w), { label: t("taRestartFix"), action: "svc", params: { op: "restart" } });
   });
   // The rest left the tunnel and worked. One counting line, no addresses: it is context, not a finding.
-  if (talking.length) add("info", t("taEscFine")(talking.length));
+  if (d.escaped_ok > 0) add("info", t("taEscFine")(d.escaped_ok));
   // NOTE: no "add this IP to the rules" button anywhere above. For an escaped flow a rule is useless
   // by construction — the traffic never reached mihomo, so no rule of ours could have matched it.
   // Widening the interception is the only thing that can change that, which is why it is the only fix

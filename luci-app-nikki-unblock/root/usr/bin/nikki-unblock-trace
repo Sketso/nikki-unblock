@@ -265,7 +265,7 @@ fi
 awk -F'\t' '$1=="ESCAPED" {
 	split($2, a, "|")
 	printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a[1], a[2], a[3], a[4], $3, $4, $5, $7
-}' "$W/flows.tsv" | sort -t"$(printf '\t')" -k2 | head -60 > "$W/esc.raw"
+}' "$W/flows.tsv" | sort -t"$(printf '\t')" -k2 | head -200 > "$W/esc.raw"
 : > "$W/esc.tsv"
 while IFS="$(printf '\t')" read -r pr src dst dp pk by rb tag; do
 	[ -z "$pr" ] && continue
@@ -293,6 +293,12 @@ if [ -s "$W/resv.list" ] && [ -s "$W/esc.tsv" ]; then
 		"$W/resv.list" "$W/esc.tsv" > "$W/esc.tsv.n" && mv "$W/esc.tsv.n" "$W/esc.tsv"
 fi
 fill_host "$W/esc.tsv" 3 4
+# Утёкший поток, которому ОТВЕТИЛИ, — не поломка: мимо туннеля ходит масса трафика, и ходит успешно.
+# Признак проблемы ровно один: отправлено есть, принято ноль. Разделение живёт ЗДЕСЬ, а не в панели,
+# из-за среза: раньше список резался до 60 строк произвольного порядка ещё ДО классификации, и у
+# разговорчивого устройства молчащие потоки — единственные значимые — в срез могли не попасть.
+awk -F'\t' '$8 == 0 && $7 > 0' "$W/esc.tsv" > "$W/esc.silent"
+ESC_OK=$(awk -F'\t' '!($8 == 0 && $7 > 0)' "$W/esc.tsv" | wc -l); ESC_OK=$((ESC_OK + 0))
 
 # Третий класс, и именно он даёт «висит минуту, потом резко всё заработало»: соединение НЕ УСТАНАВЛИВАЕТСЯ.
 # SYN уходит, ответа нет, ядро молча ретранслирует его десятками секунд — приложение всё это время ждёт.
@@ -347,12 +353,14 @@ if [ "$JSON" = 1 ]; then
 	# в файлах прочерк стоит потому, что shell-читалка съедает пустое поле между табуляциями.
 	ESCFN='function e(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
 	       function n(s) { return (s == "-" ? "" : e(s)) }'
+	# Только молчащие: остальные уходят ОДНИМ ЧИСЛОМ. Отчёт содержит все адреса устройства с именами
+	# хостов, а панель семейная и раздаётся друзьям — то, что и так работает, показывать незачем.
 	printf ',"escaped":['
-	awk -F'\t' "$ESCFN"'
+	head -40 "$W/esc.silent" | awk -F'\t' "$ESCFN"'
 	{
 		printf "%s{\"proto\":\"%s\",\"dst\":\"%s\",\"host\":\"%s\",\"port\":%d,\"pkts\":%d,\"sent\":%d,\"recv\":%d,\"tag\":\"%s\",\"why\":\"%s\"}", \
 			(NR > 1 ? "," : ""), e($1), e($3), n($4), $5, $6, $7, $8, n($9), e($10)
-	}' "$W/esc.tsv"
+	}'
 	printf '],"syn":['
 	awk -F'\t' "$ESCFN"'
 	{
@@ -371,8 +379,8 @@ if [ "$JSON" = 1 ]; then
 		printf "%s{\"host\":\"%s\",\"rule\":\"%s\",\"cnt\":%d,\"recv\":%d}", \
 			(NR > 1 ? "," : ""), e($1), e($2), $3, $4
 	}' "$W/direct.tsv"
-	printf '],"healthy":{"tunnel":%s},"mihomo":{"seen":%s,"decisions":%s,"direct":%s}}\n' \
-		"$tun" "$MI_SEEN" "$MI_DEC" "$MI_DIRECT"
+	printf '],"escaped_ok":%s,"healthy":{"tunnel":%s},"mihomo":{"seen":%s,"decisions":%s,"direct":%s}}\n' \
+		"$ESC_OK" "$tun" "$MI_SEEN" "$MI_DEC" "$MI_DIRECT"
 	exit 0
 fi
 
@@ -398,12 +406,14 @@ if [ -s "$W/esc.tsv" ]; then
 	echo
 	echo "--- УШЛИ МИМО ТОННЕЛЯ (nftables их не перехватил, mihomo их не видел) ---"
 	echo "     proto  источник         назначение              порт   пакетов  отпр.Б    принято   метка      почему"
-	while IFS="$(printf '\t')" read -r pr src dst host dp pk by rb tag why; do
+	# Молчащие идут первыми: в консольном отчёте список полный, но читают его сверху.
+	{ cat "$W/esc.silent"; awk -F'\t' '!($8 == 0 && $7 > 0)' "$W/esc.tsv"; } | head -60 \
+	| while IFS="$(printf '\t')" read -r pr src dst host dp pk by rb tag why; do
 		[ -z "$pr" ] && continue
 		case "$host" in ''|-) host="$dst" ;; esac
 		printf "     %-6s %-16s %-23s %-6s %-8s %-9s %-9s %-10s %s\n" \
 			"$pr" "$src" "$host" "$dp" "$pk" "$by" "$rb" "$tag" "$(why_text "$why" "$pr" "$dp")"
-	done < "$W/esc.tsv"
+	done
 	echo
 	echo "  ^ «!» в метке = отправлено что-то, принято НОЛЬ: адресат не ответил вообще."
 	echo "  ^ строки с меткой TELEGRAM — это и есть «неотловленные источники»:"
