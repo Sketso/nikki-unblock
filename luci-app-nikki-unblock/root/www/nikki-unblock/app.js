@@ -199,6 +199,11 @@ const I18N = {
     taEscReserved: w => "Мимо туннеля: " + w + " — адрес в списке исключений (reserved_ip). Это норма.",
     taEscOld: w => "Мимо туннеля: " + w + " — соединение старше правил (например, установлено до перезапуска nikki).",
     taAllPorts: "Перехватывать все порты",
+    taUdpPort: p => "Перехватывать UDP-порт " + p,
+    taUdpNote: "Порт добавлен в перехват. Если не помогло — теперь трафик хотя бы доходит до mihomo, но правила, которое увело бы этот адрес в туннель, всё ещё нет.",
+    taRestartFix: "Перезапустить nikki",
+    taStale: "Отчёт снят ДО этой починки, поэтому строки выше показывают прошлое состояние. Чтобы увидеть результат, запишите заново.",
+    act_udpport: "перехват UDP-порта",
     taSyn: (w, s) => "Соединение не установилось: " + w + " — " + s + " с тишины в ответ на запрос",
     taSynTun: "через туннель", taSynDir: "напрямую",
     taStall: (w, b) => "Запрос ушёл в туннель, ответа нет: " + w + " — отправлено " + b + " Б, принято 0",
@@ -462,6 +467,11 @@ const I18N = {
     taEscReserved: w => "Past the tunnel: " + w + " — the address is on the exclusion list (reserved_ip). This is normal.",
     taEscOld: w => "Past the tunnel: " + w + " — the connection is older than the rules (e.g. opened before nikki restarted).",
     taAllPorts: "Intercept every port",
+    taUdpPort: p => "Intercept UDP port " + p,
+    taUdpNote: "The port is now intercepted. If that didn't help — the traffic at least reaches mihomo now, but there is still no rule to send this destination into the tunnel.",
+    taRestartFix: "Restart nikki",
+    taStale: "This report was taken BEFORE the fix, so the rows above show the earlier state. Record again to see the result.",
+    act_udpport: "UDP port interception",
     taSyn: (w, s) => "Connection never established: " + w + " — " + s + " s of silence in reply",
     taSynTun: "through the tunnel", taSynDir: "direct",
     taStall: (w, b) => "Request went into the tunnel, no answer: " + w + " — " + b + " B sent, 0 received",
@@ -1564,6 +1574,9 @@ function taGroup(arr, keyf){
   });
   return [...m.values()];
 }
+function taHint(txt){
+  const el = document.createElement("div"); el.className = "ythint"; el.textContent = txt; return el;
+}
 function taRender(d){
   const rows = [];
   const add = (state, msg, fix) => rows.push({ state, msg, fix });
@@ -1575,11 +1588,18 @@ function taRender(d){
     // offering it on a UDP miss would promise a repair it cannot make.
     if (r.why === "port" && r.proto === "tcp")
       add("bad", t("taEscPort")(w, r.port) + dead, { label: t("taAllPorts"), action: "allports", params: { on: 1 } });
-    else if (r.why === "port") add("warn", t("taEscPortU")(w, r.port) + dead);
+    // UDP gets ONE port at a time, not an "every port" switch: proxy_udp_dport is a curated list, and
+    // handing mihomo the whole range would pull QUIC, games and discovery traffic into the tunnel.
+    else if (r.why === "port")
+      add("warn", t("taEscPortU")(w, r.port) + dead,
+          { label: t("taUdpPort")(r.port), action: "udpport", params: { port: r.port }, note: "taUdpNote" });
     else if (r.why === "quic") add("info", t("taEscQuic")(w));
     else if (r.why === "excluded") add("info", t("taEscExcluded")(w));
     else if (r.why === "reserved") add("info", t("taEscReserved")(w));
-    else add("info", t("taEscOld")(w) + dead);
+    // A flow older than the rules stays direct until it is re-established — restarting nikki is what
+    // makes the app reconnect into the current rules.
+    else add("info", t("taEscOld")(w) + dead,
+            { label: t("taRestartFix"), action: "svc", params: { op: "restart" } });
     // NOTE: no "add this IP to the rules" button anywhere above. For an escaped flow a rule is useless
     // by construction — the traffic never reached mihomo, so no rule of ours could have matched it.
   });
@@ -1599,11 +1619,19 @@ function taRender(d){
   // device talked to, with host names, and this panel gets handed to friends.
   add("info", t("taHealthy")(tun));
 
-  const box = $("#taResult"); box.innerHTML = ""; box.hidden = false;
+  const box = $("#taResult"); box.innerHTML = ""; box.hidden = false; delete box.dataset.stale;
+  // One fix, one button. Ten destinations missing the same TCP port produce ten identical rows, and
+  // each carrying its own "intercept every port" button was worse than useless: the first click fixed
+  // it and the rest stayed clickable, offering to re-apply a setting that was already on.
+  const offered = new Set();
   rows.forEach(e => {
     const div = document.createElement("div"); div.className = "ytrow " + e.state;
     div.innerHTML = '<span class="ytic">' + (e.state === "ok" ? "✓" : e.state === "bad" ? "✕" : e.state === "warn" ? "!" : "·") + '</span>' +
                     '<span class="ytmsg">' + escH(e.msg) + '</span>';
+    if (e.fix && !e.fix.probe){
+      const sig = e.fix.action + "|" + JSON.stringify(e.fix.params || {});
+      if (offered.has(sig)) e = { ...e, fix: null }; else offered.add(sig);
+    }
     if (e.fix){
       const b = document.createElement("button"); b.className = "ghost"; b.textContent = e.fix.label;
       b.addEventListener("click", async () => {
@@ -1613,16 +1641,21 @@ function taRender(d){
           const p = await api("snitest", e.fix.probe);
           b.remove();
           const v = (p && p.ok) ? p.verdict : null;
-          const line = document.createElement("div"); line.className = "ythint";
-          line.textContent = (v === "sni" ? t("taSniSni")(e.fix.probe.host) : v === "dead" ? t("taSniDead")
-                             : v === "ok" ? t("taSniOk") : t("errP")) + (v ? " " + t("taSniCaveat") : "");
-          div.insertAdjacentElement("afterend", line);
+          div.insertAdjacentElement("afterend", taHint(
+            (v === "sni" ? t("taSniSni")(e.fix.probe.host) : v === "dead" ? t("taSniDead")
+             : v === "ok" ? t("taSniOk") : t("errP")) + (v ? " " + t("taSniCaveat") : "")));
           return;
         }
         showOverlay(t("applying"));
-        await api(e.fix.action, e.fix.params || {});
+        const r = await api(e.fix.action, e.fix.params || {});
         hideOverlay(); loadSvc(); loadDomains();
-        setMsg($("#taMsg"), t("done"));
+        const failed = r && r.ok === false;
+        setMsg($("#taMsg"), failed ? (t("errP") + (r.error || "?")) : t("done"), !failed);
+        if (failed){ b.disabled = false; return; }
+        // The rows below were computed against the settings as they were BEFORE this fix, so they are
+        // now a snapshot of the past — say so instead of letting them read as the current state.
+        if (e.fix.note) div.insertAdjacentElement("afterend", taHint(t(e.fix.note)));
+        if (!box.dataset.stale){ box.dataset.stale = "1"; box.appendChild(taHint(t("taStale"))); }
       });
       div.appendChild(b);
     }

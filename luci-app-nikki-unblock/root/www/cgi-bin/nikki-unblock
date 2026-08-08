@@ -2478,6 +2478,31 @@ ipv6_set() {   # $1 = 1(disable) | 0(enable)
 # through it 29.7/26.0 MB/s, and 10 short requests took 220 ms vs 219 ms — the ceiling is the link.
 # What it does NOT change: reserved_ip and excluded devices still skip mihomo whatever the port.
 PORTS_NARROW="80 443"
+# The port list is space-separated and may hold ranges ("0-65535", "1 3478 50000-65535"), so a
+# substring test would both miss a port inside a range and match 443 inside 4433.
+port_in_list() {   # $1=port $2=list -> 0(true) if the port is already covered
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	for _pr in $2; do
+		case "$_pr" in
+			*-*) [ "$1" -ge "${_pr%%-*}" ] && [ "$1" -le "${_pr##*-}" ] && return 0 ;;
+			*)   [ "$1" = "$_pr" ] && return 0 ;;
+		esac
+	done
+	return 1
+}
+# UDP is widened ONE PORT AT A TIME, deliberately — there is no "intercept every UDP port" button.
+# proxy_udp_dport already carries the ports that want proxying (STUN 3478, the RTP range); handing
+# mihomo the whole range would drag QUIC, games and every discovery protocol into the tunnel, and the
+# damage from that is much harder to notice than the miss it would fix.
+udpport_add() {   # $1=port — 0 if added, 1 if it was already covered
+	_cur=$(uci -q get nikki.proxy.proxy_udp_dport 2>/dev/null)
+	port_in_list "$1" "$_cur" && return 1
+	undo_push udpport
+	uci set nikki.proxy.proxy_udp_dport="${_cur:+$_cur }$1"
+	uci commit nikki
+	/etc/init.d/nikki reload >/dev/null 2>&1
+	return 0
+}
 allports_on() { [ "$(uci -q get nikki.proxy.proxy_tcp_dport 2>/dev/null)" = "0-65535" ]; }
 allports_set() {   # $1 = on(0/1)
 	uci -q get nikki-unblock.config >/dev/null 2>&1 || uci set nikki-unblock.config=config
@@ -4165,6 +4190,14 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		allports_set "$on"
 		ap=0; allports_on && ap=1
 		json_header; printf '{"ok":true,"allports":%d}' "$ap"; exit 0
+		;;
+	udpport)
+		p=$(get_param port | sed 's/[^0-9]//g')
+		{ [ -n "$p" ] && [ "$p" -ge 1 ] && [ "$p" -le 65535 ]; } 2>/dev/null \
+			|| { json_header; printf '{"ok":false,"error":"bad port"}'; exit 0; }
+		alr=false; udpport_add "$p" || alr=true
+		json_header; printf '{"ok":true,"already":%s,"ports":"%s"}' "$alr" \
+			"$(json_esc "$(uci -q get nikki.proxy.proxy_udp_dport 2>/dev/null)")"; exit 0
 		;;
 	tracestart)
 		c=$(clean_ip "$(get_param client)")
