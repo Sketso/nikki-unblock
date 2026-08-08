@@ -119,6 +119,47 @@ clean_ip() { printf '%s' "$1" | sed 's#[^0-9a-fA-F.:/]##g'; }
 clean_mac() { printf '%s' "$1" | tr 'A-Z' 'a-z' | tr '-' ':' | sed 's#[^0-9a-f:]##g'; }
 valid_mac() { case "$1" in [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) return 0 ;; *) return 1 ;; esac; }
 
+# ---- is this address on OUR LAN? -------------------------------------------
+# The device table deliberately includes static hosts, and their addresses can come from a cloned
+# config and belong to an entirely different router (lan_devices_by_mac says so in as many words).
+# Those devices are fine to EXCLUDE from an engine by MAC — which is all the table was built for — but
+# anything that watches this router's actual traffic can never see them, so it has to tell them apart.
+# All pure expansion + arithmetic: this runs once per device row, and a fork per row is how a cheap
+# listing turns into a slow one.
+LAN_NET=""; LAN_MASK=""; LAN_SHOW=""
+IP2N=0
+ip2n() {   # $1=dotted quad -> $IP2N; non-zero return when it isn't one
+	case "$1" in *.*.*.*) ;; *) return 1 ;; esac
+	case "$1" in *[!0-9.]*) return 1 ;; esac
+	_a=${1%%.*}; _r=${1#*.}; _b=${_r%%.*}; _r=${_r#*.}; _c=${_r%%.*}; _d=${_r#*.}
+	case "$_d" in ''|*[!0-9]*) return 1 ;; esac
+	IP2N=$(( ((_a * 256 + _b) * 256 + _c) * 256 + _d ))
+}
+LAN_TRIED=0
+lan_cidr_init() {
+	# The FAILURE must be remembered too, not just the success: without this a router whose LAN can't be
+	# read would re-run two uci lookups for every device row — a fork per row, the thing that has already
+	# turned a cheap listing into a slow one here once.
+	[ "$LAN_TRIED" = 1 ] && { [ -n "$LAN_MASK" ]; return $?; }
+	LAN_TRIED=1
+	_li=$(uci -q get network.lan.ipaddr 2>/dev/null)
+	_lm=$(uci -q get network.lan.netmask 2>/dev/null)
+	[ -z "$_li" ] && _li=$(ip -4 addr show br-lan 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -1)
+	[ -z "$_lm" ] && _lm=255.255.255.0
+	ip2n "$_li" || return 1; _lin=$IP2N
+	ip2n "$_lm" || return 1
+	LAN_MASK=$IP2N; LAN_NET=$(( _lin & LAN_MASK ))
+	_bits=0; _t=$LAN_MASK
+	while [ "$_t" -ne 0 ]; do _bits=$(( _bits + (_t & 1) )); _t=$(( _t >> 1 )); done
+	LAN_SHOW="$(( (LAN_NET >> 24) & 255 )).$(( (LAN_NET >> 16) & 255 )).$(( (LAN_NET >> 8) & 255 )).$(( LAN_NET & 255 ))/$_bits"
+}
+in_lan() {   # $1=ip — 0(true) when it belongs to this router's LAN. Undetectable LAN => never rejects.
+	[ -n "$1" ] || return 1
+	lan_cidr_init || return 0
+	ip2n "$1" || return 1
+	[ $(( IP2N & LAN_MASK )) -eq "$LAN_NET" ]
+}
+
 # prints "mac<TAB>ip<TAB>name" per known LAN device, one row per MAC. Merges two sources: static hosts
 # (uci dhcp.@host — admin-set, nice names, but the IP can be stale / from a cloned config in a foreign
 # subnet) and the live DHCP leases (/tmp/dhcp.leases — the device's ACTUAL current address). So: name
@@ -4128,6 +4169,10 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 	tracestart)
 		c=$(clean_ip "$(get_param client)")
 		case "$c" in *.*.*.*) ;; *) json_header; printf '{"ok":false,"error":"bad client"}'; exit 0 ;; esac
+		# A device on another router's subnet would produce a perfectly valid EMPTY report, and an empty
+		# report reads as "your app was fine" — the single most misleading answer this tool could give.
+		# Refuse up front and name the reason instead of spending 60 s to say nothing.
+		in_lan "$c" || { json_header; printf '{"ok":false,"error":"foreign","lan":"%s"}' "$(json_esc "$LAN_SHOW")"; exit 0; }
 		[ -x "$TRACE_BIN" ] || { json_header; printf '{"ok":false,"error":"no tool"}'; exit 0; }
 		op_busy "$TRACE_OP" && { json_header; printf '{"ok":false,"error":"busy"}'; exit 0; }
 		op_start "$TRACE_OP" "$c" "$c" 1 _tracerun "$c"
@@ -4171,7 +4216,10 @@ devicesall_json() {
 		seen="$seen$kmac "
 		ns=false; case "$nsel" in *" $kmac "*) ns=true ;; esac
 		zs=false; case "$zsel" in *" $kmac "*) zs=true ;; esac
-		rows="$rows${rows:+,}{\"mac\":\"$(json_esc "$kmac")\",\"ip\":\"$(json_esc "$kip")\",\"name\":\"$(json_esc "$knm")\",\"nikki\":$ns,\"zapret2\":$zs}"
+		# lan_ok=false => the address is not on this router's LAN (typically a static host inherited from
+		# another router's config). Excluding such a device by MAC still works; WATCHING its traffic cannot.
+		lo=false; in_lan "$kip" && lo=true
+		rows="$rows${rows:+,}{\"mac\":\"$(json_esc "$kmac")\",\"ip\":\"$(json_esc "$kip")\",\"name\":\"$(json_esc "$knm")\",\"nikki\":$ns,\"zapret2\":$zs,\"lan_ok\":$lo}"
 	done < "$_dt"
 	# a selected MAC that dropped out of DHCP (stale lease / deleted static host) must still show up,
 	# else it's stuck selected with no UI control left to clear it — counters tell the truth, so must the list
@@ -4180,7 +4228,7 @@ devicesall_json() {
 		seen="$seen$m "
 		ns=false; case "$nsel" in *" $m "*) ns=true ;; esac
 		zs=false; case "$zsel" in *" $m "*) zs=true ;; esac
-		rows="$rows${rows:+,}{\"mac\":\"$(json_esc "$m")\",\"ip\":\"\",\"name\":\"\",\"nikki\":$ns,\"zapret2\":$zs}"
+		rows="$rows${rows:+,}{\"mac\":\"$(json_esc "$m")\",\"ip\":\"\",\"name\":\"\",\"nikki\":$ns,\"zapret2\":$zs,\"lan_ok\":false}"
 	done
 	rm -f "$_dt"
 	printf '{"nikki":{"present":%d,"mode":"%s"},"zapret2":{"present":%d,"mode":"%s"},"devices":[%s]}' \

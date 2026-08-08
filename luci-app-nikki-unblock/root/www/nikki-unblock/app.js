@@ -211,7 +211,8 @@ const I18N = {
     taSniCaveat: "Проверка идёт с роутера и через mihomo, поэтому адрес мог быть выбран им, а не взят из отчёта.",
     taHealthy: n => "Здоровых потоков через туннель: " + n,
     taClean: "Проблемных потоков за окно не нашли.",
-    taNoTraffic: "За окно устройство не открыло ни одного соединения — либо выбран не тот адрес, либо приложение так и не запустили.",
+    taNoTraffic: "За окно устройство не открыло через ЭТОТ роутер ни одного соединения. Обычно это значит, что оно подключено к другому роутеру или к мобильному интернету; реже — что приложение так и не запустили.",
+    taForeign: (ip, lan) => "Адрес " + ip + " не в сети этого роутера (" + lan + ") — его трафик сюда не попадает, записывать нечего. Такие устройства попадают в список из статических хостов, перенесённых с другого роутера.",
     nikkiUnconf: "⚠ nikki установлен, но не настроен: нет профиля или сервис выключен — mihomo не запускается, поэтому VPN-ноды и правила «→ VPN» не работают.",
     nikkiUnconfFix: "Настроить и запустить",
     nodeNikkiDown: "нода сохранена, но nikki не запущен: включи сервис и задай профиль (Services → Nikki), потом проверь ноду",
@@ -473,7 +474,8 @@ const I18N = {
     taSniCaveat: "The test runs from the router and through mihomo, so the address contacted may be its choice rather than the one in the report.",
     taHealthy: n => "Healthy flows through the tunnel: " + n,
     taClean: "No problem flows in this window.",
-    taNoTraffic: "The device opened no connections during the window — either the wrong address, or the app was never launched.",
+    taNoTraffic: "The device opened no connections THROUGH THIS ROUTER during the window. Usually that means it is on a different router or on mobile data; less often, that the app was never launched.",
+    taForeign: (ip, lan) => "Address " + ip + " is not on this router's network (" + lan + ") — its traffic never comes through here, so there is nothing to record. Such devices reach the list as static hosts carried over from another router.",
     nikkiUnconf: "⚠ nikki is installed but not configured: no profile, or the service is off — mihomo never starts, so VPN nodes and «→ VPN» rules do nothing.",
     nikkiUnconfFix: "Set up & start",
     nodeNikkiDown: "node saved, but nikki is not running: enable the service and give it a profile (Services → Nikki), then re-check the node",
@@ -1501,8 +1503,14 @@ const TA = { client: null, polling: false };
 async function loadTraceDevs(){
   const sel = $("#taDev"); if (!sel) return;
   let d; try { d = await (await fetch("?api=devicesall")).json(); } catch(e){ d = null; }
-  // no address = nothing to filter conntrack by, so those rows would be dead options
-  const devs = ((d && d.devices) || []).filter(x => x.ip);
+  // Two kinds of row this list must not offer. No address = nothing to filter conntrack by. And
+  // lan_ok=false = the address belongs to ANOTHER router's subnet (static hosts carried over from a
+  // cloned config), so its packets never pass through here — picking one burns 60 s to produce an empty
+  // report that reads like "nothing was wrong". Fall back to the unfiltered list if the check knocked
+  // everything out, so a router whose LAN we failed to detect is still usable.
+  const withIp = ((d && d.devices) || []).filter(x => x.ip);
+  const local = withIp.filter(x => x.lan_ok !== false);
+  const devs = local.length ? local : withIp;
   const keep = sel.value;
   sel.innerHTML = devs.map(x => '<option value="' + escH(x.ip) + '">' +
                                 escH((x.name || x.mac) + " · " + x.ip) + '</option>').join("");
@@ -1629,7 +1637,9 @@ $("#taBtn").addEventListener("click", async () => {
   const r = await api("tracestart", { client: ip });
   if (!(r && r.ok && r.started)){
     $("#taRun").hidden = true; $("#taBtn").disabled = false; TA.client = null;
-    setMsg($("#taMsg"), (r && r.error === "busy") ? t("taBusy") : t("errP") + ((r && r.error) || "?"), false);
+    setMsg($("#taMsg"), (r && r.error === "busy") ? t("taBusy")
+                      : (r && r.error === "foreign") ? t("taForeign")(ip, r.lan || "?")
+                      : t("errP") + ((r && r.error) || "?"), false);
     return;
   }
   setMsg($("#taMsg"), "");
