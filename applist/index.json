@@ -52,14 +52,11 @@
   {
     "id": "discord",
     "name": "Discord (всё через VPN)",
-    "geosite": "discord"
-  },
-  {
-    "id": "discord-web",
-    "name": "Discord: сайт через VPN, голос напрямую",
+    "geosite": "discord",
+    "udpports": ["19294-19344", "50000-50100"],
     "note": {
-      "ru": "Сайт и текстовые чаты идут через VPN, а голос — напрямую, чтобы не ловить задержку и не грузить узел. Тот же приём, что и у пресета для приложения YouTube: в туннель уходит только то, что иначе не работает. Если голос при этом молчит, попробуйте полный пресет Discord.",
-      "en": "The site and text chats go through the VPN while voice stays direct, so calls keep their latency and the node stays free. Same idea as the YouTube app preset: only what is actually broken goes into the tunnel. If voice stays silent, try the full Discord preset instead."
+      "ru": "Голос Discord нельзя оставить напрямую, когда сайт идёт через VPN: голосовой сервер ждёт пакеты с того же адреса, с которого подключился гейтвей, а иначе звонок не собирается — «не удаётся подключиться к RTC» или задержка 5000 мс. Поэтому пресет уводит в туннель и домены, и голосовой UDP. Голосовой сервер выдаётся клиенту голым IP, без имени, так что поймать его можно только по портам — их и добавляет пресет.",
+      "en": "Discord voice cannot stay direct while the site goes through the VPN: the voice server expects packets from the same address the gateway connected from, otherwise the call never forms — \"RTC connecting\" forever, or 5000 ms latency. So this preset tunnels both the domains and the voice UDP. The voice server is handed to the client as a bare IP with no hostname, so ports are the only way to recognise it — and that is what the preset adds."
     }
   },
   {

@@ -115,6 +115,14 @@ parse_domains() {
 }
 
 clean_ip() { printf '%s' "$1" | sed 's#[^0-9a-fA-F.:/]##g'; }
+# a single port or a low-high range, digits and one dash only — this ends up inside a rule matcher,
+# so anything else is dropped rather than passed through to the config
+clean_ports() {
+	case "$1" in
+		""|*[!0-9-]*|*-*-*|-*|*-) return ;;
+	esac
+	printf '%s' "$1"
+}
 
 clean_mac() { printf '%s' "$1" | tr 'A-Z' 'a-z' | tr '-' ':' | sed 's#[^0-9a-f:]##g'; }
 valid_mac() { case "$1" in [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) return 0 ;; *) return 1 ;; esac; }
@@ -437,6 +445,11 @@ preset_raw_at() {   # $1=array index $2=index.json body
 	_ip=$(printf '%s' "$2" | jsonfilter -e "@[$1].ipcidr[*]" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
 	_ipx=$(printf '%s' "$2" | jsonfilter -e "@[$1].ipcidr_extra[*]" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
 	PR_IPS=$(printf '%s,%s' "$_ip" "$_ipx" | sed 's/,,*/,/g; s/^,//; s/,$//')
+	# "udpports": ranges of UDP destination ports to send through the tunnel. Needed when a service
+	# hands the client a BARE IP instead of a hostname — Discord voice does exactly that, so no
+	# DOMAIN-SUFFIX rule can ever match it and the packets fall through to MATCH,DIRECT. The port is
+	# the only thing left to recognise them by. Old CGIs ignore the field (safe).
+	PR_UDPPORTS=$(printf '%s' "$2" | jsonfilter -e "@[$1].udpports[*]" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
 	PR_INC=$(printf '%s' "$2" | jsonfilter -e "@[$1].includes[*]" 2>/dev/null | tr '\n' ' ')
 	# "note": {"ru": …, "en": …} — the human explanation of WHEN to use this preset. It lives in the
 	# manifest, not in app.js, so it can be rewritten without cutting a release: applist changes reach
@@ -469,6 +482,7 @@ preset_index_of() {   # $1=id $2=index.json body — prints the array index, emp
 preset_fields_at() {   # $1=array index $2=index.json body
 	preset_raw_at "$1" "$2"
 	PF_NAME="$PR_NAME"; PF_CAT="$PR_CAT"; PF_GEOIP="$PR_GEOIP"; PF_IPS="$PR_IPS"; PF_INC="$PR_INC"
+	PF_PORTS="$PR_UDPPORTS"
 	# facets BEFORE includes are folded in — "is this preset applied" must be judged by its own
 	# entries, or a composite would look applied merely because something it includes is on
 	PF_OWNCAT="$PR_CAT"; PF_OWNIPS="$PR_IPS"
@@ -484,6 +498,7 @@ preset_fields_at() {   # $1=array index $2=index.json body
 		PF_CAT=$(printf '%s,%s' "$PF_CAT" "$PR_CAT" | sed 's/,,*/,/g; s/^,//; s/,$//')
 		PF_GEOIP=$(printf '%s,%s' "$PF_GEOIP" "$PR_GEOIP" | sed 's/,,*/,/g; s/^,//; s/,$//')
 		PF_IPS=$(printf '%s,%s' "$PF_IPS" "$PR_IPS" | sed 's/,,*/,/g; s/^,//; s/,$//')
+		PF_PORTS=$(printf '%s,%s' "$PF_PORTS" "$PR_UDPPORTS" | sed 's/,,*/,/g; s/^,//; s/,$//')
 		[ "$PR_HASLIST" = 1 ] && PF_LISTS=$(printf '%s %s' "$PF_LISTS" "$_inc" | sed 's/^ *//; s/  */ /g')
 	done
 	# A preset may name a category BOTH directly and through an include — that is deliberate, because
@@ -491,6 +506,7 @@ preset_fields_at() {   # $1=array index $2=index.json body
 	# read (applist is shared by every installed version). Collapse the repeats here so the merged view
 	# stays clean.
 	PF_CAT=$(csv_dedup "$PF_CAT"); PF_GEOIP=$(csv_dedup "$PF_GEOIP"); PF_IPS=$(csv_dedup "$PF_IPS")
+	PF_PORTS=$(csv_dedup "$PF_PORTS")
 	# kept for callers that only ask "does this preset carry domains at all"
 	PF_HASLIST=0; [ -n "$PF_LISTS" ] && PF_HASLIST=1
 }
@@ -694,6 +710,9 @@ presets_adopt_all() {   # $1=index.json body
 			for p in $(printf '%s' "$PF_IPS" | tr ',' ' '); do
 				p=$(clean_ip "$p"); [ -n "$p" ] && printf 'IP-CIDR\t%s\t%s\n' "$p" "$_aid" >> "$_want"
 			done
+			for p in $(printf '%s' "$PF_PORTS" | tr ',' ' '); do
+				p=$(clean_ports "$p"); [ -n "$p" ] && printf 'AND\t((NETWORK,udp),(DST-PORT,%s))\t%s\n' "$p" "$_aid" >> "$_want"
+			done
 		fi
 		_ai=$((_ai + 1))
 	done
@@ -736,7 +755,7 @@ sync_all() {
 		if preset_applied "$id"; then
 			_snode=$(preset_node_hint)
 			# what this preset claims but the manifest no longer lists — release it
-			_want=" $(printf '%s' "$PF_CAT" | tr ',' ' ') $(printf '%s' "$PF_GEOIP" | tr ',' ' ') $(for p in $(printf '%s' "$PF_IPS" | tr ',' ' '); do clean_ip "$p"; printf ' '; done) "
+			_want=" $(printf '%s' "$PF_CAT" | tr ',' ' ') $(printf '%s' "$PF_GEOIP" | tr ',' ' ') $(for p in $(printf '%s' "$PF_IPS" | tr ',' ' '); do clean_ip "$p"; printf ' '; done) $(for p in $(printf '%s' "$PF_PORTS" | tr ',' ' '); do p=$(clean_ports "$p"); [ -n "$p" ] && printf '((NETWORK,udp),(DST-PORT,%s)) ' "$p"; done) "
 			for cl in $(facet_claimed "$id"); do
 				case " $_want " in
 					*" ${cl#*|} "*) : ;;
@@ -758,6 +777,11 @@ sync_all() {
 				ip=$(clean_ip "$ip"); [ -z "$ip" ] && continue
 				snap_has IP-CIDR "$ip" \
 					|| { add_rule IP-CIDR "$ip" "$_snode" "$id"; uci set "nikki.@rule[-1].no_resolve=1"; SYNC_FACETS=$((SYNC_FACETS + 1)); }
+			done
+			for pr in $(printf '%s' "$PF_PORTS" | tr ',' ' '); do
+				pr=$(clean_ports "$pr"); [ -z "$pr" ] && continue
+				snap_has AND "((NETWORK,udp),(DST-PORT,$pr))" \
+					|| { add_rule AND "((NETWORK,udp),(DST-PORT,$pr))" "$_snode" "$id"; SYNC_FACETS=$((SYNC_FACETS + 1)); }
 			done
 			for _l in $PF_LISTS; do do_preset_sync "$_l"; done
 			snap_refresh   # this preset may have added or released rules; later ones must see that
@@ -814,12 +838,13 @@ op_start() {   # $1=file $2=id $3=name $4=on $5…=CLI verb+args — seed the st
 _pop_write() {   # $1=phase $2=done $3=ok   (PA_* set by preset_apply_run)
 	op_write "$PRESET_OP" "$$" "$PA_ID" "$PA_NAME" "$PA_ON" "$1" "$2" "$3"
 }
-preset_apply_run() {   # $1=id $2=on $3=cat $4=geoip $5=ips $6=node $7=lists $8=name
+preset_apply_run() {   # $1=id $2=on $3=cat $4=geoip $5=ips $6=node $7=lists $8=name $9=udpports
 	PA_ID="$1"; PA_ON="$2"; _cat="$3"; _geoip="$4"; _ips="$5"; _node="$6"; _lists="$7"; PA_NAME="$8"
+	_ports="$9"
 	case "$_node" in PROXY|DIRECT|REJECT|"$EXIT_GROUP") ;; *) _node="$EXIT_GROUP" ;; esac
 	_pop_write geo 0 0
 	_ch=0
-	if [ -n "$_cat$_geoip$_ips" ]; then
+	if [ -n "$_cat$_geoip$_ips$_ports" ]; then
 		if [ "$PA_ON" = 1 ]; then
 			# add or, when the rule is already there, just claim it — so a facet shared with another
 			# preset ends up owned by both and survives either of them being switched off
@@ -841,6 +866,14 @@ preset_apply_run() {   # $1=id $2=on $3=cat $4=geoip $5=ips $6=node $7=lists $8=
 					add_rule IP-CIDR "$ip" "$_node" "$PA_ID"; uci set "nikki.@rule[-1].no_resolve=1"; _ch=1
 				else rule_tag IP-CIDR "$ip" "$PA_ID" && _ch=1; fi
 			done
+			# a logic rule, not a bare DST-PORT: the same numbers on TCP must keep going wherever
+			# they were going, only the UDP half belongs to the service that handed out a bare IP
+			for pr in $(printf '%s' "$_ports" | tr ',' ' '); do
+				pr=$(clean_ports "$pr"); [ -z "$pr" ] && continue
+				_pm="((NETWORK,udp),(DST-PORT,$pr))"
+				if [ "$(rule_exists AND "$_pm")" != 1 ]; then add_rule AND "$_pm" "$_node" "$PA_ID"; _ch=1
+				else rule_tag AND "$_pm" "$PA_ID" && _ch=1; fi
+			done
 		else
 			# Adopt first: on a router upgraded from an older version these rules have no owner yet, and
 			# releasing an unowned rule deletes it — which for a composite would take the included
@@ -850,6 +883,9 @@ preset_apply_run() {   # $1=id $2=on $3=cat $4=geoip $5=ips $6=node $7=lists $8=
 			for g in $(printf '%s' "$_geoip" | tr ',' ' '); do [ -n "$g" ] && rule_release GEOIP "$g" "$PA_ID" >/dev/null; done
 			for ip in $(printf '%s' "$_ips" | tr ',' ' '); do
 				ip=$(clean_ip "$ip"); [ -n "$ip" ] && rule_release IP-CIDR "$ip" "$PA_ID" >/dev/null
+			done
+			for pr in $(printf '%s' "$_ports" | tr ',' ' '); do
+				pr=$(clean_ports "$pr"); [ -n "$pr" ] && rule_release AND "((NETWORK,udp),(DST-PORT,$pr))" "$PA_ID" >/dev/null
 			done
 			_ch=1
 		fi
@@ -3083,7 +3119,7 @@ nodes_json() {
 # true when some rule still needs the big GeoIP.dat (a service category, not a 2-letter country)
 [ "$1" = "_geoipneeded" ] && { geoip_service_rules | grep -q . ; exit $?; }
 # detached atomic nikki-preset apply (both facets) — status streamed to $PRESET_OP
-[ "$1" = "_presetapply" ] && { preset_apply_run "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9"; exit 0; }
+[ "$1" = "_presetapply" ] && { preset_apply_run "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}"; exit 0; }
 [ "$1" = "_z2presetapply" ] && { z2_preset_apply_run "$2" "$3" "$4"; exit 0; }
 # detached per-device capture — status streamed to $TRACE_OP, report to $TRACE_RESULT
 [ "$1" = "_tracerun" ] && { trace_run "$2"; exit 0; }
@@ -3850,7 +3886,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		on=$(get_param on | sed 's/[^01]//g'); [ -z "$on" ] && on=0
 		preset_fields "$id" || { json_header; printf '{"ok":false,"error":"unknown preset"}'; exit 0; }
 		undo_push preset   # ONE undo point for the whole apply
-		op_start "$PRESET_OP" "$id" "$PF_NAME" "$on" _presetapply "$id" "$on" "$PF_CAT" "$PF_GEOIP" "$PF_IPS" "$PF_NODE" "$PF_LISTS" "$PF_NAME"
+		op_start "$PRESET_OP" "$id" "$PF_NAME" "$on" _presetapply "$id" "$on" "$PF_CAT" "$PF_GEOIP" "$PF_IPS" "$PF_NODE" "$PF_LISTS" "$PF_NAME" "$PF_PORTS"
 		json_header; printf '{"ok":true,"started":true}'; exit 0
 
 		;;
