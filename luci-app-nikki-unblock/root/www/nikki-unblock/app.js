@@ -147,7 +147,18 @@ const I18N = {
     dcOpenOk: (c, sz) => "Открывается: код " + c + ", получено " + sz,
     dcOpenRedir: c => "Открывается: переадресация " + c + " (тела нет, это нормально)",
     dcOpenThrottled: (sz, s) => "Ответ начался и завис на " + sz + " (" + s + " с до таймаута) — это удушение по IP, десинк тут не поможет, нужен туннель",
-    sdBtn: "Что тянет сайт",
+    sdSection: "Что тянет страница",
+    dcFixedRerun: "Применено. Проверьте ещё раз, чтобы увидеть результат.",
+    dcAdvGroupDead: "Правило ведёт в туннель, но группа выходов не собрана — идти некуда",
+    dcAdvBehindTunnel: "Домен уже идёт через туннель и всё равно не открывается — значит, ломается ЗА туннелем: узел или сеть за ним",
+    dcAdvCheckNode: "Проверить ноду",
+    dcAdvZ2Down: "Домен в списке zapret2, но сам zapret2 не запущен — обход не работает",
+    dcAdvZ2Start: "Запустить zapret2",
+    dcAdvSni: "Рвут по имени, а это ровно то, что обходит zapret2 — и без прогона трафика через VPN",
+    dcAdvToZ2: "Отдать zapret2",
+    dcAdvSniAlso: "Если zapret2 не справится — остаётся туннель",
+    dcAdvAddress: "Блокировка на уровне адреса: десинк её не обойдёт, помогает только туннель",
+    dcAdvToTunnel: "В туннель",
     sdRunning: "Смотрю, что подгружает страница…",
     sdProbing: (n, m) => "Проверяю хосты: " + n + " из " + m,
     sdBusy: "Проверка уже идёт — дождитесь окончания",
@@ -439,7 +450,18 @@ const I18N = {
     dcOpenOk: (c, sz) => "Opens: code " + c + ", " + sz + " received",
     dcOpenRedir: c => "Opens: redirect " + c + " (no body, which is normal)",
     dcOpenThrottled: (sz, s) => "Response started then stalled at " + sz + " (" + s + " s to timeout) — IP-level throttling; no desync fixes this, it needs a tunnel",
-    sdBtn: "What the site pulls in",
+    sdSection: "What the page pulls in",
+    dcFixedRerun: "Applied. Check again to see the result.",
+    dcAdvGroupDead: "The rule points into the tunnel, but the exit group was never built — there is nowhere to go",
+    dcAdvBehindTunnel: "The domain already goes through the tunnel and still doesn't open — so it breaks BEHIND it: the node, or the network past it",
+    dcAdvCheckNode: "Check the node",
+    dcAdvZ2Down: "The domain is on zapret2's list, but zapret2 isn't running — no bypass is happening",
+    dcAdvZ2Start: "Start zapret2",
+    dcAdvSni: "It's the name being cut, which is exactly what zapret2 defeats — and without sending traffic through the VPN",
+    dcAdvToZ2: "Hand it to zapret2",
+    dcAdvSniAlso: "If zapret2 can't manage it, the tunnel remains",
+    dcAdvAddress: "An address-level block: no desync gets around that, only the tunnel does",
+    dcAdvToTunnel: "Into the tunnel",
     sdRunning: "Looking at what the page loads…",
     sdProbing: (n, m) => "Checking hosts: " + n + " of " + m,
     sdBusy: "A scan is already running — wait for it to finish",
@@ -1490,14 +1512,56 @@ async function dcCheck(dom){
     else if (p.verdict === "cutoff") render({ state: "bad", msg: t("dcOpenCutoff") });
     else if (p.verdict === "challenge") render({ state: "info", msg: t("dcOpenChallenge") });
     render({ state: "info", msg: t("dcProbeCaveat") });
+    dcAdvise(d, p, render);
   }
+  // The address is only half the question: a page half-works because something it PULLS IN is blocked,
+  // and that never shows up in the address bar. Same run, appended as it arrives, so the fast answer
+  // still lands first.
+  sdScan(d.domain, box);
+}
+/* The suggestion follows the PAIR — where the domain is routed AND where the request died — not the
+   probe alone. The same "cut at TLS" means "hand it to zapret2" when the domain goes direct, and
+   "your exit node is the problem" when it is already in the tunnel; advising desync in the second
+   case sends the user to fix something that was never in the path. */
+function dcAdvise(d, p, render){
+  const v = p.verdict;
+  if (v === "ok" || v === "challenge" || v === "dns") return;   // nothing routing can do about these
+  const viaVpn = d.target && !["DIRECT", "REJECT", "REJECT-DROP", "PASS", ""].includes(d.target);
+  const fix = (msg, label, action, params, state) => {
+    const el = render({ state: state || "warn", msg });
+    const b = document.createElement("button"); b.className = "ghost"; b.textContent = label;
+    b.addEventListener("click", async () => {
+      b.disabled = true; showOverlay(t("applying"));
+      const r = await api(action, params);
+      hideOverlay(); loadDomains(); loadUndo(); loadZapret2();
+      const bad = !r || r.ok === false;
+      setMsg($("#dcMsg"), bad ? (t("errP") + ((r && r.error) || "?")) : t("dcFixedRerun"), !bad);
+    });
+    el.appendChild(b);
+    return el;
+  };
+  if (d.target === "REJECT" || d.target === "REJECT-DROP") return;   // our own rule; the row above says so
+  if (viaVpn){
+    // The rule is already there and it still doesn't open — so the break is BEHIND the tunnel.
+    if (!d.target_live) fix(t("dcAdvGroupDead"), t("nkDiagFixGroup"), "noderegen", {}, "bad");
+    else fix(t("dcAdvBehindTunnel"), t("dcAdvCheckNode"), "nodecheck", { name: d.node || "" }, "bad");
+    return;
+  }
+  if (d.z2 && !d.z2_running){ fix(t("dcAdvZ2Down"), t("dcAdvZ2Start"), "z2svc", { op: "restart" }, "bad"); return; }
+  // Direct, and broken. Which engine is the right answer depends on the layer it died at.
+  const desyncable = (v === "tls" || v === "cutoff");   // the name is what's cut → desync's home ground
+  if (desyncable && CAPS.zapret2 && !d.z2)
+    fix(t("dcAdvSni"), t("dcAdvToZ2"), "z2hostadd", { domain: d.domain }, "bad");
+  // Address-level faults are beyond any desync, and so is a domain zapret2 already covers and still fails.
+  fix(desyncable ? t("dcAdvSniAlso") : t("dcAdvAddress"), t("dcAdvToTunnel"), "add",
+      { type: "DOMAIN-SUFFIX", domain: d.domain, node: EXITG }, "bad");
 }
 /* ---------- "what does this site pull in, and which of it is broken?" ----------
    The site's own address is only ever part of the answer: a page half-works because a CDN or an API
    it depends on is the blocked one, and that dependency never appears in the address bar. The scan
    runs detached (same op machinery as the capture) because a page with a throttled host takes the
    full probe timeout, and a synchronous request would outlive uhttpd. */
-const SD = { polling: false, domain: null };
+const SD = { polling: false, domain: null, box: null };
 /* A rule wants the registrable domain, not the hostname that happened to appear in this page. CDN
    hostnames are generated per session — oca-lax1-c001.1.oca.nflxvideo.net is gone tomorrow — so
    adding it verbatim buys one working request and no more. Two labels, plus the short list of
@@ -1508,14 +1572,11 @@ function sdSuffix(host){
   if (p.length <= 2) return host;
   return SD_MULTI.test(host) ? p.slice(-3).join(".") : p.slice(-2).join(".");
 }
-async function sdScan(dom){
-  const btn = $("#sdBtn"); btn.disabled = true;
-  $("#sdResult").hidden = true;
-  SD.domain = dom;
+async function sdScan(dom, box){
+  SD.domain = dom; SD.box = box;
   setMsg($("#dcMsg"), t("sdRunning"));
   const r = await api("sitestart", { domain: dom });
   if (!(r && r.ok && r.started)){
-    btn.disabled = false;
     setMsg($("#dcMsg"), (r && r.error === "busy") ? t("sdBusy") : t("errP") + ((r && r.error) || "?"), false);
     return;
   }
@@ -1532,7 +1593,6 @@ async function sdPoll(){
   SD.polling = false;
   // same rule as the capture: only OUR completion counts
   if (!s || !s.done || (SD.domain && s.id !== SD.domain)) return;
-  $("#sdBtn").disabled = false;
   if (s.ok !== 1){ setMsg($("#dcMsg"), t("sdFail"), false); return; }
   let d = null; try { d = await (await fetch("?api=siteresult")).json(); } catch(e){}
   if (!d || !d.ok){ setMsg($("#dcMsg"), t("sdFail"), false); return; }
@@ -1540,10 +1600,13 @@ async function sdPoll(){
   sdRender(d);
 }
 function sdRender(d){
-  const box = $("#sdResult"); box.innerHTML = ""; box.hidden = false;
-  const hosts = d.hosts || [];
+  const box = SD.box || $("#dcResult"); box.hidden = false;
+  // The typed domain already has its own verdict above, from a probe that ran first — repeating it
+  // here would read as two separate findings about the same host.
+  const hosts = (d.hosts || []).filter(h => h.host !== d.domain);
   const bad = hosts.filter(h => h.verdict !== "ok");
   const okN = hosts.length - bad.length;
+  { const sep = document.createElement("div"); sep.className = "ytsep"; sep.textContent = t("sdSection"); box.appendChild(sep); }
   const row = (state, msg) => {
     const el = document.createElement("div"); el.className = "ytrow " + state;
     el.innerHTML = '<span class="ytic">' + (state === "bad" ? "✕" : state === "warn" ? "!" : "·") + '</span>' +
@@ -1594,10 +1657,6 @@ function sdRender(d){
   const hint = txt => { const e = document.createElement("div"); e.className = "ythint"; e.textContent = txt; box.appendChild(e); };
   hint(t("sdBlind")); hint(t("sdCaveat"));
 }
-$("#sdBtn").addEventListener("click", () => {
-  const v = $("#dcInput").value.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
-  if (v.indexOf(".") > 0) sdScan(v);
-});
 $("#dcForm").addEventListener("submit", e => {
   e.preventDefault();
   const v = $("#dcInput").value.trim(); if (v) dcCheck(v);
