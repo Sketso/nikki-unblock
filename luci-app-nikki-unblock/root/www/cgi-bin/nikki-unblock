@@ -24,6 +24,12 @@ Z2_PRESET_OP="/tmp/nikki-unblock-z2presetop"     # status of the current detache
 # CLI tool — and the panel drives that same tool through the detached-op machinery; the CGI never
 # re-implements the conntrack parsing.
 TRACE_BIN="/usr/bin/nikki-unblock-trace"
+# "What does this site pull in, and which of it is broken?" — the page's own address is only ever
+# part of the answer; a site half-works because a CDN or an API it depends on is the blocked one.
+SITE_OP="/tmp/nikki-unblock-siteop"               # status of the current detached dependency scan
+SITE_RESULT="/tmp/nikki-unblock-site.json"        # report of the LAST finished scan
+SITE_MAX=25                                       # hosts probed per scan, most-referenced first
+SITE_PAR=5                                        # probes in flight: serial would be minutes on one page
 TRACE_OP="/tmp/nikki-unblock-traceop"            # status of the current detached device capture
 TRACE_RESULT="/tmp/nikki-unblock-trace.json"     # report of the LAST finished capture
 TRACE_SECS=60                                    # fixed window: long enough to reproduce, short enough to wait out
@@ -2993,6 +2999,71 @@ reach_probe() {   # $1=domain -> "verdict|code|bytes|seconds"
 	else _v=ok; fi
 	printf '%s|%s|%s|%s' "$_v" "$_code" "$_size" "$_secs"
 }
+# ---- what a page pulls in, and which of it is broken -----------------------
+# Discovery is deliberately dumb: every "//host" in the HTML and in the Link: headers, ranked by how
+# often it appears, which is a decent stand-in for "actually used" and costs one pass. No HTML parser
+# on a router, and none needed — a missed host is a missed row, not a wrong answer.
+# The blind spot is real and worth naming: anything a page fetches from JAVASCRIPT is invisible here.
+# fast.com is the clean example — its measurement servers come from an XHR to api.fast.com, so this
+# pass will not find them. That is what the capture-based pass is for; this one is the cheap half.
+SITE_UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+sitedeps_hosts() {   # $1=domain — prints hosts, most-referenced first, self included, capped
+	_pg="/tmp/nu-site.$$.html"; _hh="/tmp/nu-site.$$.hdr"
+	curl -sL -m 20 -A "$SITE_UA" -D "$_hh" "https://$1/" 2>/dev/null | head -c 800000 > "$_pg"
+	# The site's own address leads the list even when the page never links to itself by absolute URL —
+	# it is the dependency the user actually named, and example.com alone would have produced a report
+	# that never mentions example.com.
+	{
+		printf '%s\n' "$1"
+		{ cat "$_pg"; grep -i '^link:' "$_hh" 2>/dev/null; } \
+			| grep -oE '//[a-zA-Z0-9][a-zA-Z0-9._-]*\.[a-zA-Z][a-zA-Z]+' \
+			| sed 's#^//##' | tr 'A-Z' 'a-z' \
+			| sort | uniq -c | sort -rn | awk '{print $2}'
+	} | awk '!seen[$0]++' | head -"$SITE_MAX"
+	rm -f "$_pg" "$_hh"
+}
+sitedeps_run() {   # $1=domain — detached; report to $SITE_RESULT, progress to $SITE_OP
+	_sd="$1"
+	_swd="/tmp/nu-sitewd.$$"; rm -rf "$_swd"; mkdir -p "$_swd" || return 1
+	op_write "$SITE_OP" "$$" "$_sd" "$_sd" 1 fetch 0 0
+	sitedeps_hosts "$_sd" > "$_swd/hosts"
+	_tot=$(wc -l < "$_swd/hosts"); _tot=$((_tot + 0))
+	_n=0
+	while IFS= read -r _h; do
+		[ -z "$_h" ] && continue
+		_n=$((_n + 1))
+		( printf '%s\t%s\n' "$_h" "$(reach_probe "$_h")" > "$_swd/r$_n" ) &
+		# Batch rather than fire everything at once: SITE_MAX curls in flight on a router is how you
+		# make the diagnosis itself look like the outage. wait also gives us a progress tick.
+		if [ $((_n % SITE_PAR)) = 0 ]; then
+			wait
+			op_write "$SITE_OP" "$$" "$_sd" "$_sd" 1 "$_n/$_tot" 0 0
+		fi
+	done < "$_swd/hosts"
+	wait
+	{
+		printf '{"ok":true,"domain":"%s","total":%s,"hosts":[' "$(json_esc "$_sd")" "$_tot"
+		_first=1; _i=0
+		while [ "$_i" -lt "$_tot" ]; do
+			_i=$((_i + 1))
+			[ -f "$_swd/r$_i" ] || continue
+			_line=$(cat "$_swd/r$_i")
+			_hn=${_line%%	*}; _pv=${_line#*	}
+			[ "$_first" = 1 ] || printf ','; _first=0
+			printf '{"host":"%s","verdict":"%s","code":%s,"bytes":%s,"secs":%s}' \
+				"$(json_esc "$_hn")" "$(printf '%s' "$_pv" | cut -d'|' -f1)" \
+				"$(printf '%s' "$_pv" | cut -d'|' -f2)" "$(printf '%s' "$_pv" | cut -d'|' -f3)" \
+				"$(printf '%s' "$_pv" | cut -d'|' -f4)"
+		done
+		printf ']}'
+	} > "$SITE_RESULT.part"
+	rm -rf "$_swd"
+	_sok=0
+	grep -q '"ok":true' "$SITE_RESULT.part" 2>/dev/null && { mv "$SITE_RESULT.part" "$SITE_RESULT"; _sok=1; }
+	rm -f "$SITE_RESULT.part"
+	op_write "$SITE_OP" "$$" "$_sd" "$_sd" 1 done 1 "$_sok"
+}
+
 reachcheck_json() {
 	json_header
 	_d=$(get_param domain | tr 'A-Z' 'a-z' | sed 's#^https\?://##; s#/.*##; s/[^a-z0-9.-]//g')
@@ -3172,6 +3243,10 @@ nodes_json() {
 [ "$1" = "_z2presetapply" ] && { z2_preset_apply_run "$2" "$3" "$4"; exit 0; }
 # detached per-device capture — status streamed to $TRACE_OP, report to $TRACE_RESULT
 [ "$1" = "_tracerun" ] && { trace_run "$2"; exit 0; }
+# detached site-dependency scan — status to $SITE_OP, report to $SITE_RESULT
+[ "$1" = "_siterun" ] && { sitedeps_run "$2"; exit 0; }
+# same scan, synchronous, for a shell: nikki-unblock _sitedeps example.com
+[ "$1" = "_sitedeps" ] && { sitedeps_run "$2"; cat "$SITE_RESULT"; echo; exit 0; }
 # nikki update rollback point: snapshot config before, restore it if mihomo dies after
 NIKKI_PRESNAP="/tmp/nu-preupd-nikki.tgz"
 [ "$1" = "_nikkisnap" ] && { build_backup "$NIKKI_PRESNAP" >/dev/null 2>&1 && echo ">> nikki config snapshot saved" || echo "!! snapshot failed"; exit 0; }
@@ -4306,6 +4381,28 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		ap=0; allports_on && ap=1
 		json_header; printf '{"ok":true,"allports":%d}' "$ap"; exit 0
 		;;
+	sitestart)
+		d=$(get_param domain | tr 'A-Z' 'a-z' | sed 's#^https\?://##; s#/.*##; s/[^a-z0-9.-]//g')
+		case "$d" in *.*) ;; *) json_header; printf '{"ok":false,"error":"bad domain"}'; exit 0 ;; esac
+		op_busy "$SITE_OP" && { json_header; printf '{"ok":false,"error":"busy"}'; exit 0; }
+		op_start "$SITE_OP" "$d" "$d" 1 _siterun "$d"
+		json_header; printf '{"ok":true,"started":true}'; exit 0
+		;;
+	addmany)
+		# One commit and ONE nikki reload for the whole batch. Adding fifteen domains one request at a
+		# time means fifteen reloads, and the network blinks on every one of them.
+		added=0; skipped=0
+		undo_push addmany
+		for _dm in $(printf '%s' "$(get_param domains)" | tr ',' ' '); do
+			_dm=$(printf '%s' "$_dm" | parse_domains | head -1)
+			[ -z "$_dm" ] && continue
+			if [ "$(rule_exists DOMAIN-SUFFIX "$_dm")" = 1 ]; then skipped=$((skipped + 1)); continue; fi
+			add_rule DOMAIN-SUFFIX "$_dm" "$(default_rule_node)"
+			added=$((added + 1))
+		done
+		[ "$added" -gt 0 ] && { uci commit nikki; apply_nikki; }
+		json_header; printf '{"ok":true,"added":%d,"skipped":%d}' "$added" "$skipped"; exit 0
+		;;
 	tracestart)
 		c=$(clean_ip "$(get_param client)")
 		case "$c" in *.*.*.*) ;; *) json_header; printf '{"ok":false,"error":"bad client"}'; exit 0 ;; esac
@@ -4410,6 +4507,12 @@ devicesall_json() {
 [ "$API" = "presetop" ] && { presetop_json; exit 0; }
 [ "$API" = "z2presetop" ] && { op_json "$Z2_PRESET_OP"; exit 0; }
 [ "$API" = "traceop" ] && { op_json "$TRACE_OP"; exit 0; }
+[ "$API" = "siteop" ] && { op_json "$SITE_OP"; exit 0; }
+[ "$API" = "siteresult" ] && {
+	json_header
+	[ -s "$SITE_RESULT" ] && cat "$SITE_RESULT" || printf '{"ok":false,"error":"no report"}'
+	exit 0
+}
 [ "$API" = "traceresult" ] && {
 	json_header
 	[ -s "$TRACE_RESULT" ] && cat "$TRACE_RESULT" || printf '{"ok":false,"error":"no report"}'

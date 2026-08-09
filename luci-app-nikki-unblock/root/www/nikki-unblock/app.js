@@ -147,6 +147,25 @@ const I18N = {
     dcOpenOk: (c, sz) => "Открывается: код " + c + ", получено " + sz,
     dcOpenRedir: c => "Открывается: переадресация " + c + " (тела нет, это нормально)",
     dcOpenThrottled: (sz, s) => "Ответ начался и завис на " + sz + " (" + s + " с до таймаута) — это удушение по IP, десинк тут не поможет, нужен туннель",
+    sdBtn: "Что тянет сайт",
+    sdRunning: "Смотрю, что подгружает страница…",
+    sdProbing: (n, m) => "Проверяю хосты: " + n + " из " + m,
+    sdBusy: "Проверка уже идёт — дождитесь окончания",
+    sdFail: "Не удалось разобрать страницу",
+    sdVdTls: h => h + " — рвётся на рукопожатии по имени (DPI по SNI)",
+    sdVdTcp: h => h + " — порт не открывается, блокировка по адресу",
+    sdVdDns: h => h + " — имя не разрешается",
+    sdVdCutoff: h => h + " — соединение обрывают после установки",
+    sdVdThrottled: (h, sz, s) => h + " — ответ завис на " + sz + " (" + s + " с до таймаута), удушение по IP",
+    sdVdChallenge: h => h + " — проверка Cloudflare, в браузере пройдёт сама",
+    sdOkCount: n => "Остальные хосты страницы отвечают нормально: " + n,
+    sdNone: "Проблемных зависимостей не нашлось — всё, что тянет страница, открывается",
+    sdAdd: s => "В туннель: " + s,
+    sdAddAll: n => "Добавить все в туннель (" + n + ")",
+    sdAddConfirm: l => "Добавить в туннель по суффиксу?\n\n" + l + "\n\nСуффикс охватывает и поддомены.",
+    sdAdded: (a, s) => "Добавлено: " + a + (s ? ", уже было: " + s : ""),
+    sdBlind: "Здесь видно только то, что упомянуто в самой странице. Что подгружает скрипт — не видно; для этого нужна запись устройства.",
+    sdCaveat: "Проверка идёт с роутера и через mihomo, поэтому у устройства картина может отличаться.",
     dcOpenDns: "Имя не разрешается — до блокировок дело не доходит, проблема в DNS роутера",
     dcOpenTcp: "Соединение не устанавливается: порт не открывается вообще. Это блокировка по адресу, десинк тут не поможет — нужен туннель",
     dcOpenTls: "TCP-соединение встаёт, но рвётся, как только в рукопожатии звучит имя сайта. Классический DPI по SNI — его и обходит zapret2",
@@ -420,6 +439,25 @@ const I18N = {
     dcOpenOk: (c, sz) => "Opens: code " + c + ", " + sz + " received",
     dcOpenRedir: c => "Opens: redirect " + c + " (no body, which is normal)",
     dcOpenThrottled: (sz, s) => "Response started then stalled at " + sz + " (" + s + " s to timeout) — IP-level throttling; no desync fixes this, it needs a tunnel",
+    sdBtn: "What the site pulls in",
+    sdRunning: "Looking at what the page loads…",
+    sdProbing: (n, m) => "Checking hosts: " + n + " of " + m,
+    sdBusy: "A scan is already running — wait for it to finish",
+    sdFail: "Could not read the page",
+    sdVdTls: h => h + " — dies at the handshake once the name is sent (SNI DPI)",
+    sdVdTcp: h => h + " — the port never opens, an address-level block",
+    sdVdDns: h => h + " — the name doesn't resolve",
+    sdVdCutoff: h => h + " — the connection is cut after it is established",
+    sdVdThrottled: (h, sz, s) => h + " — response stalled at " + sz + " (" + s + " s to timeout), IP throttling",
+    sdVdChallenge: h => h + " — Cloudflare challenge, a browser solves it",
+    sdOkCount: n => "The page's other hosts answer fine: " + n,
+    sdNone: "No broken dependencies — everything the page pulls in opens",
+    sdAdd: s => "Tunnel: " + s,
+    sdAddAll: n => "Send all to the tunnel (" + n + ")",
+    sdAddConfirm: l => "Send these to the tunnel, by suffix?\n\n" + l + "\n\nA suffix covers subdomains too.",
+    sdAdded: (a, s) => "Added: " + a + (s ? ", already there: " + s : ""),
+    sdBlind: "This only sees what the page itself mentions. What a script fetches is invisible here — that needs a device capture.",
+    sdCaveat: "The scan runs from the router and through mihomo, so a device may see something different.",
     dcOpenDns: "The name doesn't resolve — this never gets as far as any blocking; it's the router's DNS",
     dcOpenTcp: "No connection: the port never opens at all. That is an address-level block; desync won't help, it needs a tunnel",
     dcOpenTls: "TCP connects fine, then dies the moment the handshake announces the site's name. Textbook SNI-based DPI — exactly what zapret2 defeats",
@@ -1454,6 +1492,112 @@ async function dcCheck(dom){
     render({ state: "info", msg: t("dcProbeCaveat") });
   }
 }
+/* ---------- "what does this site pull in, and which of it is broken?" ----------
+   The site's own address is only ever part of the answer: a page half-works because a CDN or an API
+   it depends on is the blocked one, and that dependency never appears in the address bar. The scan
+   runs detached (same op machinery as the capture) because a page with a throttled host takes the
+   full probe timeout, and a synchronous request would outlive uhttpd. */
+const SD = { polling: false, domain: null };
+/* A rule wants the registrable domain, not the hostname that happened to appear in this page. CDN
+   hostnames are generated per session — oca-lax1-c001.1.oca.nflxvideo.net is gone tomorrow — so
+   adding it verbatim buys one working request and no more. Two labels, plus the short list of
+   two-part public suffixes where two labels would be a whole country's registry. */
+const SD_MULTI = /\.(co|com|net|org|gov|edu|ac|or|ne)\.[a-z]{2}$/;
+function sdSuffix(host){
+  const p = (host || "").split(".");
+  if (p.length <= 2) return host;
+  return SD_MULTI.test(host) ? p.slice(-3).join(".") : p.slice(-2).join(".");
+}
+async function sdScan(dom){
+  const btn = $("#sdBtn"); btn.disabled = true;
+  $("#sdResult").hidden = true;
+  SD.domain = dom;
+  setMsg($("#dcMsg"), t("sdRunning"));
+  const r = await api("sitestart", { domain: dom });
+  if (!(r && r.ok && r.started)){
+    btn.disabled = false;
+    setMsg($("#dcMsg"), (r && r.error === "busy") ? t("sdBusy") : t("errP") + ((r && r.error) || "?"), false);
+    return;
+  }
+  if (!SD.polling) sdPoll();
+}
+async function sdPoll(){
+  SD.polling = true;
+  let s = null; try { s = await (await fetch("?api=siteop")).json(); } catch(e){}
+  if (s && s.running){
+    const m = /^(\d+)\/(\d+)$/.exec(s.phase || "");
+    setMsg($("#dcMsg"), m ? t("sdProbing")(m[1], m[2]) : t("sdRunning"));
+    setTimeout(sdPoll, 1000); return;
+  }
+  SD.polling = false;
+  // same rule as the capture: only OUR completion counts
+  if (!s || !s.done || (SD.domain && s.id !== SD.domain)) return;
+  $("#sdBtn").disabled = false;
+  if (s.ok !== 1){ setMsg($("#dcMsg"), t("sdFail"), false); return; }
+  let d = null; try { d = await (await fetch("?api=siteresult")).json(); } catch(e){}
+  if (!d || !d.ok){ setMsg($("#dcMsg"), t("sdFail"), false); return; }
+  setMsg($("#dcMsg"), "");
+  sdRender(d);
+}
+function sdRender(d){
+  const box = $("#sdResult"); box.innerHTML = ""; box.hidden = false;
+  const hosts = d.hosts || [];
+  const bad = hosts.filter(h => h.verdict !== "ok");
+  const okN = hosts.length - bad.length;
+  const row = (state, msg) => {
+    const el = document.createElement("div"); el.className = "ytrow " + state;
+    el.innerHTML = '<span class="ytic">' + (state === "bad" ? "✕" : state === "warn" ? "!" : "·") + '</span>' +
+                   '<span class="ytmsg">' + escH(msg) + '</span>';
+    box.appendChild(el); return el;
+  };
+  // Only the routable failures get a button. A Cloudflare challenge is not a block, and a name that
+  // won't resolve is not something a routing rule reaches — offering "send it to the tunnel" there
+  // would be a button that cannot work.
+  const routable = h => ["tls", "tcp", "cutoff", "throttled"].includes(h.verdict);
+  bad.forEach(h => {
+    const msg = h.verdict === "tls" ? t("sdVdTls")(h.host)
+              : h.verdict === "tcp" ? t("sdVdTcp")(h.host)
+              : h.verdict === "dns" ? t("sdVdDns")(h.host)
+              : h.verdict === "cutoff" ? t("sdVdCutoff")(h.host)
+              : h.verdict === "throttled" ? t("sdVdThrottled")(h.host, sizeStr(h.bytes), h.secs)
+              : t("sdVdChallenge")(h.host);
+    const el = row(h.verdict === "challenge" ? "info" : "bad", msg);
+    if (!routable(h)) return;
+    const sfx = sdSuffix(h.host);
+    const b = document.createElement("button"); b.className = "ghost"; b.textContent = t("sdAdd")(sfx);
+    b.addEventListener("click", async () => {
+      b.disabled = true; showOverlay(t("applying"));
+      const res = await api("addmany", { domains: sfx });
+      hideOverlay(); loadDomains(); loadUndo();
+      setMsg($("#dcMsg"), (res && res.ok) ? t("sdAdded")(res.added, res.skipped) : t("errP"), !!(res && res.ok));
+    });
+    el.appendChild(b);
+  });
+  if (!bad.length) row("info", t("sdNone"));
+  if (okN > 0) row("info", t("sdOkCount")(okN));
+  // Bulk add: distinct suffixes only, and the confirm shows exactly what is about to be routed —
+  // a CDN suffix can move a lot of traffic through the VPN, so it must never be a blind click.
+  const sfxs = [...new Set(bad.filter(routable).map(h => sdSuffix(h.host)))];
+  if (sfxs.length > 1){
+    const wrap = row("info", "");
+    wrap.querySelector(".ytmsg").remove();
+    const b = document.createElement("button"); b.textContent = t("sdAddAll")(sfxs.length);
+    b.addEventListener("click", async () => {
+      if (!confirm(t("sdAddConfirm")(sfxs.join("\n")))) return;
+      b.disabled = true; showOverlay(t("applying"));
+      const res = await api("addmany", { domains: sfxs.join(",") });
+      hideOverlay(); loadDomains(); loadUndo();
+      setMsg($("#dcMsg"), (res && res.ok) ? t("sdAdded")(res.added, res.skipped) : t("errP"), !!(res && res.ok));
+    });
+    wrap.appendChild(b);
+  }
+  const hint = txt => { const e = document.createElement("div"); e.className = "ythint"; e.textContent = txt; box.appendChild(e); };
+  hint(t("sdBlind")); hint(t("sdCaveat"));
+}
+$("#sdBtn").addEventListener("click", () => {
+  const v = $("#dcInput").value.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+  if (v.indexOf(".") > 0) sdScan(v);
+});
 $("#dcForm").addEventListener("submit", e => {
   e.preventDefault();
   const v = $("#dcInput").value.trim(); if (v) dcCheck(v);
