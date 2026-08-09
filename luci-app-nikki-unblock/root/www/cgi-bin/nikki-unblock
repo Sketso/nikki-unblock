@@ -1477,24 +1477,73 @@ sub_links() {
 	{ printf '%s' "$_b" | b64d; printf '\n%s\n' "$_b"; } \
 		| grep -oiE '^(vless|vmess|trojan|ss|hysteria2|hy2|tuic)://[^[:space:]]+' | awk '!seen[$0]++'
 }
+
+# Lay out one ready-to-store node block per file (0.yaml, 1.yaml, …) under $2. Two wire formats are
+# tried, in this order:
+#   clash/mihomo YAML — what a panel serves a mihomo client, and the only complete answer we can get.
+#                       Panels tailor the response to the client: remnawave drops protocols an xray
+#                       client could not use (hysteria2) from its share-link output entirely, so a
+#                       router that asks as a plain HTTP client silently never sees those nodes.
+#                       We ARE a mihomo client — asking as one is both honest and lossless.
+#   share-links       — base64 or plain, the historical format, kept for panels that serve only it.
+# Returns 1 when neither yields a node, so a failed or empty fetch stays a no-op for the caller.
+SUB_UA_MIHOMO="mihomo/1.19.0 nikki-unblock"
+sub_fetch_nodes() {   # $1=url $2=outdir
+	_cnt=0
+	_sb=$(curl -s --max-time 20 -A "$SUB_UA_MIHOMO" "$1" 2>/dev/null)
+	if printf '%s' "$_sb" | grep -q '^[[:space:]]*proxies:'; then
+		_pn=$(printf '%s' "$_sb" | yq -M '.proxies | length' 2>/dev/null)
+		case "$_pn" in ''|*[!0-9]*) _pn=0 ;; esac
+		_i=0
+		while [ "$_i" -lt "$_pn" ]; do
+			# yq escapes non-ASCII on the way out ("\U0001F1F3…"), and node identity here is the NAME:
+			# nodes.order, nodes.off and the mihomo API all key on it, so an escaped copy would match
+			# nothing. `-r` hands the name back as raw UTF-8, so take it separately and rebuild the
+			# block around it — which also makes this independent of where the panel put the key.
+			_nm=$(printf '%s' "$_sb" | yq -M -r ".proxies[$_i].name" 2>/dev/null)
+			case "$_nm" in ''|null) _i=$((_i + 1)); continue ;; esac
+			# one proxy -> a 1-item sequence at the 2-space list indent nikki-proxies expects
+			_body=$(printf '%s' "$_sb" | yq -M -o=yaml "[ .proxies[$_i] | del(.name) ]" 2>/dev/null | sed 's/^/  /')
+			if [ -n "$_body" ]; then
+				{ printf '  - name: %s\n' "$_nm"; printf '%s\n' "$_body" | sed '1s/^  - /    /'; } > "$2/$_cnt.yaml"
+				_cnt=$((_cnt + 1))
+			fi
+			_i=$((_i + 1))
+		done
+	fi
+	[ "$_cnt" -gt 0 ] && return 0
+	# nothing usable as YAML — ask again as a plain client and convert the share-links
+	_i=0
+	sub_links "$1" > "$2/links.txt"
+	while IFS= read -r _lk; do
+		[ -z "$_lk" ] && continue; _i=$((_i + 1))
+		_ln=$(urldec "$(printf '%s' "$_lk" | sed 's/.*#//')"); case "$_ln" in "$_lk") _ln="" ;; esac
+		[ -z "$_ln" ] && _ln="node-$_i"
+		_ny=$(sharelink_to_yaml "$_lk" "$_ln" </dev/null) || continue
+		[ -z "$_ny" ] && continue
+		printf '%s\n' "$_ny" > "$2/$_cnt.yaml"; _cnt=$((_cnt + 1))
+	done < "$2/links.txt"
+	rm -f "$2/links.txt"
+	[ "$_cnt" -gt 0 ]
+}
 sub_owned_ids() { for s in "$NODES_DIR"/*.src; do [ -f "$s" ] || continue; [ "$(cat "$s" 2>/dev/null)" = "$1" ] && basename "$s" .src; done; }
 node_name_of() { grep -m1 'name:' "$NODES_DIR/$1.yaml" 2>/dev/null | sed 's/.*name:[[:space:]]*//'; }
 # Sync one subscription (matched by node NAME): update changed, add new, remove departed. Preserves
 # order/enable (they key on name). Does NOT reload — caller regens. Returns 1 if empty/unreachable (no-op).
 sub_sync() {   # $1=subid $2=url $3=name-prefix
 	_sid="$1"; _url="$2"; _pfx="$3"
-	LL="/tmp/nu-sl.$$"; sub_links "$_url" > "$LL"
-	[ -s "$LL" ] || { rm -f "$LL"; return 1; }
+	ND="/tmp/nu-nd.$$"; rm -rf "$ND"; mkdir -p "$ND" 2>/dev/null || return 1
+	sub_fetch_nodes "$_url" "$ND" || { rm -rf "$ND"; return 1; }
 	OWN="/tmp/nu-own.$$"; : > "$OWN"
 	for oid in $(sub_owned_ids "$_sid"); do printf '%s\t%s\n' "$(node_name_of "$oid")" "$oid" >> "$OWN"; done
 	KEEP="/tmp/nu-keep.$$"; : > "$KEEP"
 	i=0
-	while IFS= read -r lk; do
-		[ -z "$lk" ] && continue; i=$((i + 1))
-		lname=$(urldec "$(printf '%s' "$lk" | sed 's/.*#//')"); case "$lname" in "$lk") lname="" ;; esac
+	for _nf in "$ND"/*.yaml; do
+		[ -f "$_nf" ] || continue
+		i=$((i + 1))
+		ny=$(cat "$_nf")
+		lname=$(printf '%s' "$ny" | grep -m1 'name:' | sed 's/.*name:[[:space:]]*//')
 		[ -z "$lname" ] && lname="$_pfx-$i"
-		ny=$(sharelink_to_yaml "$lk" "$lname" </dev/null) || continue
-		[ -z "$ny" ] && continue
 		printf '%s\n' "$lname" >> "$KEEP"
 		oid=$(grep -m1 -F "$(printf '%s\t' "$lname")" "$OWN" | cut -f2)
 		if [ -n "$oid" ]; then
@@ -1506,7 +1555,7 @@ sub_sync() {   # $1=subid $2=url $3=name-prefix
 			nid=$(san_name "$lname"); [ -z "$nid" ] && nid="$_pfx-$i-$(date +%s)"
 			printf '%s\n' "$ny" > "$NODES_DIR/$nid.yaml"; printf '%s' "$_sid" > "$NODES_DIR/$nid.src"
 		fi
-	done < "$LL"
+	done
 	# remove owned nodes whose NAME left the subscription
 	while IFS= read -r line; do
 		onm=$(printf '%s' "$line" | cut -f1); oid=$(printf '%s' "$line" | cut -f2)
@@ -1514,7 +1563,7 @@ sub_sync() {   # $1=subid $2=url $3=name-prefix
 		grep -qxF "$onm" "$KEEP" || { rm -f "$NODES_DIR/$oid.yaml" "$NODES_DIR/$oid.src"
 			for L in "$ORDER_FILE" "$OFF_FILE"; do [ -f "$L" ] && [ -n "$onm" ] && { grep -vxF "$onm" "$L" > "$L.t" 2>/dev/null; mv "$L.t" "$L"; }; done; }
 	done < "$OWN"
-	rm -f "$LL" "$OWN" "$KEEP"; return 0
+	rm -rf "$ND"; rm -f "$OWN" "$KEEP"; return 0
 }
 subrefresh_all() {
 	_ch=0
