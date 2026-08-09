@@ -51,7 +51,7 @@
   },
   {
     "id": "discord",
-    "name": "Discord (всё через VPN)",
+    "name": "Discord",
     "geosite": "discord",
     "udpports": [
       "19294-19344",

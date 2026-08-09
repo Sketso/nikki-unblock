@@ -88,6 +88,35 @@ if [ -f /etc/crontabs/root ]; then
 	rm -f /etc/crontabs/root.dedup 2>/dev/null
 fi
 
+# 2.36.0: the split-tunnel Discord preset ("site via VPN, voice direct") is retired — that is the one
+# arrangement Discord refuses, because the voice server only accepts packets from the address the
+# gateway connected from. Release what it owned. Nothing else can: the panel and autosync only manage
+# presets the manifest still lists, so once the entry is gone its rules would sit here forever with no
+# way to switch them off. Rules shared with another preset keep that owner and stay.
+if [ -z "$(uci -q get nikki-unblock.config.mig_discord_web 2>/dev/null)" ]; then
+	_mg=0; _guard=0
+	while [ "$_guard" -lt 500 ]; do
+		_guard=$((_guard + 1))
+		_hit=""; _i=0
+		while uci -q get "nikki.@rule[$_i]" >/dev/null 2>&1; do
+			case " $(uci -q get "nikki.@rule[$_i].src" 2>/dev/null) " in
+				*" discord-web "*) _hit="$_i"; break ;;
+			esac
+			_i=$((_i + 1))
+		done
+		[ -z "$_hit" ] && break
+		_src=$(uci -q get "nikki.@rule[$_hit].src")
+		_rest=$(echo " $_src " | sed 's/ discord-web / /g; s/^ *//; s/ *$//; s/  */ /g')
+		if [ -n "$_rest" ]; then uci -q set "nikki.@rule[$_hit].src=$_rest"
+		else uci -q delete "nikki.@rule[$_hit]"; fi
+		_mg=$((_mg + 1))
+	done
+	[ "$_mg" -gt 0 ] && uci -q commit nikki
+	uci -q set nikki-unblock.config.mig_discord_web='1'
+	uci -q commit nikki-unblock
+	[ "$_mg" -gt 0 ] && logger -t nikki-unblock "migration: released $_mg rule(s) of the retired discord-web preset"
+fi
+
 # Refresh the LuCI menu/index cache so the new entry shows up.
 rm -f /tmp/luci-indexcache* 2>/dev/null
 rm -rf /tmp/luci-modulecache 2>/dev/null
