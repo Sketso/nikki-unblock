@@ -127,6 +127,11 @@
   .svc.danger { border: 1px solid #dc262655; border-radius: 10px; padding: .8rem; }
   .svc.danger h3 { color: #dc2626; }
   .row { display: flex; gap: .5rem; align-items: center; margin: .5rem 0; flex-wrap: wrap; }
+  /* The check field stands next to its own button, so it carries the button's vertical metrics —
+     same padding, same font size, same height — instead of the browser default, which is both
+     shorter than the button and narrower than a domain. */
+  #dcInput { flex: 1; min-width: 10rem; padding: .6rem .7rem; font-size: 1rem; border-radius: 8px;
+             border: 1px solid #8884; background: #8881; color: inherit; }
   ul { list-style: none; margin: 0; padding: 0; }
   li { display: flex; align-items: center; gap: .6rem; padding: .55rem .2rem; border-bottom: 1px solid #8882; }
   li .dom { flex: 1; font-family: ui-monospace, monospace; }
