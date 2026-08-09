@@ -53,7 +53,10 @@
     "id": "discord",
     "name": "Discord (всё через VPN)",
     "geosite": "discord",
-    "udpports": ["19294-19344", "50000-50100"],
+    "udpports": [
+      "19294-19344",
+      "50000-50100"
+    ],
     "note": {
       "ru": "Голос Discord нельзя оставить напрямую, когда сайт идёт через VPN: голосовой сервер ждёт пакеты с того же адреса, с которого подключился гейтвей, а иначе звонок не собирается — «не удаётся подключиться к RTC» или задержка 5000 мс. Поэтому пресет уводит в туннель и домены, и голосовой UDP. Голосовой сервер выдаётся клиенту голым IP, без имени, так что поймать его можно только по портам — их и добавляет пресет.",
       "en": "Discord voice cannot stay direct while the site goes through the VPN: the voice server expects packets from the same address the gateway connected from, otherwise the call never forms — \"RTC connecting\" forever, or 5000 ms latency. So this preset tunnels both the domains and the voice UDP. The voice server is handed to the client as a bare IP with no hostname, so ports are the only way to recognise it — and that is what the preset adds."
