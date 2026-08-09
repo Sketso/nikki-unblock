@@ -39,8 +39,8 @@
     "name": "YouTube: приложение через VPN, видео напрямую",
     "list": true,
     "note": {
-      "ru": "Чинит случай, когда YouTube работает на телевизоре и в браузере, а приложение на смартфоне висит на запуске по минуте и дольше. Уводит в туннель только служебные запросы приложения — видео и превью идут напрямую, нагрузка на VPN почти нулевая. Включайте вместо полного пресета YouTube, если видео и так работает.",
-      "en": "Fixes the case where YouTube works on a TV and in the browser, but the phone app hangs on startup for a minute or more. Tunnels only the app's service requests — video and thumbnails keep going direct, almost no load on the VPN. Use it instead of the full YouTube preset when video already works."
+      "ru": "Включите, если обход DPI (zapret2) работает не везде: в браузере YouTube идёт, а в приложении на телефоне — нет.",
+      "en": "Enable if the DPI bypass (zapret2) doesn't work everywhere: YouTube plays in the browser but not in the phone app."
     }
   },
   {
@@ -58,8 +58,8 @@
       "50000-50100"
     ],
     "note": {
-      "ru": "Заворачивает Discord в VPN целиком — и сайт, и голос. Голос обязательно вместе с сайтом: если увести только сайт, звонки не собираются — «не удаётся подключиться к RTC» или задержка 5000 мс.",
-      "en": "Routes all of Discord through the VPN — both the site and voice. Voice has to go together with the site: tunnel the site alone and calls won't connect — \"RTC connecting\" forever, or 5000 ms latency."
+      "ru": "Пускает весь трафик Discord через VPN.",
+      "en": "Routes all Discord traffic through the VPN."
     }
   },
   {
