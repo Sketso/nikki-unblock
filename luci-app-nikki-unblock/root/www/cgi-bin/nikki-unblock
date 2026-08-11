@@ -3032,7 +3032,10 @@ sitedeps_run() {   # $1=domain — detached; report to $SITE_RESULT, progress to
 	while IFS= read -r _h; do
 		[ -z "$_h" ] && continue
 		_n=$((_n + 1))
-		( printf '%s\t%s\n' "$_h" "$(reach_probe "$_h")" > "$_swd/r$_n" ) &
+		# zapret2 coverage travels WITH the verdict: a host on its list cannot be fixed by a nikki
+		# rule, because zapret2 claims the connection before mihomo ever sees it. Without this the
+		# per-host button offers a tunnel rule that silently does nothing and reappears every re-check.
+		( printf '%s\t%s\t%s\n' "$_h" "$(reach_probe "$_h")" "$(zapret2_present && z2_lists_hit "$_h")" > "$_swd/r$_n" ) &
 		# Batch rather than fire everything at once: SITE_MAX curls in flight on a router is how you
 		# make the diagnosis itself look like the outage. wait also gives us a progress tick.
 		if [ $((_n % SITE_PAR)) = 0 ]; then
@@ -3047,13 +3050,13 @@ sitedeps_run() {   # $1=domain — detached; report to $SITE_RESULT, progress to
 		while [ "$_i" -lt "$_tot" ]; do
 			_i=$((_i + 1))
 			[ -f "$_swd/r$_i" ] || continue
-			_line=$(cat "$_swd/r$_i")
-			_hn=${_line%%	*}; _pv=${_line#*	}
+			_hn=$(cut -f1 "$_swd/r$_i"); _pv=$(cut -f2 "$_swd/r$_i"); _zl=$(cut -f3 "$_swd/r$_i")
 			[ "$_first" = 1 ] || printf ','; _first=0
-			printf '{"host":"%s","verdict":"%s","code":%s,"bytes":%s,"secs":%s}' \
+			printf '{"host":"%s","verdict":"%s","code":%s,"bytes":%s,"secs":%s,"z2":%d,"z2_list":"%s"}' \
 				"$(json_esc "$_hn")" "$(printf '%s' "$_pv" | cut -d'|' -f1)" \
 				"$(printf '%s' "$_pv" | cut -d'|' -f2)" "$(printf '%s' "$_pv" | cut -d'|' -f3)" \
-				"$(printf '%s' "$_pv" | cut -d'|' -f4)"
+				"$(printf '%s' "$_pv" | cut -d'|' -f4)" \
+				"$([ -n "$_zl" ] && echo 1 || echo 0)" "$(json_esc "$_zl")"
 		done
 		printf ']}'
 	} > "$SITE_RESULT.part"

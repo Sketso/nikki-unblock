@@ -148,6 +148,10 @@ const I18N = {
     dcOpenRedir: c => "Открывается: переадресация " + c + " (тела нет, это нормально)",
     dcOpenThrottled: (sz, s) => "Ответ начался и завис на " + sz + " (" + s + " с до таймаута) — это удушение по IP, десинк тут не поможет, нужен туннель",
     sdSection: "Что тянет страница",
+    sdMoveZ2: "Забрать у zapret2 в туннель",
+    sdZ2Owns: l => "ведёт zapret2 (" + l + "), правило в туннель на него не подействует",
+    dcAdvZ2Owns: l => "Домен ведёт zapret2 (" + l + "), и он помечает эти пакеты так, чтобы nikki их не трогала. Значит правило в туннель на него просто не подействует — трафик до mihomo не доходит",
+    dcAdvZ2Move: "Забрать у zapret2 в туннель",
     dcFixedRerun: "Применено. Проверьте ещё раз, чтобы увидеть результат.",
     dcAdvGroupDead: "Правило ведёт в туннель, но группа выходов не собрана — идти некуда",
     dcAdvBehindTunnel: "Домен уже идёт через туннель и всё равно не открывается — значит, ломается ЗА туннелем: узел или сеть за ним",
@@ -451,6 +455,10 @@ const I18N = {
     dcOpenRedir: c => "Opens: redirect " + c + " (no body, which is normal)",
     dcOpenThrottled: (sz, s) => "Response started then stalled at " + sz + " (" + s + " s to timeout) — IP-level throttling; no desync fixes this, it needs a tunnel",
     sdSection: "What the page pulls in",
+    sdMoveZ2: "Take it from zapret2 into the tunnel",
+    sdZ2Owns: l => "handled by zapret2 (" + l + "), a tunnel rule will not touch it",
+    dcAdvZ2Owns: l => "zapret2 handles this domain (" + l + ") and marks those packets so nikki leaves them alone. A tunnel rule simply cannot apply — the traffic never reaches mihomo",
+    dcAdvZ2Move: "Take it from zapret2 into the tunnel",
     dcFixedRerun: "Applied. Check again to see the result.",
     dcAdvGroupDead: "The rule points into the tunnel, but the exit group was never built — there is nowhere to go",
     dcAdvBehindTunnel: "The domain already goes through the tunnel and still doesn't open — so it breaks BEHIND it: the node, or the network past it",
@@ -1548,6 +1556,15 @@ function dcAdvise(d, p, render){
     return;
   }
   if (d.z2 && !d.z2_running){ fix(t("dcAdvZ2Down"), t("dcAdvZ2Start"), "z2svc", { op: "restart" }, "bad"); return; }
+  // zapret2 OWNS a connection it has claimed: it marks the packets (bypass_dscp) precisely so nikki
+  // keeps its hands off them. So for a domain on zapret2's list a tunnel rule is a no-op — the traffic
+  // never reaches mihomo to be routed. Measured on the router: the rule said UNBLOCK, the live config
+  // agreed, and the SYN still went straight out to the internet carrying zapret2's ct mark. Offering
+  // "send it to the tunnel" here is a button that cannot work, and it comes back every re-check.
+  if (d.z2 && d.z2_running){
+    fix(t("dcAdvZ2Owns")(d.z2_list), t("dcAdvZ2Move"), "z2move", { domain: d.domain }, "bad");
+    return;
+  }
   // Direct, and broken. Which engine is the right answer depends on the layer it died at.
   const desyncable = (v === "tls" || v === "cutoff");   // the name is what's cut → desync's home ground
   if (desyncable && CAPS.zapret2 && !d.z2)
@@ -1626,15 +1643,22 @@ function sdRender(d){
               : t("sdVdChallenge")(h.host);
     const el = row(h.verdict === "challenge" ? "info" : "bad", msg);
     if (!routable(h)) return;
-    const sfx = sdSuffix(h.host);
-    const b = document.createElement("button"); b.className = "ghost"; b.textContent = t("sdAdd")(sfx);
+    // A host zapret2 has claimed cannot be fixed with a nikki rule — it marks the packets so nikki
+    // leaves them alone, so the traffic never reaches mihomo. Hand it over instead of adding a rule
+    // that does nothing and comes back on the next check.
+    const owned = h.z2 === 1;
+    const sfx = owned ? h.host : sdSuffix(h.host);
+    const b = document.createElement("button"); b.className = "ghost";
+    b.textContent = owned ? t("sdMoveZ2") : t("sdAdd")(sfx);
     b.addEventListener("click", async () => {
       b.disabled = true; showOverlay(t("applying"));
-      const res = await api("addmany", { domains: sfx });
-      hideOverlay(); loadDomains(); loadUndo();
-      setMsg($("#dcMsg"), (res && res.ok) ? t("sdAdded")(res.added, res.skipped) : t("errP"), !!(res && res.ok));
+      const res = owned ? await api("z2move", { domain: h.host }) : await api("addmany", { domains: sfx });
+      hideOverlay(); loadDomains(); loadUndo(); loadZapret2();
+      const bad2 = !res || res.ok === false;
+      setMsg($("#dcMsg"), bad2 ? t("errP") : (owned ? t("dcFixedRerun") : t("sdAdded")(res.added, res.skipped)), !bad2);
     });
     el.appendChild(b);
+    if (owned) el.querySelector(".ytmsg").textContent += " · " + t("sdZ2Owns")(h.z2_list);
   });
   if (!bad.length) row("info", t("sdNone"));
   if (okN > 0) row("info", t("sdOkCount")(okN));
@@ -2610,7 +2634,10 @@ async function svcDo(op, el){
   el.disabled = true; setMsg($("#svcMsg"), t("applying"));
   let s; try { s = await api("svc", { op }); } catch(e){ s = {}; }
   el.disabled = false;
-  if (s && s.ok){ setMsg($("#svcMsg"), t("done")); renderSvc(s); }
+  // loadSvc, not renderSvc(s): the svc action answers with {ok, running, boot} and nothing else, so
+  // rendering the block from it read s.mss and s.allports as undefined and switched both toggles off
+  // on screen while the config was untouched — which is why a page refresh "fixed" them.
+  if (s && s.ok){ setMsg($("#svcMsg"), t("done")); loadSvc(); }
   else { setMsg($("#svcMsg"), t("errP") + ((s && s.error) || "?"), false); loadSvc(); }
 }
 $("#svcRun").addEventListener("change", e => svcDo(e.currentTarget.checked ? "start" : "stop", e.currentTarget));
