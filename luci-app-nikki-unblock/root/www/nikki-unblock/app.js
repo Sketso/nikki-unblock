@@ -163,6 +163,7 @@ const I18N = {
     sdZ2Owns: l => "ведёт zapret2 (" + l + "), правило в туннель на него не подействует",
     dcAdvZ2Owns: l => "Домен ведёт zapret2 (" + l + "), и он помечает эти пакеты так, чтобы nikki их не трогала. Значит правило в туннель на него просто не подействует — трафик до mihomo не доходит",
     dcAdvZ2Move: "Забрать у zapret2 в туннель",
+    dcAdvNoNikki: "Помог бы туннель, но nikki не установлена — поставить её можно в разделе Общее",
     dcAdvZ2MoveNote: "Домен уйдёт в туннель и будет внесён в исключения zapret2 — иначе он продолжит забирать соединение и правило снова окажется впустую.",
     dcFixedRerun: "Применено. Проверьте ещё раз, чтобы увидеть результат.",
     dcAdvGroupDead: "Правило ведёт в туннель, но группа выходов не собрана — идти некуда",
@@ -475,6 +476,7 @@ const I18N = {
     sdZ2Owns: l => "handled by zapret2 (" + l + "), a tunnel rule will not touch it",
     dcAdvZ2Owns: l => "zapret2 handles this domain (" + l + ") and marks those packets so nikki leaves them alone. A tunnel rule simply cannot apply — the traffic never reaches mihomo",
     dcAdvZ2Move: "Take it from zapret2 into the tunnel",
+    dcAdvNoNikki: "A tunnel would help, but nikki is not installed — you can install it under General",
     dcAdvZ2MoveNote: "The domain goes into the tunnel and is added to zapret2's exclusions — otherwise it keeps claiming the connection and the rule stays idle again.",
     dcFixedRerun: "Applied. Check again to see the result.",
     dcAdvGroupDead: "The rule points into the tunnel, but the exit group was never built — there is nowhere to go",
@@ -1587,7 +1589,13 @@ function dcAdvise(d, p, render){
   const desyncable = (v === "tls" || v === "cutoff");   // the name is what's cut → desync's home ground
   if (desyncable && CAPS.zapret2 && !d.z2)
     fix(t("dcAdvSni"), t("dcAdvToZ2"), "z2hostadd", { domain: d.domain }, "bad");
-  // Address-level faults are beyond any desync, and so is a domain zapret2 already covers and still fails.
+  // Address-level faults are beyond any desync, and so is a domain zapret2 already covers and still
+  // fails. Only offered when nikki is actually installed: without it a tunnel rule is a uci entry
+  // nothing reads, and the panel would be pointing at an engine this router does not have.
+  if (!CAPS.nikki){
+    if (!desyncable) render({ state: "info", msg: t("dcAdvNoNikki") });
+    return;
+  }
   fix(desyncable ? t("dcAdvSniAlso") : t("dcAdvAddress"), t("dcAdvToTunnel"), "add",
       { type: "DOMAIN-SUFFIX", domain: d.domain, node: EXITG }, "bad");
 }
@@ -1690,6 +1698,7 @@ function sdRender(d){
     // leaves them alone, so the traffic never reaches mihomo. Hand it over instead of adding a rule
     // that does nothing and comes back on the next check.
     const owned = h.z2 === 1;
+    if (!CAPS.nikki) return;   // every button below writes a nikki rule
     const sfx = owned ? h.host : sdSuffix(h.host);
     const b = document.createElement("button"); b.className = "ghost";
     b.textContent = owned ? t("sdMoveZ2") : t("sdAdd")(sfx);
@@ -1715,7 +1724,7 @@ function sdRender(d){
   if (okN > 0) row("info", t("sdOkCount")(okN));
   // Bulk add: distinct suffixes only, and the confirm shows exactly what is about to be routed —
   // a CDN suffix can move a lot of traffic through the VPN, so it must never be a blind click.
-  const sfxs = [...new Set(bad.filter(routable).map(h => sdSuffix(h.host)))];
+  const sfxs = CAPS.nikki ? [...new Set(bad.filter(routable).map(h => sdSuffix(h.host)))] : [];
   if (sfxs.length > 1){
     const wrap = row("info", "");
     wrap.querySelector(".ytmsg").remove();

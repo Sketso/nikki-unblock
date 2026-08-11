@@ -36,6 +36,7 @@
   },
   {
     "id": "youtube-app",
+    "z2_exclude": true,
     "name": "YouTube: приложение через VPN, видео напрямую",
     "list": true,
     "note": {

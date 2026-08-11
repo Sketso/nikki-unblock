@@ -448,6 +448,12 @@ preset_raw_at() {   # $1=array index $2=index.json body
 	_ga=$(printf '%s' "$2" | jsonfilter -e "@[$1].geoips[*]" 2>/dev/null | tr '\n' ',')
 	PR_GEOIP=$(printf '%s,%s' "$_g" "$_ga" | sed 's/,,*/,/g; s/^,//; s/,$//')
 	PR_NODE=$(printf '%s' "$2" | jsonfilter -e "@[$1].node" 2>/dev/null)
+	# "z2_exclude": this preset's domains must ALSO be banned from the zapret2 bypass while it is on.
+	# Opt-in per preset, never a default: a domain that works through zapret2 today would otherwise be
+	# silently pushed into the VPN by enabling an unrelated preset that happens to mention it. It is
+	# set where the knowledge lives — youtube-app says in its own list that desync does not help these
+	# hosts, so leaving them to zapret2 makes the preset silently useless.
+	PR_Z2X=$(printf '%s' "$2" | jsonfilter -e "@[$1].z2_exclude" 2>/dev/null)
 	# "ipcidr" is rewritten wholesale by the telegram-cidr workflow from Telegram's published list;
 	# "ipcidr_extra" is the hand-kept half it must never touch. Ranges Telegram announces but does NOT
 	# publish live there — 95.161.64.0/20 (AS62041, Amsterdam) serves media and was silently missing.
@@ -499,6 +505,7 @@ preset_fields_at() {   # $1=array index $2=index.json body
 	# the note describes THIS preset, so an included preset's note is deliberately not merged in
 	PF_NOTE_RU="$PR_NOTE_RU"; PF_NOTE_EN="$PR_NOTE_EN"
 	PF_NODE="$PR_NODE"; [ -z "$PF_NODE" ] && PF_NODE=$(default_rule_node)
+	PF_Z2X="$PR_Z2X"
 	# ids whose .lst must be synced: our own (when we have a list) plus every included one that has one
 	PF_LISTS=""
 	[ "$PR_HASLIST" = 1 ] && PF_LISTS=$(printf '%s' "$2" | jsonfilter -e "@[$1].id" 2>/dev/null)
@@ -621,6 +628,19 @@ do_preset_sync() {
 			case " $cur " in *" $_id "*) : ;; *) uci set "nikki.@rule[$idx].src=$(echo "$cur $_id" | sed 's/^ *//; s/  */ /g')" ;; esac
 		fi
 	done < "$_L"
+	# A preset that declares z2_exclude also bans its domains from the zapret2 bypass: otherwise
+	# zapret2 claims those connections and marks them so nikki never sees them, leaving the preset's
+	# rules with no traffic to route. Measured on a live router — youtube-app had been quietly doing
+	# nothing there for exactly this reason. One call for the whole list means one reload.
+	if [ "$SYNC_Z2X" = 1 ] && zapret2_present; then
+		_zx=""
+		while IFS= read -r d; do
+			[ -z "$d" ] && continue
+			case "$d" in \#*) continue ;; esac
+			_zx="$_zx $d"; z2_origin_set "$d" preset
+		done < "$_L"
+		[ -n "$_zx" ] && z2_exclude_domains "$_zx"
+	fi
 	# ONLY domain rules. Since facet rules carry a src tag too, an unscoped scan here would treat
 	# GEOSITE,telegram as "a domain that left messengers.lst" and strip the tag it was just given —
 	# which is exactly what happened: the claim was written and then quietly undone in the same run.
@@ -652,6 +672,13 @@ do_preset_off() {
 		esac
 		i=$((i + 1))
 	done
+	# Give the domains back to zapret2 — but only the ones WE banned on this preset's behalf. The
+	# origin note is what tells them apart from a ban the user set by hand, which must survive.
+	_zu=""
+	for m in $_todel; do
+		[ "$(z2_origin_get "$m")" = preset ] && { _zu="$_zu $m"; z2_origin_del "$m"; }
+	done
+	[ -n "$_zu" ] && zapret2_present && z2_unexclude_domains "$_zu"
 	for m in $_todel; do delete_domain "$m"; OFF_REMOVED=$((OFF_REMOVED + 1)); done
 }
 
@@ -793,6 +820,7 @@ sync_all() {
 				snap_has AND "((NETWORK,udp),(DST-PORT,$pr))" \
 					|| { add_rule AND "((NETWORK,udp),(DST-PORT,$pr))" "$_snode" "$id"; SYNC_FACETS=$((SYNC_FACETS + 1)); }
 			done
+			SYNC_Z2X=0; case "$PF_Z2X" in 1|true) zapret2_present && SYNC_Z2X=1 ;; esac
 			for _l in $PF_LISTS; do do_preset_sync "$_l"; done
 			snap_refresh   # this preset may have added or released rules; later ones must see that
 		fi
@@ -851,6 +879,16 @@ _pop_write() {   # $1=phase $2=done $3=ok   (PA_* set by preset_apply_run)
 preset_apply_run() {   # $1=id $2=on $3=cat $4=geoip $5=ips $6=node $7=lists $8=name $9=udpports
 	PA_ID="$1"; PA_ON="$2"; _cat="$3"; _geoip="$4"; _ips="$5"; _node="$6"; _lists="$7"; PA_NAME="$8"
 	_ports="$9"
+	# The z2_exclude flag is re-read from the manifest by id rather than passed in: the detached hook
+	# takes its arguments positionally and $9 is already the last one POSIX sh can name.
+	SYNC_Z2X=0
+	if zapret2_present; then
+		_zidx=$(applist_index)
+		_zpos=$(preset_index_of "$PA_ID" "$_zidx") && {
+			preset_raw_at "$_zpos" "$_zidx"
+			case "$PR_Z2X" in 1|true) SYNC_Z2X=1 ;; esac
+		}
+	fi
 	case "$_node" in PROXY|DIRECT|REJECT|"$EXIT_GROUP") ;; *) _node="$EXIT_GROUP" ;; esac
 	_pop_write geo 0 0
 	_ch=0
@@ -2017,6 +2055,10 @@ z2_origin_set() {   # $1=domain $2=code
 	printf '%s	%s
 ' "$1" "$2" >> "$Z2_ORIGIN.tmp"
 	mv "$Z2_ORIGIN.tmp" "$Z2_ORIGIN"
+}
+z2_origin_get() {   # $1=domain -> code, or empty
+	[ -f "$Z2_ORIGIN" ] || return 0
+	awk -F'	' -v d="$1" '$1 == d {print $2; exit}' "$Z2_ORIGIN" 2>/dev/null
 }
 z2_origin_del() {   # $1=domain
 	[ -f "$Z2_ORIGIN" ] || return 0
