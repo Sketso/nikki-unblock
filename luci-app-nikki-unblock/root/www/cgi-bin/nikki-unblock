@@ -223,6 +223,9 @@ add_rule() {   # $1=type $2=matcher $3=node  ($4=src, optional)
 	uci set "nikki.@rule[-1].matcher=$2"
 	uci set "nikki.@rule[-1].node=$3"
 	[ -n "$4" ] && uci set "nikki.@rule[-1].src=$4"
+	# $5 = why it appeared, for the list to explain itself. Deliberately NOT src: that one means
+	# "a preset owns this", and the rule list HIDES those — reusing it would make the rule vanish.
+	[ -n "$5" ] && uci set "nikki.@rule[-1].why=$5"
 	return 0
 }
 add_domain() { add_rule "$TYPE_DEFAULT" "$1" "$NODE_DEFAULT"; }
@@ -371,7 +374,8 @@ list_json() {
 		s=$(uci -q get "nikki.@rule[$i].src")
 		[ "$first" = 1 ] || printf ','
 		first=0
-		printf '{"idx":%d,"type":"%s","matcher":"%s","node":"%s","enabled":"%s","src":"%s"}' "$i" "$(json_esc "$t")" "$(json_esc "$m")" "$(json_esc "$n")" "$e" "$(json_esc "$s")"
+		w=$(uci -q get "nikki.@rule[$i].why" 2>/dev/null)
+		printf '{"idx":%d,"type":"%s","matcher":"%s","node":"%s","enabled":"%s","src":"%s","why":"%s"}' "$i" "$(json_esc "$t")" "$(json_esc "$m")" "$(json_esc "$n")" "$e" "$(json_esc "$s")" "$(json_esc "$w")"
 		i=$((i + 1))
 	done
 	printf ']'
@@ -1604,6 +1608,10 @@ subauto_json() {
 # (so mihomo never routes a node's IP back through the VPN — a loop). No-op if zapret2 isn't present.
 Z2_IPX="/opt/zapret2/ipset/zapret-ip-exclude.txt"
 Z2_HOSTX="/opt/zapret2/ipset/zapret-hosts-user-exclude.txt"
+# Why a domain is in a list, kept BESIDE the lists rather than in them: zapret2 parses those files
+# itself and reads a whole line as a host, so an inline note would corrupt matching. One line per
+# domain, "domain<TAB>code" — the panel joins it in when rendering.
+Z2_ORIGIN="/etc/nikki-unblock/z2origin"
 Z2_USER="/opt/zapret2/ipset/zapret-hosts-user.txt"     # manual DPI-bypass domains (the "add a domain" file)
 Z2_AUTO="/opt/zapret2/ipset/zapret-hosts-auto.txt"     # auto-learned (autohostlist)
 Z2_CONFIG="/opt/zapret2/config"                        # shell-var config (MODE_FILTER, NFQWS2_OPT, …)
@@ -2002,6 +2010,19 @@ z2_exclude_domains() {   # $1 = whitespace-separated domains
 	done
 	/etc/init.d/zapret2 reload >/dev/null 2>&1
 }
+z2_origin_set() {   # $1=domain $2=code
+	mkdir -p "$(dirname "$Z2_ORIGIN")" 2>/dev/null
+	touch "$Z2_ORIGIN"
+	grep -vE "^$(printf '%s' "$1" | sed 's/[.]/\./g')	" "$Z2_ORIGIN" > "$Z2_ORIGIN.tmp" 2>/dev/null
+	printf '%s	%s
+' "$1" "$2" >> "$Z2_ORIGIN.tmp"
+	mv "$Z2_ORIGIN.tmp" "$Z2_ORIGIN"
+}
+z2_origin_del() {   # $1=domain
+	[ -f "$Z2_ORIGIN" ] || return 0
+	grep -vE "^$(printf '%s' "$1" | sed 's/[.]/\./g')	" "$Z2_ORIGIN" > "$Z2_ORIGIN.tmp" 2>/dev/null
+	mv "$Z2_ORIGIN.tmp" "$Z2_ORIGIN"
+}
 z2_unexclude_domains() {   # $1 = domains — drop from the exclude banlist; VPN-node protections are kept
 	[ -f "$Z2_HOSTX" ] || return 0
 	prot=$(z2_node_hosts)
@@ -2284,7 +2305,8 @@ z2hosts_json() {
 			d=$(printf '%s' "$line" | sed 's/\r$//; s/[ \t]//g'); [ -z "$d" ] && continue
 			case "$d" in \#*) continue ;; esac
 			sys=0; case "$_nh" in *" $d "*) sys=1 ;; esac   # VPN-node protection = don't let the user delete it
-			exc="$exc${exc:+,}{\"d\":\"$(json_esc "$d")\",\"sys\":$sys}"
+			_wy=$(awk -F'	' -v d="$d" '$1 == d {print $2; exit}' "$Z2_ORIGIN" 2>/dev/null)
+			exc="$exc${exc:+,}{\"d\":\"$(json_esc "$d")\",\"sys\":$sys,\"why\":\"$(json_esc "$_wy")\"}"
 		done < "$Z2_HOSTX"
 	fi
 	printf '{"user":[%s],"auto":[%s],"exclude":[%s]}' "$(z2_list_json "$Z2_USER")" "$(z2_list_json "$Z2_AUTO")" "$exc"
@@ -3904,7 +3926,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		if [ -n "$d" ] && z2_node_hosts | grep -qxF "$d"; then
 			json_header; printf '{"ok":false,"error":"protected"}'; exit 0
 		fi
-		[ -n "$d" ] && z2_unexclude_domains "$d"
+		[ -n "$d" ] && { z2_unexclude_domains "$d"; z2_origin_del "$d"; }
 		json_header; printf '{"ok":true}'; exit 0
 
 		;;
@@ -4178,7 +4200,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		d=$(printf '%s' "$(get_param domain)" | parse_domains | head -1)
 		[ -z "$d" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
 		undo_push z2move
-		[ "$(rule_exists DOMAIN-SUFFIX "$d")" = 1 ] || add_rule DOMAIN-SUFFIX "$d" "$(default_rule_node)"
+		[ "$(rule_exists DOMAIN-SUFFIX "$d")" = 1 ] || add_rule DOMAIN-SUFFIX "$d" "$(default_rule_node)" "" moved
 		uci commit nikki
 		if [ -f "$Z2_USER" ]; then
 			grep -vxF "$d" "$Z2_USER" > "$Z2_USER.tmp" 2>/dev/null; mv "$Z2_USER.tmp" "$Z2_USER"; z2_apply_hosts
@@ -4189,6 +4211,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		# freshly added tunnel rule with no traffic to route. So the domain is BANNED from the bypass,
 		# which is checked first, applies to subdomains, and takes the auto-list entry out with it.
 		z2_exclude_domains "$d"
+		z2_origin_set "$d" moved
 		apply_nikki
 		json_header; printf '{"ok":true,"domain":"%s","node":"%s"}' "$(json_esc "$d")" "$(default_rule_node)"; exit 0
 
@@ -4406,7 +4429,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			_dm=$(printf '%s' "$_dm" | parse_domains | head -1)
 			[ -z "$_dm" ] && continue
 			if [ "$(rule_exists DOMAIN-SUFFIX "$_dm")" = 1 ]; then skipped=$((skipped + 1)); continue; fi
-			add_rule DOMAIN-SUFFIX "$_dm" "$(default_rule_node)"
+			add_rule DOMAIN-SUFFIX "$_dm" "$(default_rule_node)" "" check
 			added=$((added + 1))
 		done
 		[ "$added" -gt 0 ] && { uci commit nikki; apply_nikki; }

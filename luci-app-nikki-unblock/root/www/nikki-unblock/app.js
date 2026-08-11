@@ -1,4 +1,11 @@
 const $ = s => document.querySelector(s);
+/* Where a row came from, when it wasn't typed in by hand. Short and quiet on purpose: it sits between
+   the name and the delete button, so anything longer pushes the button off a phone screen. */
+function whyTag(w){
+  if (!w) return "";
+  const k = "why_" + w, txt = t(k);
+  return txt === k ? "" : '<span class="why">' + escH(txt) + '</span>';
+}
 const escH = s => (s + "").replace(/[<>&"]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
 let RULES = [], PRESETS = [], LANG = "ru", MODE = "simple";
 
@@ -148,6 +155,8 @@ const I18N = {
     dcOpenRedir: c => "Открывается: переадресация " + c + " (тела нет, это нормально)",
     dcOpenThrottled: (sz, s) => "Ответ начался и завис на " + sz + " (" + s + " с до таймаута) — это удушение по IP, десинк тут не поможет, нужен туннель",
     sdSection: "Что тянет страница",
+    why_moved: "перенесён в nikki проверкой",
+    why_check: "добавлен проверкой",
     sdMoveZ2: "Забрать у zapret2 в туннель",
     sdZ2Owns: l => "ведёт zapret2 (" + l + "), правило в туннель на него не подействует",
     dcAdvZ2Owns: l => "Домен ведёт zapret2 (" + l + "), и он помечает эти пакеты так, чтобы nikki их не трогала. Значит правило в туннель на него просто не подействует — трафик до mihomo не доходит",
@@ -456,6 +465,8 @@ const I18N = {
     dcOpenRedir: c => "Opens: redirect " + c + " (no body, which is normal)",
     dcOpenThrottled: (sz, s) => "Response started then stalled at " + sz + " (" + s + " s to timeout) — IP-level throttling; no desync fixes this, it needs a tunnel",
     sdSection: "What the page pulls in",
+    why_moved: "moved to nikki by the check",
+    why_check: "added by the check",
     sdMoveZ2: "Take it from zapret2 into the tunnel",
     sdZ2Owns: l => "handled by zapret2 (" + l + "), a tunnel rule will not touch it",
     dcAdvZ2Owns: l => "zapret2 handles this domain (" + l + ") and marks those packets so nikki leaves them alone. A tunnel rule simply cannot apply — the traffic never reaches mihomo",
@@ -828,7 +839,7 @@ function renderList(){
     if (x.enabled === "0") li.className = "off";
     li.innerHTML =
       '<input type="checkbox" class="pick" data-key="' + x.idx + '">' +
-      '<span class="dom">' + escH(x.matcher) + '</span>' +
+      '<span class="dom">' + escH(x.matcher) + '</span>' + whyTag(x.why) +
       '<select class="edit" data-field="type">' + typeOpts() + '</select>' +
       '<select class="edit" data-field="node">' + nodeOpts(x.node) + '</select>' +
       '<label class="sw"><input type="checkbox" data-act="toggle" data-idx="' + x.idx + '"' + (x.enabled === "0" ? "" : " checked") + '><span class="sl"></span></label>' +
@@ -1298,7 +1309,7 @@ function renderZ2(){
   const el = $("#z2ExList"); el.innerHTML = "";
   ex.forEach(x => { const li = document.createElement("li");
     li.innerHTML = (x.sys ? "" : '<input type="checkbox" class="pick" data-key="' + escH(x.d) + '">') +
-      '<span class="dom">' + escH(x.d) + '</span>' +
+      '<span class="dom">' + escH(x.d) + '</span>' + whyTag(x.why) +
       (x.sys ? '<span class="badge">' + t("system") + '</span>' : '<button class="ghost" data-z2unex="' + escH(x.d) + '">✕</button>');
     el.appendChild(li); });
   fltRerender(BAR_Z2X);

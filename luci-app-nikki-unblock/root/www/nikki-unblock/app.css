@@ -256,3 +256,6 @@
   .ythint { font-size: .82rem; opacity: .6; padding: .3rem .45rem; line-height: 1.5; }
   .pmlist { list-style: none; margin: 0; padding: 0; font-family: ui-monospace, monospace; font-size: .82rem; columns: 2; column-gap: 1.2rem; }
   .pmlist li { padding: .05rem 0; border: 0; display: list-item; break-inside: avoid; }
+  /* provenance note in a list row: quiet, and it must yield space before the delete button does */
+  .why { font-size: .68rem; opacity: .55; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+         max-width: 11rem; flex: 0 1 auto; }
