@@ -4183,6 +4183,12 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		if [ -f "$Z2_USER" ]; then
 			grep -vxF "$d" "$Z2_USER" > "$Z2_USER.tmp" 2>/dev/null; mv "$Z2_USER.tmp" "$Z2_USER"; z2_apply_hosts
 		fi
+		# Deleting the line is not enough, and on a live router it wasn't: the same name can also arrive
+		# from the auto list or be covered by a parent suffix, and while ANY of those still match,
+		# zapret2 keeps claiming the connection and marking it so nikki won't touch it — leaving the
+		# freshly added tunnel rule with no traffic to route. So the domain is BANNED from the bypass,
+		# which is checked first, applies to subdomains, and takes the auto-list entry out with it.
+		z2_exclude_domains "$d"
 		apply_nikki
 		json_header; printf '{"ok":true,"domain":"%s","node":"%s"}' "$(json_esc "$d")" "$(default_rule_node)"; exit 0
 

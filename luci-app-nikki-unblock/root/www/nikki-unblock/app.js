@@ -152,6 +152,7 @@ const I18N = {
     sdZ2Owns: l => "ведёт zapret2 (" + l + "), правило в туннель на него не подействует",
     dcAdvZ2Owns: l => "Домен ведёт zapret2 (" + l + "), и он помечает эти пакеты так, чтобы nikki их не трогала. Значит правило в туннель на него просто не подействует — трафик до mihomo не доходит",
     dcAdvZ2Move: "Забрать у zapret2 в туннель",
+    dcAdvZ2MoveNote: "Домен уйдёт в туннель и будет внесён в исключения zapret2 — иначе он продолжит забирать соединение и правило снова окажется впустую.",
     dcFixedRerun: "Применено. Проверьте ещё раз, чтобы увидеть результат.",
     dcAdvGroupDead: "Правило ведёт в туннель, но группа выходов не собрана — идти некуда",
     dcAdvBehindTunnel: "Домен уже идёт через туннель и всё равно не открывается — значит, ломается ЗА туннелем: узел или сеть за ним",
@@ -459,6 +460,7 @@ const I18N = {
     sdZ2Owns: l => "handled by zapret2 (" + l + "), a tunnel rule will not touch it",
     dcAdvZ2Owns: l => "zapret2 handles this domain (" + l + ") and marks those packets so nikki leaves them alone. A tunnel rule simply cannot apply — the traffic never reaches mihomo",
     dcAdvZ2Move: "Take it from zapret2 into the tunnel",
+    dcAdvZ2MoveNote: "The domain goes into the tunnel and is added to zapret2's exclusions — otherwise it keeps claiming the connection and the rule stays idle again.",
     dcFixedRerun: "Applied. Check again to see the result.",
     dcAdvGroupDead: "The rule points into the tunnel, but the exit group was never built — there is nowhere to go",
     dcAdvBehindTunnel: "The domain already goes through the tunnel and still doesn't open — so it breaks BEHIND it: the node, or the network past it",
@@ -1562,7 +1564,8 @@ function dcAdvise(d, p, render){
   // agreed, and the SYN still went straight out to the internet carrying zapret2's ct mark. Offering
   // "send it to the tunnel" here is a button that cannot work, and it comes back every re-check.
   if (d.z2 && d.z2_running){
-    fix(t("dcAdvZ2Owns")(d.z2_list), t("dcAdvZ2Move"), "z2move", { domain: d.domain }, "bad");
+    const el = fix(t("dcAdvZ2Owns")(d.z2_list), t("dcAdvZ2Move"), "z2move", { domain: d.domain }, "bad");
+    el.insertAdjacentElement("afterend", taHint(t("dcAdvZ2MoveNote")));
     return;
   }
   // Direct, and broken. Which engine is the right answer depends on the layer it died at.
