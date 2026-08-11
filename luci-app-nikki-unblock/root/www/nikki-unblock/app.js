@@ -155,6 +155,8 @@ const I18N = {
     dcOpenRedir: c => "Открывается: переадресация " + c + " (тела нет, это нормально)",
     dcOpenThrottled: (sz, s) => "Ответ начался и завис на " + sz + " (" + s + " с до таймаута) — это удушение по IP, десинк тут не поможет, нужен туннель",
     sdSection: "Что тянет страница",
+    sdPickTitle: "Насколько широкое правило",
+    sdAlreadyTun: tg => "уже идёт в туннель (" + tg + ") и всё равно не открывается — ломается за туннелем, смотрите ноду",
     why_moved: "перенесён в nikki проверкой",
     why_check: "добавлен проверкой",
     sdMoveZ2: "Забрать у zapret2 в туннель",
@@ -465,6 +467,8 @@ const I18N = {
     dcOpenRedir: c => "Opens: redirect " + c + " (no body, which is normal)",
     dcOpenThrottled: (sz, s) => "Response started then stalled at " + sz + " (" + s + " s to timeout) — IP-level throttling; no desync fixes this, it needs a tunnel",
     sdSection: "What the page pulls in",
+    sdPickTitle: "How wide should the rule be",
+    sdAlreadyTun: tg => "already goes through the tunnel (" + tg + ") and still doesn't open — it breaks behind the tunnel, check the node",
     why_moved: "moved to nikki by the check",
     why_check: "added by the check",
     sdMoveZ2: "Take it from zapret2 into the tunnel",
@@ -1593,10 +1597,11 @@ function dcAdvise(d, p, render){
    runs detached (same op machinery as the capture) because a page with a throttled host takes the
    full probe timeout, and a synchronous request would outlive uhttpd. */
 const SD = { polling: false, domain: null, box: null };
-/* A rule wants the registrable domain, not the hostname that happened to appear in this page. CDN
-   hostnames are generated per session — oca-lax1-c001.1.oca.nflxvideo.net is gone tomorrow — so
-   adding it verbatim buys one working request and no more. Two labels, plus the short list of
-   two-part public suffixes where two labels would be a whole country's registry. */
+/* The default rule is the registrable domain: ksjafljfs.dasjda.youtube.googleapis.com is offered as
+   googleapis.com. CDN and API hostnames are generated per session, so a rule on the exact name buys
+   one working request and nothing after it. The narrower forms are one click away through the same
+   suffix picker the exclusions list already uses — but they are a deliberate choice, not the default,
+   because almost nobody opens a picker. */
 const SD_MULTI = /\.(co|com|net|org|gov|edu|ac|or|ne)\.[a-z]{2}$/;
 function sdSuffix(host){
   const p = (host || "").split(".");
@@ -1630,6 +1635,23 @@ async function sdPoll(){
   setMsg($("#dcMsg"), "");
   sdRender(d);
 }
+/* Pick how wide the rule should be — the same chain the exclusions list offers, reused so the choice
+   looks the same wherever it appears: the exact host, each intermediate suffix, then the registrable
+   domain. */
+function sdPick(host){
+  $("#pmTitle").textContent = t("sdPickTitle");
+  $("#pmBody").innerHTML = z2suffixChain(host)
+    .map(o => '<button class="exopt ghost" data-sdadd="' + escH(o) + '">' + escH(o) + '</button>').join("");
+  $("#pmBody").querySelectorAll("button[data-sdadd]").forEach(btn =>
+    btn.addEventListener("click", async () => {
+      $("#pmodal").hidden = true;
+      showOverlay(t("applying"));
+      const res = await api("addmany", { domains: btn.dataset.sdadd });
+      hideOverlay(); loadDomains(); loadUndo();
+      setMsg($("#dcMsg"), (res && res.ok) ? t("sdAdded")(res.added, res.skipped) : t("errP"), !!(res && res.ok));
+    }));
+  $("#pmodal").hidden = false;
+}
 function sdRender(d){
   const box = SD.box || $("#dcResult"); box.hidden = false;
   // The typed domain already has its own verdict above, from a probe that ran first — repeating it
@@ -1657,6 +1679,13 @@ function sdRender(d){
               : t("sdVdChallenge")(h.host);
     const el = row(h.verdict === "challenge" ? "info" : "bad", msg);
     if (!routable(h)) return;
+    // Already in the tunnel and still failing: the rule exists, so adding it again fixes nothing and
+    // hides the actual conclusion — the break is BEHIND the tunnel, at the exit node.
+    const tunneled = h.target && !["DIRECT", "REJECT", "REJECT-DROP", "PASS", ""].includes(h.target);
+    if (tunneled && h.z2 !== 1){
+      el.querySelector(".ytmsg").textContent += " · " + t("sdAlreadyTun")(h.target);
+      return;
+    }
     // A host zapret2 has claimed cannot be fixed with a nikki rule — it marks the packets so nikki
     // leaves them alone, so the traffic never reaches mihomo. Hand it over instead of adding a rule
     // that does nothing and comes back on the next check.
@@ -1672,6 +1701,14 @@ function sdRender(d){
       setMsg($("#dcMsg"), bad2 ? t("errP") : (owned ? t("dcFixedRerun") : t("sdAdded")(res.added, res.skipped)), !bad2);
     });
     el.appendChild(b);
+    // The narrower forms live behind the same picker the exclusions list uses. Secondary on purpose:
+    // the default stays the broad suffix, this is for the person who wants to aim.
+    if (!owned && sdSuffix(h.host) !== h.host){
+      const pick = document.createElement("button");
+      pick.className = "ghost"; pick.textContent = "▾"; pick.title = t("sdPickTitle");
+      pick.addEventListener("click", () => sdPick(h.host));
+      el.appendChild(pick);
+    }
     if (owned) el.querySelector(".ytmsg").textContent += " · " + t("sdZ2Owns")(h.z2_list);
   });
   if (!bad.length) row("info", t("sdNone"));
