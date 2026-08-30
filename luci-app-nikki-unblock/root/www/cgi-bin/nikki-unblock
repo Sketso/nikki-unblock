@@ -4211,13 +4211,23 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		# fine. Same guard the zapret2 path already uses (z2strat's `was`).
 		nwas=0; pgrep -f /usr/bin/mihomo >/dev/null && nwas=1
 		regen_mixin; apply_nikki; sleep 6
+		oom=false
 		if ! pgrep -f /usr/bin/mihomo >/dev/null && [ "$nwas" = 1 ]; then
-			# config broke a RUNNING nikki -> roll back and report
-			rm -f "$NODES_DIR/$id.yaml" "$PROV_DIR/$pid.yaml"
-			for x in $multiids; do rm -f "$NODES_DIR/$x.yaml" "$NODES_DIR/$x.src"; done
-			[ -n "$subid" ] && rm -f "$SUBS_DIR/$subid.conf"
-			regen_mixin; apply_nikki
-			json_header; printf '{"ok":false,"error":"config rejected by mihomo (reverted)"}'; exit 0
+			# A reload briefly runs two mihomo copies (README's low-RAM note) — on a tight router the kernel
+			# can OOM-kill one of them regardless of whether the new config was any good. That is NOT a
+			# verdict on the config, so check for it before blaming/reverting what the user just pasted.
+			logread 2>/dev/null | tail -60 | grep -qE 'Killed process [0-9]+ \(mihomo\)' && oom=true
+			if [ "$oom" = false ]; then
+				# config broke a RUNNING nikki -> roll back and report
+				rm -f "$NODES_DIR/$id.yaml" "$PROV_DIR/$pid.yaml"
+				for x in $multiids; do rm -f "$NODES_DIR/$x.yaml" "$NODES_DIR/$x.src"; done
+				[ -n "$subid" ] && rm -f "$SUBS_DIR/$subid.conf"
+				regen_mixin; apply_nikki
+				json_header; printf '{"ok":false,"error":"config rejected by mihomo (reverted)"}'; exit 0
+			fi
+			# OOM, not a bad config: keep what was just added and give nikki one restart to recover on its
+			# own (it usually does, once the memory spike that killed it has passed).
+			/etc/init.d/nikki restart >/dev/null 2>&1; sleep 5
 		fi
 		# nikki was down before and still is: keep the node (nothing here broke anything) and say WHY, so
 		# the fix — enable nikki / give it a profile — is obvious instead of looking like a bad config.
@@ -4235,12 +4245,12 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			# Deliberately NOT switched off when it fails to answer. The group skips an unhealthy member
 			# on its own, so disabling buys no routing benefit and only leaves a state the user has to
 			# undo by hand once the server finishes booting. Report it and leave the choice to them.
-			json_header; printf '{"ok":true,"kind":"node","id":"%s","name":"%s","delay":"%s","autodisabled":%s,"nikki_down":%s}' \
-				"$id" "$rn" "$d" "$([ "$auto" = 1 ] && echo true || echo false)" "$nikki_down"; exit 0
+			json_header; printf '{"ok":true,"kind":"node","id":"%s","name":"%s","delay":"%s","autodisabled":%s,"nikki_down":%s,"oom":%s}' \
+				"$id" "$rn" "$d" "$([ "$auto" = 1 ] && echo true || echo false)" "$nikki_down" "$oom"; exit 0
 		elif [ "$kind" = multi ]; then
-			json_header; printf '{"ok":true,"kind":"multi","added":%d,"nikki_down":%s}' "$added" "$nikki_down"; exit 0
+			json_header; printf '{"ok":true,"kind":"multi","added":%d,"nikki_down":%s,"oom":%s}' "$added" "$nikki_down" "$oom"; exit 0
 		fi
-		json_header; printf '{"ok":true,"kind":"provider","id":"%s","nikki_down":%s}' "$pid" "$nikki_down"; exit 0
+		json_header; printf '{"ok":true,"kind":"provider","id":"%s","nikki_down":%s,"oom":%s}' "$pid" "$nikki_down" "$oom"; exit 0
 
 		;;
 	geoipdrop)

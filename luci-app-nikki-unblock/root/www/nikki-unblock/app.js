@@ -273,6 +273,7 @@ const I18N = {
     nikkiUnconf: "⚠ nikki установлен, но не настроен: нет профиля или сервис выключен — mihomo не запускается, поэтому VPN-ноды и правила «→ VPN» не работают.",
     nikkiUnconfFix: "Настроить и запустить",
     nodeNikkiDown: "нода сохранена, но nikki не запущен: включи сервис и задай профиль (Services → Nikki), потом проверь ноду",
+    nodeOOM: "нода сохранена; во время перезагрузки роутеру не хватило памяти и mihomo перезапустился (это не из-за конфига) — подожди немного и проверь ноду. На стеснённом по RAM роутере поможет zram",
     nodeProfile: "из профиля", nodeOn: "вкл", nodeOff: "выкл",
     guardBad1: "⚠ Proxy-группа ", guardBad2: " не найдена в mihomo. Правила «→ VPN» указывают на несуществующую группу. Задай базовую группу равной имени proxy-группы твоего профиля: ",
     guardFix: "uci set nikki-unblock.config.base_group='ИМЯ' && uci commit",
@@ -586,6 +587,7 @@ const I18N = {
     nikkiUnconf: "⚠ nikki is installed but not configured: no profile, or the service is off — mihomo never starts, so VPN nodes and «→ VPN» rules do nothing.",
     nikkiUnconfFix: "Set up & start",
     nodeNikkiDown: "node saved, but nikki is not running: enable the service and give it a profile (Services → Nikki), then re-check the node",
+    nodeOOM: "node saved; the router ran low on memory during the reload and mihomo restarted (not your config's fault) — wait a bit and re-check the node. On a RAM-tight router, adding zram helps",
     nodeProfile: "from profile", nodeOn: "on", nodeOff: "off",
     guardBad1: "⚠ Proxy-group ", guardBad2: " was not found in mihomo. «→ VPN» rules point at a nonexistent group. Set the base group to your profile's proxy-group name: ",
     guardFix: "uci set nikki-unblock.config.base_group='NAME' && uci commit",
@@ -2310,7 +2312,10 @@ async function addNodeCfg(cfg, name){
   if (res.ok){
     let m = t("done");
     // nikki down = the node is saved but untested; that's a nikki setup problem, not a bad config
-    if (res.nikki_down){
+    if (res.oom){
+      if (res.kind === "node") m += " · " + res.name;
+      setMsg($("#nodeMsg"), m + " — " + t("nodeOOM"), false);
+    } else if (res.nikki_down){
       if (res.kind === "node") m += " · " + res.name;
       setMsg($("#nodeMsg"), m + " — " + t("nodeNikkiDown"), false);
     } else {
