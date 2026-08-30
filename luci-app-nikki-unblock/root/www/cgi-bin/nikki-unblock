@@ -1051,6 +1051,31 @@ pkg_ver() {   # installed version-release of package $1 (name may itself contain
 # nikki ships mihomo as a separate package whose name varies (mihomo-meta / mihomo-alpha / mihomo) —
 # detect the installed one so version display and `apk upgrade` target the right package.
 mihomo_pkg() { apk list -I 2>/dev/null | grep -oE '^mihomo(-[a-z]+)?' | head -1; }
+# how many times the kernel has OOM-killed mihomo, per the log we can still see. Meaningful only as a
+# before/after pair around one operation — the absolute number is whatever survives logread's ring buffer.
+nu_oom_kills() { logread 2>/dev/null | grep -cE 'Killed process [0-9]+ \(mihomo\)'; }
+# Ask mihomo whether a config directory is valid -> ok | bad | unknown.
+# "unknown" means the test produced no verdict at all — on a small router that usually means the test
+# process was itself OOM-killed partway through. That says nothing about the config, so callers must
+# never treat it as a failure: doing so deletes perfectly good nodes on exactly the routers least able
+# to spare them.
+nu_cfg_verdict() {   # $1=dir containing config.yaml
+	case "$(/usr/bin/mihomo -t -d "$1" 2>&1)" in
+		*"test is successful"*) echo ok ;;
+		*"test failed"*)        echo bad ;;
+		*)                      echo unknown ;;
+	esac
+}
+# Verdict on one proxy-yaml snippet ($1=file, "  - name: …" at 2-space list indent), tested alone in a
+# throwaway config with no rules. Deliberately not the live profile: that one pulls in geodata, and the
+# load is heavy enough to get the test itself OOM-killed on a tight router — turning "is this proxy
+# valid?" into a coin flip. A bare proxies: list answers the same question in ~100ms.
+nu_test_proxy() {   # $1=snippet file -> ok|bad|unknown
+	_d="/tmp/nu-cfgtest.$$"; rm -rf "$_d"; mkdir -p "$_d"
+	{ echo "proxies:"; cat "$1"; } > "$_d/config.yaml"
+	nu_cfg_verdict "$_d"
+	rm -rf "$_d"
+}
 versions_json() {
 	json_header
 	# GeoIP "enabled" = GeoIP.dat present AND mihomo in geodata-mode; report its file date if so.
@@ -4185,6 +4210,12 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			while [ "$k" -lt 30 ] && name_taken "$nm"; do k=$((k+1)); nm="$b-$k"; done
 			[ "$nm" = "$b" ] || yaml=$(printf '%s\n' "$yaml" | awk -v n="$nm" 'BEGIN{d=0} /name:/&&!d{sub(/name:.*/,"name: " n);d=1} {print}')
 			id=$(san_name "$nm"); [ -z "$id" ] && id="node-$(date +%s)"
+			# Have mihomo judge the pasted config BEFORE it can reach the live profile. Catching it here
+			# means a malformed key or unsupported field never disturbs a working router at all, instead
+			# of being applied and then chased with a revert whose "did it break?" signal is unreliable.
+			_pf="/tmp/nu-newnode.$$"; printf '%s\n' "$yaml" > "$_pf"
+			_pv=$(nu_test_proxy "$_pf"); rm -f "$_pf"
+			[ "$_pv" = bad ] && { json_header; printf '{"ok":false,"error":"config rejected by mihomo"}'; exit 0; }
 			printf '%s\n' "$yaml" > "$NODES_DIR/$id.yaml"
 		elif [ "$kind" = multi ]; then
 			# a tracked link-subscription: create its record + import nodes via sub_sync (refreshable later)
@@ -4210,25 +4241,35 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		# pasted config for that ("rejected by mihomo") sends people debugging a config that is perfectly
 		# fine. Same guard the zapret2 path already uses (z2strat's `was`).
 		nwas=0; pgrep -f /usr/bin/mihomo >/dev/null && nwas=1
-		regen_mixin; apply_nikki; sleep 6
-		oom=false
-		if ! pgrep -f /usr/bin/mihomo >/dev/null && [ "$nwas" = 1 ]; then
-			# A reload briefly runs two mihomo copies (README's low-RAM note) — on a tight router the kernel
-			# can OOM-kill one of them regardless of whether the new config was any good. That is NOT a
-			# verdict on the config, so check for it before blaming/reverting what the user just pasted.
-			logread 2>/dev/null | tail -60 | grep -qE 'Killed process [0-9]+ \(mihomo\)' && oom=true
-			if [ "$oom" = false ]; then
-				# config broke a RUNNING nikki -> roll back and report
-				rm -f "$NODES_DIR/$id.yaml" "$PROV_DIR/$pid.yaml"
-				for x in $multiids; do rm -f "$NODES_DIR/$x.yaml" "$NODES_DIR/$x.src"; done
-				[ -n "$subid" ] && rm -f "$SUBS_DIR/$subid.conf"
-				regen_mixin; apply_nikki
-				json_header; printf '{"ok":false,"error":"config rejected by mihomo (reverted)"}'; exit 0
-			fi
-			# OOM, not a bad config: keep what was just added and give nikki one restart to recover on its
-			# own (it usually does, once the memory spike that killed it has passed).
-			/etc/init.d/nikki restart >/dev/null 2>&1; sleep 5
+		oomb=$(nu_oom_kills)   # baseline for the "did this reload OOM?" check further down
+		regen_mixin; apply_nikki
+		# Safety net for whatever the per-node pre-check above cannot see on its own: a name collision or
+		# some other fault that only exists once everything is merged. Process liveness is NOT usable as
+		# that signal, in either direction — nikki declines a profile failing its own test and leaves the
+		# OLD mihomo running (so "still alive" would wave a broken node through, and the router loses its
+		# VPN at the next restart, long after this request said "ok"), while an OOM kill mid-reload takes
+		# down a perfectly good one. Only an explicit "bad" verdict counts; an OOM-killed test says
+		# nothing and must not delete the user's node.
+		cfgbad=0
+		[ -f /etc/nikki/run/config.yaml ] && { [ "$(nu_cfg_verdict /etc/nikki/run)" = bad ] && cfgbad=1; }
+		# Did the kernel OOM-kill mihomo during THIS reload? Counted before/after rather than by scanning a
+		# window of recent log lines: one oom dump is ~80 lines with the "Killed process" line near its end,
+		# so on a quiet router a kill from many minutes ago stays inside any useful tail.
+		oom=false; [ "$(nu_oom_kills)" -gt "$oomb" ] && oom=true
+		if [ "$cfgbad" = 1 ]; then
+			# mihomo refuses the merged config -> roll back and report
+			rm -f "$NODES_DIR/$id.yaml" "$PROV_DIR/$pid.yaml"
+			for x in $multiids; do rm -f "$NODES_DIR/$x.yaml" "$NODES_DIR/$x.src"; done
+			[ -n "$subid" ] && rm -f "$SUBS_DIR/$subid.conf"
+			regen_mixin; apply_nikki
+			json_header; printf '{"ok":false,"error":"config rejected by mihomo (reverted)"}'; exit 0
 		fi
+		# Config is good. mihomo can still be absent right this second — OOM-killed mid-reload and being
+		# respawned, or a nikki that was never set up — so give it a bounded moment to come back before
+		# the probe below decides what to report.
+		sleep 6
+		_i=0
+		while [ "$_i" -lt 10 ]; do pgrep -f /usr/bin/mihomo >/dev/null && break; _i=$((_i+1)); sleep 1; done
 		# nikki was down before and still is: keep the node (nothing here broke anything) and say WHY, so
 		# the fix — enable nikki / give it a profile — is obvious instead of looking like a bad config.
 		nikki_down=false
