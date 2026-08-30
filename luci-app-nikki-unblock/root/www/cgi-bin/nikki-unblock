@@ -1146,10 +1146,25 @@ update_start() {   # $1=op(self|nikki|geo|z2|all) ; 0=started 1=busy 2=bad op 3=
 			_mp=$(mihomo_pkg)   # mihomo-meta / mihomo-alpha / mihomo — whichever is installed
 			# snapshot config first so a broken upgrade can be rolled back (build_backup is tiny)
 			printf 'echo ">> nikki: snapshot config (rollback point)"; "%s" _nikkisnap\n' "$SELF"
+			# baseline BEFORE touching anything — same guard nodeadd/z2strat use, so a mihomo that was
+			# already down (or dies mid-update for an unrelated reason) isn't blamed on this update
+			printf 'nwas=0; pgrep -f /usr/bin/mihomo >/dev/null && nwas=1\n'
 			printf 'echo ">> apk update"; apk update\n'
-			printf 'echo ">> upgrading nikki + mihomo"; apk upgrade nikki luci-app-nikki %s || rc=$?\n' "$_mp"
-			printf 'echo ">> checking mihomo"; sleep 4\n'
-			printf 'if ! pgrep -f /usr/bin/mihomo >/dev/null; then echo "!! mihomo down after update — rolling back config"; "%s" _nikkirollback; /etc/init.d/nikki restart >/dev/null 2>&1; sleep 3; pgrep -f /usr/bin/mihomo >/dev/null || echo "!! mihomo still down after rollback — restore a backup or downgrade manually"; rc=1; else echo ">> mihomo OK"; rm -f "%s"; fi\n' "$SELF" "$NIKKI_PRESNAP" ;;
+			printf 'echo ">> upgrading nikki + mihomo"; _uo=$(apk upgrade nikki luci-app-nikki %s 2>&1); _urc=$?; echo "$_uo"\n' "$_mp"
+			# a stale/unreachable repo (e.g. a CDN hiccup on the feed) means apk refused to touch ANYTHING —
+			# skip the mihomo-down check + rollback entirely instead of reacting to a no-op upgrade. That
+			# reaction is itself what can take mihomo down on a tight-RAM router: a forced `nikki restart`
+			# briefly runs two mihomo copies (~100 MB each, see README's low-RAM note), and the kernel OOM
+			# killer picks one off — turning a harmless "feed unreachable" into a real outage.
+			printf 'if echo "$_uo" | grep -q "stale/unavailable repositories"; then echo "!! package feed stale/unavailable right now — nothing upgraded, try again later"; rc=1\n'
+			printf 'else\n'
+			printf '\t[ "$_urc" = 0 ] || rc=$_urc\n'
+			printf '\techo ">> checking mihomo"; sleep 4\n'
+			printf '\tif [ "$nwas" = 1 ] && ! pgrep -f /usr/bin/mihomo >/dev/null; then echo "!! mihomo down after update — rolling back config"; "%s" _nikkirollback; /etc/init.d/nikki restart >/dev/null 2>&1; sleep 3; pgrep -f /usr/bin/mihomo >/dev/null || echo "!! mihomo still down after rollback — restore a backup or downgrade manually"; rc=1\n' "$SELF"
+			printf '\telif [ "$nwas" = 0 ] && ! pgrep -f /usr/bin/mihomo >/dev/null; then echo ">> mihomo was already stopped before this update — leaving as-is"; rm -f "%s"\n' "$NIKKI_PRESNAP"
+			printf '\telse echo ">> mihomo OK"; rm -f "%s"\n' "$NIKKI_PRESNAP"
+			printf '\tfi\n'
+			printf 'fi\n' ;;
 		esac
 		# zapret2 update BEFORE self (self replaces the CGI). Uses the pinned Pages manifest + rollback.
 		case "$_op" in z2|all)
