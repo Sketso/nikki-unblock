@@ -1268,13 +1268,29 @@ wg_to_yaml() {   # $1=name
 	echo "    udp: true"
 	echo "    mtu: 1280"
 	echo "    remote-dns-resolve: false"
+	_hpk=$(wgv HeaderProtectionKey)
 	if [ -n "$_jc" ]; then
 		echo "    amnezia-wg-option:"
 		echo "      jc: $_jc"; echo "      jmin: $(wgv Jmin)"; echo "      jmax: $(wgv Jmax)"
 		echo "      s1: $(wgv S1)"; echo "      s2: $(wgv S2)"
 		[ -n "$(wgv S3)" ] && echo "      s3: $(wgv S3)"; [ -n "$(wgv S4)" ] && echo "      s4: $(wgv S4)"
 		echo "      h1: $(wgv H1)"; echo "      h2: $(wgv H2)"; echo "      h3: $(wgv H3)"; echo "      h4: $(wgv H4)"
-		[ -n "$(wgv I1)" ] && echo "      i1: \"$(wgv I1)\""
+		if [ -n "$_hpk" ]; then
+			# AmneziaWG 3.x: header protection means these aren't the plain v1.x/v2.x fields above anymore —
+			# mihomo only builds the v3 device (which understands header-protection-key etc.) when version: 3
+			echo "      version: 3"
+			echo "      header-protection-key: \"$_hpk\""
+			[ -n "$(wgv ContentPaddingAddition)" ] && echo "      content-padding-addition: \"$(wgv ContentPaddingAddition)\""
+			[ -n "$(wgv RekeyAfterTime)" ] && echo "      rekey-after-time: \"$(wgv RekeyAfterTime)\""
+			[ -n "$(wgv RekeyTimeout)" ] && echo "      rekey-timeout: \"$(wgv RekeyTimeout)\""
+			[ -n "$(wgv RejectAfterTime)" ] && echo "      reject-after-time: \"$(wgv RejectAfterTime)\""
+			[ -n "$(wgv KeepaliveTimeout)" ] && echo "      keepalive-timeout: \"$(wgv KeepaliveTimeout)\""
+			[ -n "$(wgv MaxHandshakeAttempts)" ] && echo "      max-handshake-attempts: \"$(wgv MaxHandshakeAttempts)\""
+			[ "$(wgv RandomTrailers)" = on ] && echo "      random-trailers: true"
+			[ "$(wgv DisableCookies)" = on ] && echo "      disable-cookies: true"
+		else
+			[ -n "$(wgv I1)" ] && echo "      i1: \"$(wgv I1)\""
+		fi
 	fi
 }
 
