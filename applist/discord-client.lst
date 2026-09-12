@@ -1,0 +1,15 @@
+# Discord desktop client — its HTTPS side only. Voice is NOT here and must not be: voice is UDP to
+# bare IPs, no hostname, so no rule can match it anyway, and it works fine direct once zapret2's own
+# raw packets stop being swallowed (see the daemon migration).
+#
+# Why the tunnel at all: the client runs two TLS stacks. The main one sends a 1785-byte TLS 1.3
+# ClientHello and the strategy's Discord profile carries it. The second sends 164-183 bytes of
+# TLS 1.2 with no supported_versions and no ALPN, and the DPI kills that shape on every Discord host
+# — measured 2026-09-12 against 19 desync variants, including a control with no desync at all. The
+# app blocks on it at startup (spinning logo), so these hosts go through the node instead.
+discord.com
+discord.gg
+discordapp.com
+discordapp.net
+discordcdn.com
+discord.media

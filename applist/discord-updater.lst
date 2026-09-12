@@ -1,7 +1,0 @@
-# Discord's updater host — the one the desktop client blocks on at startup ("Checking updates...").
-# Measured 2026-09-12: the updater sends a 175-byte TLS 1.2 ClientHello with no supported_versions and
-# no ALPN, and the DPI kills it. Thirteen desync variants were tried against it — seqovl from 100 to
-# 681, zero- and TLS-pattern fills, fake+fooling=ts, nodrop, hostfakesplit, multidisorder — and none
-# opened it, while a control run with no desync at all hung too. The client's OWN traffic is a
-# 1785-byte TLS 1.3 ClientHello and the strategy handles it fine, so only this host needs the tunnel.
-updates.discord.com

@@ -117,6 +117,74 @@ if [ -z "$(uci -q get nikki-unblock.config.mig_discord_web 2>/dev/null)" ]; then
 	[ "$_mg" -gt 0 ] && logger -t nikki-unblock "migration: released $_mg rule(s) of the retired discord-web preset"
 fi
 
+# --- let zapret2's own packets out: nikki was swallowing them -------------------------------------
+# nfqws2 runs as `daemon` and injects its fakes with a raw socket, addressed to the SAME destination
+# as the traffic it is helping. nikki's router_access_control exempts a handful of service users from
+# interception, `daemon` was not among them, so every fake aimed at a proxied destination was pulled
+# straight back into mihomo and never reached the wire. Measured on the dev box with two identical
+# synthetic datagrams: the one to a port nikki intercepts produced 0 fakes on the wire, the one to a
+# port it ignores produced 24 — while nfqws2's own debug log showed `rawsend repeats=10` for BOTH.
+#
+# That single omission is why UDP looked un-desyncable through mihomo, and why games needed either an
+# IP exclusion or narrowed interception ports. With `daemon` exempted neither is necessary: the
+# desync works with all traffic left under mihomo, so rules keep applying normally.
+if [ -z "$(uci -q get nikki-unblock.config.mig_z2_daemon 2>/dev/null)" ] \
+	&& uci -q get nikki.@router_access_control[0] >/dev/null 2>&1; then
+	_nd=0
+	for _l in user group; do
+		uci -q get "nikki.@router_access_control[0].$_l" 2>/dev/null | tr ' ' '\n' | grep -qx daemon \
+			|| { uci -q add_list "nikki.@router_access_control[0].$_l=daemon"; _nd=1; }
+	done
+	if [ "$_nd" = 1 ]; then
+		uci -q commit nikki
+		NIKKI_DIRTY=1
+		logger -t nikki-unblock "migration: exempted 'daemon' from nikki interception so zapret2's fakes reach the wire"
+	fi
+	uci -q set nikki-unblock.config.mig_z2_daemon='1'
+	uci -q commit nikki-unblock
+fi
+
+# --- retire the discord-updater preset ------------------------------------------------------------
+# It tunnelled one host (updates.discord.com) and did fix the update check, but the client then hung
+# on the spinning logo: the same short-TLS-1.2 shape is blocked on every Discord host, not just that
+# one. `discord-client` covers all of them (discord.com as a suffix already includes updates.), so the
+# narrow preset is gone and its rules are released here — otherwise they sit forever with no owner to
+# switch them off. Rules shared with another preset keep that owner and stay.
+if [ -z "$(uci -q get nikki-unblock.config.mig_discord_updater 2>/dev/null)" ]; then
+	_du=0; _guard=0
+	while [ "$_guard" -lt 200 ]; do
+		_guard=$((_guard + 1))
+		_hit=""; _i=0
+		while uci -q get "nikki.@rule[$_i]" >/dev/null 2>&1; do
+			case " $(uci -q get "nikki.@rule[$_i].src" 2>/dev/null) " in
+				*" discord-updater "*) _hit="$_i"; break ;;
+			esac
+			_i=$((_i + 1))
+		done
+		[ -z "$_hit" ] && break
+		_src=$(uci -q get "nikki.@rule[$_hit].src")
+		_rest=$(echo " $_src " | sed 's/ discord-updater / /g; s/^ *//; s/ *$//; s/  */ /g')
+		if [ -n "$_rest" ]; then uci -q set "nikki.@rule[$_hit].src=$_rest"
+		else uci -q delete "nikki.@rule[$_hit]"; fi
+		_du=$((_du + 1))
+	done
+	[ "$_du" -gt 0 ] && { uci -q commit nikki; NIKKI_DIRTY=1; \
+		logger -t nikki-unblock "migration: released $_du rule(s) of the retired discord-updater preset"; }
+	uci -q set nikki-unblock.config.mig_discord_updater='1'
+	uci -q commit nikki-unblock
+fi
+
+# Apply the nikki-side migrations above, under the same memory rule as the DNS one below: the commits
+# are the fix, a restart only decides whether they take effect now or at the next start.
+if [ "${NIKKI_DIRTY:-0}" = 1 ]; then
+	_av=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null)
+	if pgrep -f /usr/bin/mihomo >/dev/null 2>&1 && [ -n "$_av" ] && [ "$_av" -ge 262144 ]; then
+		[ -x /etc/init.d/nikki ] && /etc/init.d/nikki restart >/dev/null 2>&1
+	elif pgrep -f /usr/bin/mihomo >/dev/null 2>&1; then
+		logger -t nikki-unblock "migration: nikki restart deferred, MemAvailable ${_av:-?} kB — applies on next start"
+	fi
+fi
+
 # --- DNS: replace nikki's upstream (Chinese) resolver defaults with the router's own -------------
 # nikki is a China-first package and ships DNS to match: AliDNS as default-nameserver, AliDNS DoH for
 # proxy/direct, and a `geosite:geolocation-!cn` policy pointing at DoH 1.1.1.1 / 8.8.8.8. On a Russian

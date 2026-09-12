@@ -149,13 +149,13 @@
     "name": "ИТ-вендоры: драйверы и ПО"
   },
   {
-    "id": "discord-updater",
+    "id": "discord-client",
     "z2_exclude": true,
-    "name": "Discord: запуск и обновление",
+    "name": "Discord: клиент через VPN, голос напрямую",
     "list": true,
     "note": {
-      "ru": "Включите, если Discord висит на «Checking updates...» и дальше не идёт. В туннель уходит ОДИН хост обновлений — обход DPI его не открывает: апдейтер шлёт короткое рукопожатие TLS 1.2, которое не пробил ни один вариант десинка. Сам Discord, включая голос, остаётся напрямую.",
-      "en": "Enable if Discord hangs on \"Checking updates...\" and never gets past it. Exactly ONE host goes through the tunnel — the DPI bypass cannot open it, because the updater sends a short TLS 1.2 handshake that no desync variant defeats. Discord itself, voice included, stays direct."
+      "ru": "Включите, если десктопный Discord висит на «Checking updates...» или на крутящемся логотипе. Клиент использует два стека TLS: основной обход DPI вытягивает, а второй шлёт короткое рукопожатие TLS 1.2, которое не пробил ни один из 19 проверенных вариантов десинка. Поэтому HTTPS-хосты уходят в туннель. Голос в туннель НЕ идёт: он остаётся напрямую и работает через zapret2.",
+      "en": "Enable if the desktop Discord hangs on \"Checking updates...\" or on the spinning logo. The client runs two TLS stacks: the DPI bypass carries the main one, while the second sends a short TLS 1.2 handshake that none of 19 measured desync variants defeats. So its HTTPS hosts go through the tunnel. Voice does NOT: it stays direct and works through zapret2."
     }
   },
   {
