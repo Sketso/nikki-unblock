@@ -64,6 +64,10 @@ jobs:
             # Makefile published an index advertising 2.19.0-r1 next to a file named 2.18.0-r1: every
             # install 404'd ("wget: exited with error 8"). Tag = what was actually built and released.
             tag=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)
+            # This repo is the STABLE channel. gh resolves "no tag" through /releases/latest, which never
+            # returns a prerelease — but that is the only thing keeping a beta out of every router's
+            # `apk upgrade`, so it is asserted here rather than trusted.
+            case "$tag" in *-*) echo "FATAL: latest release '$tag' is a prerelease — refusing to publish it to the stable repo"; exit 1 ;; esac
             ver=${tag#v}
             rel=$(sed -n 's/^PKG_RELEASE:=//p' luci-app-nikki-unblock/Makefile); : "${rel:=1}"
             mv _site/apk/luci-app-nikki-unblock.apk \

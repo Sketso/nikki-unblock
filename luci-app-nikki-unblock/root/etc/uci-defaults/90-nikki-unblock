@@ -8,6 +8,33 @@
 mkdir -p /etc/nikki-unblock/nodes /etc/nikki-unblock/providers /etc/nikki-unblock/subs /etc/nikki-unblock/backups
 chmod 700 /etc/nikki-unblock /etc/nikki-unblock/nodes /etc/nikki-unblock/providers /etc/nikki-unblock/subs /etc/nikki-unblock/backups 2>/dev/null
 
+# --- one-step rollback point, for updates done OUTSIDE the panel ----------------------------------
+# The panel snapshots right before it installs and leaves /tmp/nu-selfsnap-done. `apk upgrade` from SSH
+# or LuCI Software goes around the panel, so the snapshot is taken here instead — and it has to happen
+# BEFORE any migration further down: apk has already swapped the files, but nothing has touched the
+# config yet, so this is still exactly the state of the version being replaced.
+_nu_now=$(apk list -I 2>/dev/null | sed -n 's/^luci-app-nikki-unblock-\([^ ]*\)-r[0-9]* .*/\1/p' | head -1)
+_nu_prev=$(uci -q get nikki-unblock.config.last_ver 2>/dev/null)
+if [ -f /tmp/nu-selfsnap-done ]; then
+	rm -f /tmp/nu-selfsnap-done                 # the panel already took it
+elif [ -f /tmp/nu-rollback-in-progress ]; then
+	:                                           # a rollback is installing an older package: keep the point in use
+elif [ -x /www/cgi-bin/nikki-unblock ] && [ -n "$_nu_now" ]; then
+	# Installs that predate this bookkeeping recorded no version. If they were recent enough to have run the
+	# DNS migration (2.40+), the rollback floor is the honest label: reinstalling it over that state is a
+	# valid forward path in its own right, so a rollback to it can't land on inconsistent state.
+	if [ -z "$_nu_prev" ] && [ -n "$(uci -q get nikki-unblock.config.mig_dns_local 2>/dev/null)" ]; then
+		_nu_prev=$(sed -n 's/^SELF_MIN_ROLLBACK="\(.*\)"/\1/p' /www/cgi-bin/nikki-unblock | head -1)
+	fi
+	if [ -n "$_nu_prev" ] && [ "$(apk version -t "$_nu_now" "$_nu_prev" 2>/dev/null)" = ">" ]; then
+		/www/cgi-bin/nikki-unblock _selfsnap "$_nu_prev" >/dev/null 2>&1
+		_nu_ps="/etc/nikki-unblock/backups/preupdate.tgz"
+		[ -s "$_nu_ps.pending" ] && mv -f "$_nu_ps.pending" "$_nu_ps" && mv -f "$_nu_ps.ver.pending" "$_nu_ps.ver"
+		rm -f /tmp/nu-selfsnap-done
+		logger -t nikki-unblock "update $_nu_prev -> $_nu_now: rollback point saved"
+	fi
+fi
+
 # Seed the config section if it is somehow missing (the shipped /etc/config/nikki-unblock covers this).
 if ! uci -q get nikki-unblock.config >/dev/null 2>&1; then
 	touch /etc/config/nikki-unblock
@@ -261,6 +288,14 @@ if [ -z "$(uci -q get nikki-unblock.config.mig_dns_local 2>/dev/null)" ] \
 		fi
 	fi
 	uci -q set nikki-unblock.config.mig_dns_local='1'
+	uci -q commit nikki-unblock
+fi
+
+# Remember which version is installed now, so the NEXT update knows what it is replacing (see the rollback
+# point at the top). Written last, after every migration, so it describes the state this install left.
+if [ -n "$_nu_now" ]; then
+	logger -t nikki-unblock "installed $_nu_now (previous: ${_nu_prev:-unknown})"
+	uci -q set nikki-unblock.config.last_ver="$_nu_now"
 	uci -q commit nikki-unblock
 fi
 

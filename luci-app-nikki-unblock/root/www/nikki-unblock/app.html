@@ -418,6 +418,21 @@
         <button type="button" id="instNikki" data-i18n="instNikki" hidden></button>
         <button type="button" id="updAll" data-i18n="updAll"></button>
       </div>
+      <div class="relpick">
+        <div class="relhead">
+          <span class="upname" data-i18n="relTitle"></span>
+          <label class="relpre"><input type="checkbox" id="relShowPre"> <span data-i18n="relShowPre"></span></label>
+        </div>
+        <div class="btns">
+          <select id="relSel" hidden></select>
+          <button type="button" class="ghost" id="relInstall" data-i18n="relInstall" hidden></button>
+          <button type="button" class="ghost" id="relRefresh" data-i18n="relRefresh"></button>
+        </div>
+        <div class="hint" id="relHint"></div>
+        <div class="btns" id="rbRow" hidden>
+          <button type="button" class="danger" id="rbBtn"></button>
+        </div>
+      </div>
       <pre class="uplog" id="updLog" hidden></pre>
       <div class="msg" id="updMsg"></div>
     </div>

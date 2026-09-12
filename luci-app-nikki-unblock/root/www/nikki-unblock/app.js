@@ -304,6 +304,13 @@ const I18N = {
     rpFullHint: "Лог не поместился в ссылку — скопируй текст выше и вставь в тело issue.",
     updTitle: "Обновление", updSelf: "Обновить Nipret", updNikki: "Обновить nikki", updGeo: "Обновить geo", updZ2: "Обновить zapret2", updAll: "Обновить всё",
     updNew: "Доступно обновление", updUpToDate: "Актуальная версия", updAvail: "обновление",
+    relTitle: "Выбор версии Nipret", relShowPre: "Показывать тестовые версии (beta, rc)",
+    relInstall: "Установить выбранную", relRefresh: "Обновить список", relRecommended: "← рекомендуемый",
+    relNone: "Более новых версий нет — установлена последняя доступная.", relLoading: "Загружаю список версий…",
+    relErr: "Не удалось получить список версий с GitHub. Проверь интернет на роутере и нажми «Обновить список».",
+    relPreHint: "Тестовые версии нужны для проверки перед релизом. С них можно перейти только на более новую — откатиться поможет кнопка ниже.",
+    rbBtn: "Отменить обновление — вернуть {ver}",
+    rbConfirm: "Вернуть версию {ver} и все настройки на момент обновления ({date})?\n\nВсё, что вы меняли после обновления — узлы, пресеты, правила, — будет потеряно.\nОткат одноразовый: дальше назад вернуться нельзя.",
     geoOn: "включено", geoOff: "выключено", geoipNeed: "Сначала включи базу GeoIP: «Обновить geo» во вкладке «Управление».",
     updRunning: "Обновляю… (можно закрыть — продолжится в фоне)", updOkCode: "Готово", updBad: "Ошибка, код ", updReload: "Nipret обновлён — нажми, чтобы перезагрузить страницу",
     on_: "Включить ", off_: "Отключить ", upd_: "Обновить ",
@@ -618,6 +625,13 @@ const I18N = {
     rpFullHint: "The log didn't fit in the link — copy the text above and paste it into the issue body.",
     updTitle: "Updates", updSelf: "Update Nipret", updNikki: "Update nikki", updGeo: "Update geo", updZ2: "Update zapret2", updAll: "Update all",
     updNew: "Update available", updUpToDate: "Up to date", updAvail: "update",
+    relTitle: "Choose a Nipret version", relShowPre: "Show test versions (beta, rc)",
+    relInstall: "Install selected", relRefresh: "Refresh list", relRecommended: "← recommended",
+    relNone: "Nothing newer — the latest available version is installed.", relLoading: "Loading versions…",
+    relErr: "Could not fetch the version list from GitHub. Check the router's internet and press «Refresh list».",
+    relPreHint: "Test versions are for checking a release before it ships. From one you can only move to a newer version — the button below undoes an update.",
+    rbBtn: "Undo the update — back to {ver}",
+    rbConfirm: "Return to version {ver} and all settings as they were at the update ({date})?\n\nEverything you changed since the update — nodes, presets, rules — will be lost.\nThe undo is one-time: you can't go further back.",
     geoOn: "enabled", geoOff: "disabled", geoipNeed: "Enable the GeoIP database first: «Update geo» in the Manage tab.",
     updRunning: "Updating… (you can leave — it continues in the background)", updOkCode: "Done", updBad: "Failed, code ", updReload: "Nipret updated — click to reload the page",
     on_: "Enable ", off_: "Disable ", upd_: "Update ",
@@ -726,7 +740,7 @@ document.querySelectorAll(".tab").forEach(tb => tb.addEventListener("click", () 
   if (tb.dataset.view === "nodes") loadNodes().then(autoPingNodes);
   else if (tb.dataset.view === "domains") presetOp.ensure();   // resume a preset spinner if one is applying
   else if (tb.dataset.view === "mgmt") loadSvc();
-  else if (tb.dataset.view === "common") { loadVersions(); loadUpdCheck(); loadBackup(); loadZ2Backup(); loadAuth(); loadUndo(); loadStorage(); taOpen(); }   // Общее: updates + backup + security + storage + запись устройства
+  else if (tb.dataset.view === "common") { loadVersions(); loadUpdCheck(); loadReleases(); loadBackup(); loadZ2Backup(); loadAuth(); loadUndo(); loadStorage(); taOpen(); }   // Общее: updates + backup + security + storage + запись устройства
   else if (tb.dataset.view === "devices") loadDevices();
   else if (tb.dataset.view.indexOf("z2") === 0) { loadZapret2(); z2PresetOp.ensure(); }   // any zapret2 sub-view
 }));
@@ -2774,7 +2788,7 @@ async function loadUpdCheck(force){
   catch(e){}
   finally { updChecking = false; }
 }
-function updBtns(dis){ ["#updSelf","#updNikki","#updGeo","#updZ2","#updAll"].forEach(id => { $(id).disabled = dis; }); }
+function updBtns(dis){ ["#updSelf","#updNikki","#updGeo","#updZ2","#updAll","#relInstall","#relRefresh","#rbBtn"].forEach(id => { $(id).disabled = dis; }); }
 let updPolling = false, updCurOp = null;
 async function pollUpdate(){
   if (updPolling) return; updPolling = true;
@@ -2785,10 +2799,10 @@ async function pollUpdate(){
   const finish = (ok, code) => {
     updPolling = false; updBtns(false);
     setMsg($("#updMsg"), ok ? t("updOkCode") : (t("updBad") + code), ok);
-    loadVersions(); loadSvc(); loadUpdCheck(true);   // versions changed → re-check availability
+    loadVersions(); loadSvc(); loadUpdCheck(true); loadReleases(true);   // versions changed → re-check availability
     // a self-update swapped THIS page's own code — the new UI only appears after a reload. Leave a
     // sticky, clickable toast instead of forcing it, so the log stays readable until the user is ready.
-    if (ok && (updCurOp === "self" || updCurOp === "all"))
+    if (ok && (updCurOp === "self" || updCurOp === "all" || updCurOp === "selfrollback"))
       showToast(t("updReload"), "ok", { sticky: true, icon: "↻", click: () => location.reload() });
   };
   const tick = async () => {
@@ -2806,10 +2820,10 @@ async function pollUpdate(){
   };
   tick();
 }
-async function doUpdate(op){
+async function doUpdate(op, tag){
   updCurOp = op;
   updBtns(true); setMsg($("#updMsg"), t("applying"));
-  let r; try { r = await api("update", { op }); } catch(e){ r = {}; }
+  let r; try { r = await api("update", tag ? { op, tag } : { op }); } catch(e){ r = {}; }
   if (r && r.ok){ pollUpdate(); }
   else { updBtns(false); setMsg($("#updMsg"), t("errP") + ((r && r.error) || "?"), false); }
 }
@@ -2819,6 +2833,64 @@ $("#updGeo").addEventListener("click", () => doUpdate("geo"));
 $("#updZ2").addEventListener("click", () => doUpdate("z2"));
 $("#instNikki").addEventListener("click", () => doUpdate("instnikki"));
 $("#updAll").addEventListener("click", () => doUpdate("all"));
+
+/* ---------- version picker (upgrade-only) + one-step undo of the last update ---------- */
+/* Only versions NEWER than the installed one are offered, and the server enforces the same rule —
+   this list is a convenience, not the guard. Test builds (beta/rc) stay hidden unless asked for, so
+   nobody lands on one by accident: from a test build the only way is forward, or the undo button. */
+let RELS = null;
+const REL_PRE_KEY = "nu.relShowPre";
+function relPreWanted(){ try { return localStorage.getItem(REL_PRE_KEY) === "1"; } catch(e){ return false; } }
+function renderReleases(){
+  const sel = $("#relSel"), hint = $("#relHint"), inst = $("#relInstall");
+  sel.textContent = "";
+  renderRollback();
+  if (!RELS || !RELS.ok){ sel.hidden = true; inst.hidden = true; hint.textContent = t("relErr"); return; }
+  const pre = $("#relShowPre").checked;
+  const list = RELS.releases.filter(r => r.newer && (pre || r.channel === "stable"));
+  list.forEach(r => {
+    const o = document.createElement("option");
+    o.value = r.tag;
+    o.textContent = r.tag.replace(/^v/, "")
+      + (r.channel !== "stable" ? " (" + r.channel + ")" : "")
+      + (r.tag === RELS.recommended ? " " + t("relRecommended") : "")
+      + (r.date ? " · " + r.date : "");
+    sel.appendChild(o);
+  });
+  const none = !list.length;
+  sel.hidden = none; inst.hidden = none;
+  // preselect the recommended release when it is on offer, otherwise the newest one listed
+  if (!none) sel.value = list.some(r => r.tag === RELS.recommended) ? RELS.recommended : list[0].tag;
+  hint.textContent = none ? t("relNone") : (pre ? t("relPreHint") : "");
+}
+function renderRollback(){
+  const rb = RELS && RELS.rollback, row = $("#rbRow");
+  const ok = !!(rb && rb.available);
+  row.hidden = !ok;
+  if (ok) $("#rbBtn").textContent = t("rbBtn").replace("{ver}", rb.tag.replace(/^v/, ""));
+}
+async function loadReleases(fresh){
+  if (!RELS) $("#relHint").textContent = t("relLoading");
+  try { RELS = await (await fetch("?api=releases" + (fresh ? "&fresh=1" : ""))).json(); }
+  catch(e){ RELS = null; }
+  renderReleases();
+}
+$("#relShowPre").checked = relPreWanted();
+$("#relShowPre").addEventListener("change", e => {
+  try { localStorage.setItem(REL_PRE_KEY, e.target.checked ? "1" : "0"); } catch(err){}
+  renderReleases();
+});
+$("#relRefresh").addEventListener("click", () => loadReleases(true));
+$("#relInstall").addEventListener("click", () => {
+  const tag = $("#relSel").value;
+  if (tag) doUpdate("self", tag);
+});
+$("#rbBtn").addEventListener("click", () => {
+  const rb = RELS && RELS.rollback;
+  if (!rb || !rb.available) return;
+  const msg = t("rbConfirm").replace("{ver}", rb.tag.replace(/^v/, "")).replace("{date}", rb.date || "?");
+  if (confirm(msg)) doUpdate("selfrollback");
+});
 
 /* ---------- danger zone: uninstall Nipret ---------- */
 /* Poll the purge log until the CGI deletes itself (apk del). The endpoint vanishing IS the success
@@ -2903,7 +2975,7 @@ async function bootKiosk(){
   if (CAPS.nikki){ loadIps(); loadAutosync(); loadNodes(); loadSvc(); presetOp.ensure(); }
   if (CAPS.zapret2) z2PresetOp.ensure();   // resume a z2-preset spinner if one is applying
   if (CAPS.nikki || CAPS.zapret2) loadDevices();
-  loadVersions(); loadUpdCheck(); loadBackup(); loadZ2Backup(); loadAuth(); loadUndo(); loadStorage();   // one availability check per session (cached)
+  loadVersions(); loadUpdCheck(); loadReleases(); loadBackup(); loadZ2Backup(); loadAuth(); loadUndo(); loadStorage();   // one availability check per session (cached)
   // resume the log view if an update is already running (started from another tab/session)
   try { const s = await (await fetch("?api=updatestatus")).json(); if (s && s.running) pollUpdate(); } catch(e){}
 })();

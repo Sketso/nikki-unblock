@@ -3,6 +3,11 @@ name: build & release
 # Builds the architecture-independent package with the OpenWrt SDK and publishes it to the
 # "latest" release under stable asset names (luci-app-nikki-unblock.apk / .ipk) that feed.sh pulls.
 #
+# Channels come from the tag: v2.43.0-beta.1 and v2.43.0-rc.1 are published as GitHub PRERELEASES,
+# v2.43.0 as a normal release. GitHub's /releases/latest skips prereleases by definition, so the
+# stable apk repo, feed.sh and the panel's "update" all stay on stable without a single extra check.
+# The package version is stamped FROM the tag, so the Makefile can't drift from what gets released.
+#
 # NOTE: OpenWrt package builds can't be validated locally — the first run may need a small tweak
 # (SDK ARCH tag / output path). Trigger via a tag push (git tag v1.0.0 && git push --tags) or the
 # "Run workflow" button.
@@ -39,6 +44,23 @@ jobs:
             ext: apk
     steps:
       - uses: actions/checkout@v4
+
+      - name: Stamp the package version from the tag
+        if: github.ref_type == 'tag'
+        run: |
+          set -e
+          printf '%s' "$GITHUB_REF_NAME" | grep -qxE 'v[0-9]+\.[0-9]+\.[0-9]+(-(beta|rc)\.[0-9]+)?' \
+            || { echo "tag '$GITHUB_REF_NAME' is not vX.Y.Z, vX.Y.Z-beta.N or vX.Y.Z-rc.N"; exit 1; }
+          ver="${GITHUB_REF_NAME#v}"
+          # A prerelease must sort BELOW its release, and the two package managers spell that differently:
+          # apk ranks 2.43.0_rc1 < 2.43.0, while opkg follows Debian rules, where the same string would sort
+          # ABOVE the release — it needs 2.43.0~rc1 instead.
+          case "$ver" in *-beta.*|*-rc.*)
+            if [ "${{ matrix.ext }}" = ipk ]; then sep='~'; else sep='_'; fi
+            ver=$(printf '%s' "$ver" | sed -E "s/-(beta|rc)\.([0-9]+)\$/${sep}\1\2/") ;;
+          esac
+          sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=$ver/" luci-app-nikki-unblock/Makefile
+          grep '^PKG_VERSION' luci-app-nikki-unblock/Makefile
 
       - name: Build package (OpenWrt SDK)
         uses: openwrt/gh-action-sdk@main
@@ -78,4 +100,5 @@ jobs:
         with:
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'latest' }}
           name: ${{ github.ref_type == 'tag' && github.ref_name || 'latest' }}
+          prerelease: ${{ github.ref_type == 'tag' && contains(github.ref_name, '-') }}
           files: out/*

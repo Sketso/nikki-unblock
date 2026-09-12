@@ -38,7 +38,19 @@ Z2_USERSTOP="/tmp/nikki-unblock-z2-userstop"     # set on a deliberate panel Sto
                                                  # reboot clears it, so the boot flag decides after restart)
 # nikki-unblock isn't in an apk repo (installed from a local file), so self-update pulls the latest
 # release .apk straight from GitHub (same as feed.sh) and `apk add` upgrades it in place.
-SELF_APK="https://github.com/Sketso/nikki-unblock/releases/latest/download/luci-app-nikki-unblock.apk"
+SELF_REPO="Sketso/nikki-unblock"
+SELF_APK="https://github.com/$SELF_REPO/releases/latest/download/luci-app-nikki-unblock.apk"
+# Releases come in three channels by tag: v2.43.0-beta.1, v2.43.0-rc.1, v2.43.0. GitHub marks the
+# first two as prereleases, and its /releases/latest skips prereleases by definition — so SELF_APK,
+# the stable apk repo and "update all" stay on stable without knowing channels exist.
+#
+# One-step rollback. Before an update installs, the whole state (nikki + zapret2 + node store) is
+# snapshotted; "undo the update" restores it and reinstalls the version it came from. Persistent,
+# not /tmp, because a broken update is often only noticed after a reboot. Exactly one deep: going
+# further back would silently discard everything changed across several versions.
+SELF_PRESNAP="/etc/nikki-unblock/backups/preupdate.tgz"   # .ver sidecar = version the snapshot is of
+# The oldest version a rollback may return to: the first release whose install took that snapshot.
+SELF_MIN_ROLLBACK="2.42.0"
 # GeoIP/GeoSite databases (V2Ray .dat format). GeoIP.dat (not just Country.mmdb) carries service
 # CATEGORIES (telegram, google, netflix, …) — needed for GEOIP,<service> rules — so we run mihomo in
 # geodata-mode (nikki.mixin.geoip_format=dat). Refreshed by the `op=geo` update action.
@@ -1137,19 +1149,93 @@ updcheck_json() {
 	printf '{"self":{"cur":"%s","latest":"%s"},"zapret2":{"present":%d,"cur":"%s","latest":"%s"},"nikki":{"upd":%d},"mihomo":{"upd":%d}}' \
 		"$scur" "$slat" "$z2p" "$z2cur" "$z2lat" "$nud" "$mud"
 }
+# ---- release channels + one-step rollback ----------------------------------
+# tag <-> apk version. Tags are semver-ish (v2.43.0-rc.1); apk has its own suffix grammar (2.43.0_rc1),
+# which conveniently also sorts right: 2.43.0_beta1 < 2.43.0_rc1 < 2.43.0.
+rel_tag_to_ver() { printf '%s' "$1" | sed -E 's/^v//; s/-(beta|rc)\.([0-9]+)$/_\1\2/'; }
+rel_ver_to_tag() { [ -n "$1" ] && printf 'v%s' "$(printf '%s' "$1" | sed -E 's/-r[0-9]+$//; s/_(beta|rc)([0-9]+)$/-\1.\2/')"; }
+# strict shape: a tag lands in a URL and in a generated shell script, so nothing else gets through
+rel_tag_ok()     { printf '%s' "$1" | grep -qxE 'v[0-9]+\.[0-9]+\.[0-9]+(-(beta|rc)\.[0-9]+)?'; }
+# 0 if apk version $1 is strictly newer than $2. Asked of apk itself instead of reimplemented: it already
+# knows the suffix rules, and a hand-rolled compare is exactly where 2.43.0 vs 2.43.0_rc1 goes wrong. The
+# -rN build suffix is dropped first — apk ranks 2.42.0-r1 ABOVE 2.42.0, which would fake an upgrade.
+rel_newer()      { [ "$(apk version -t "${1%-r*}" "${2%-r*}" 2>/dev/null)" = ">" ]; }
+self_cur_ver()   { pkg_ver luci-app-nikki-unblock | sed 's/-r[0-9]*$//'; }
+# 0 if a one-step rollback is possible right now; prints the version it would return to
+self_rollback_ver() {
+	[ -s "$SELF_PRESNAP" ] && [ -s "$SELF_PRESNAP.ver" ] || return 1
+	_rv=$(cat "$SELF_PRESNAP.ver" 2>/dev/null)
+	rel_tag_ok "$(rel_ver_to_tag "$_rv")" || return 1
+	rel_newer "$SELF_MIN_ROLLBACK" "$_rv" && return 1   # below the floor: no snapshot-taking install back then
+	rel_newer "$(self_cur_ver)" "$_rv" || return 1      # nothing newer to step back FROM
+	printf '%s' "$_rv"
+}
+# [{tag,ver,channel,newer,date}] + recommended + rollback state. Channel filtering is the UI's job: the
+# list carries everything, each entry says whether it is newer than what is installed.
+releases_json() {
+	json_header
+	_rc="/tmp/nu-releases.json"
+	# unauthenticated GitHub API allows 60 calls/hour per address — cache so reopening the panel, or a
+	# household of devices behind one router, can't burn through it. `fresh=1` forces a refetch.
+	case "$QUERY_STRING" in *fresh=1*) rm -f "$_rc" ;; esac
+	if [ ! -s "$_rc" ] || [ $(( $(date +%s) - $(date -r "$_rc" +%s 2>/dev/null || echo 0) )) -gt 300 ]; then
+		curl -sf --max-time 15 -H "Accept: application/vnd.github+json" \
+			"https://api.github.com/repos/$SELF_REPO/releases?per_page=30" -o "$_rc.new" 2>/dev/null \
+			&& mv -f "$_rc.new" "$_rc" || rm -f "$_rc.new"
+	fi
+	_cur=$(self_cur_ver); _rec=""; _out=""
+	if [ -s "$_rc" ]; then
+		# one jsonfilter pass per field, zipped by line — per-release calls would spawn ~120 processes
+		_t="/tmp/nu-rel.$$"
+		jsonfilter -i "$_rc" -e '@[*].tag_name'     > "$_t.t" 2>/dev/null
+		jsonfilter -i "$_rc" -e '@[*].prerelease'   > "$_t.p" 2>/dev/null
+		jsonfilter -i "$_rc" -e '@[*].draft'        > "$_t.d" 2>/dev/null
+		jsonfilter -i "$_rc" -e '@[*].published_at' > "$_t.a" 2>/dev/null
+		# zip the four columns by line number (busybox on OpenWrt ships no `paste`)
+		awk 'FILENAME==ARGV[1]{t[FNR]=$0; n=FNR; next} FILENAME==ARGV[2]{p[FNR]=$0; next}
+		     FILENAME==ARGV[3]{d[FNR]=$0; next} {a[FNR]=$0}
+		     END{for(i=1;i<=n;i++) print t[i], p[i], d[i], a[i]}' "$_t.t" "$_t.p" "$_t.d" "$_t.a" > "$_t.z"
+		while read -r _tg _pr _dr _pa; do
+			[ "$_dr" = true ] && continue
+			rel_tag_ok "$_tg" || continue
+			# GitHub lists newest first, so the first non-prerelease IS the recommended one
+			[ -z "$_rec" ] && [ "$_pr" = false ] && _rec="$_tg"
+			_v=$(rel_tag_to_ver "$_tg")
+			case "$_tg" in *-beta.*) _ch=beta ;; *-rc.*) _ch=rc ;; *) _ch=stable ;; esac
+			_nw=0; rel_newer "$_v" "$_cur" && _nw=1
+			_out="$_out${_out:+,}{\"tag\":\"$_tg\",\"ver\":\"$_v\",\"channel\":\"$_ch\",\"newer\":$_nw,\"date\":\"$(printf '%s' "$_pa" | cut -c1-10)\"}"
+		done < "$_t.z"
+		rm -f "$_t".*
+	fi
+	_rbok=0; _rbv=""; _rbd=""
+	if _rbv=$(self_rollback_ver); then _rbok=1; _rbd=$(date -r "$SELF_PRESNAP" '+%Y-%m-%d %H:%M' 2>/dev/null); else _rbv=""; fi
+	printf '{"ok":%d,"cur":"%s","recommended":"%s","releases":[%s],"rollback":{"available":%d,"ver":"%s","tag":"%s","date":"%s"}}' \
+		"$([ -s "$_rc" ] && echo 1 || echo 0)" "$_cur" "$_rec" "$_out" "$_rbok" "$_rbv" "$(rel_ver_to_tag "$_rbv")" "$_rbd"
+}
 upd_running() {   # 0 (true) if an update runner is alive
 	[ -f "$UPD_LOCK" ] || return 1
 	kill -0 "$(cat "$UPD_LOCK" 2>/dev/null)" 2>/dev/null
 }
-update_start() {   # $1=op(self|nikki|geo|z2|all) ; 0=started 1=busy 2=bad op 3=no space
-	_op="$1"
-	case "$_op" in self|nikki|geo|z2|all|instnikki) ;; *) return 2 ;; esac
+update_start() {   # $1=op(self|nikki|geo|z2|all|selfrollback) $2=tag(self only) ; 0=started 1=busy 2=bad op 3=no space 4=not newer 5=no rollback
+	_op="$1"; _tag="$2"
+	case "$_op" in self|nikki|geo|z2|all|instnikki|selfrollback) ;; *) return 2 ;; esac
 	upd_running && return 1
+	# Upgrade-only, enforced HERE and not just by what the UI offers: a picked tag must be strictly newer
+	# than what is installed. Going back is a separate, deliberate path (selfrollback) that restores state
+	# along with the package — a bare downgrade would leave newer migrations' changes and flags behind.
+	if [ -n "$_tag" ]; then
+		[ "$_op" = self ] || return 2
+		rel_tag_ok "$_tag" || return 2
+		rel_newer "$(rel_tag_to_ver "$_tag")" "$(self_cur_ver)" || return 4
+	fi
+	if [ "$_op" = selfrollback ]; then
+		_rbv=$(self_rollback_ver) || return 5
+	fi
 	# a from-scratch nikki install pulls a ~30 MB archive into tmpfs and lays ~55 MB onto the overlay
 	[ "$_op" = instnikki ] && { fs_has_room /tmp 81920 && fs_has_room / 61440 || return 3; }
 	# refuse to start on a nearly-full filesystem: apk downloads via /tmp (tmpfs), geo DBs land in
 	# $GEO_RUN (~40 MB peak). z2 is NOT guarded here — z2_run_update has its own graceful check.
-	case "$_op" in self|nikki|all) fs_has_room /tmp 20480 || return 3 ;; esac
+	case "$_op" in self|nikki|all|selfrollback) fs_has_room /tmp 20480 || return 3 ;; esac
 	# Geo headroom depends on WHAT will be fetched: GeoSite.dat is ~4 MB (8 MB peak while the .new copy
 	# sits beside it), GeoIP.dat another ~17 MB — and that one is only downloaded when a service-category
 	# rule needs it. Demanding the old flat 40 MB after the blob was dropped made "update all" fail on a
@@ -1209,9 +1295,41 @@ update_start() {   # $1=op(self|nikki|geo|z2|all) ; 0=started 1=busy 2=bad op 3=
 			printf 'echo ">> reloading nikki"; /etc/init.d/nikki reload\n' ;;
 		esac
 		case "$_op" in self|all)
-			printf 'echo ">> Nipret: fetching latest release .apk"\n'
-			printf 'if curl -sfL --max-time 120 -o /tmp/nu-new.apk "%s"; then apk add --allow-untrusted /tmp/nu-new.apk || rc=$?; else rc=1; echo "!! download failed"; fi\n' "$SELF_APK"
-			printf 'rm -f /tmp/nu-new.apk\n' ;;
+			if [ -n "$_tag" ]; then
+				_url="https://github.com/$SELF_REPO/releases/download/$_tag/luci-app-nikki-unblock.apk"; _what="release $_tag"
+			else
+				_url="$SELF_APK"; _what="latest release"
+			fi
+			printf 'PS="%s"\n' "$SELF_PRESNAP"
+			printf 'echo ">> Nipret: fetching %s"\n' "$_what"
+			printf 'if curl -sfL --max-time 120 -o /tmp/nu-new.apk "%s"; then\n' "$_url"
+			# The rollback point is taken AFTER the download — a failed fetch must not evict the previous one —
+			# and kept as .pending until apk succeeds: a failed install would otherwise leave a snapshot of the
+			# version that is STILL installed, silently replacing the real way back.
+			printf '\t"%s" _selfsnap\n' "$SELF"
+			printf '\tif apk add --allow-untrusted /tmp/nu-new.apk; then\n'
+			printf '\t\tif [ -s "$PS.pending" ]; then mv -f "$PS.pending" "$PS"; mv -f "$PS.ver.pending" "$PS.ver"; echo ">> rollback point kept: $(cat "$PS.ver")"; fi\n'
+			printf '\telse rc=$?; rm -f "$PS.pending" "$PS.ver.pending"; fi\n'
+			printf 'else rc=1; echo "!! download failed"; fi\n'
+			printf 'rm -f /tmp/nu-new.apk /tmp/nu-selfsnap-done\n' ;;
+		esac
+		case "$_op" in selfrollback)
+			_rbt=$(rel_ver_to_tag "$_rbv")
+			printf 'PS="%s"\n' "$SELF_PRESNAP"
+			printf 'echo ">> Nipret: undoing the last update — back to %s"\n' "$_rbv"
+			printf 'if curl -sfL --max-time 120 -o /tmp/nu-rb.apk "https://github.com/%s/releases/download/%s/luci-app-nikki-unblock.apk"; then\n' "$SELF_REPO" "$_rbt"
+			# State FIRST, while this newer code is still installed: it is the code that knows the snapshot
+			# format, and "pre-update state under newer code" is just the ordinary moment before any upgrade.
+			# The package goes second. Its flags come back with the state, so the next forward update re-runs
+			# the migrations cleanly instead of skipping them as already done.
+			printf '\techo ">> restoring settings saved before the update"; "%s" _selfrestore || rc=1\n' "$SELF"
+			# the older package's own install hook takes rollback points too — it must not overwrite this one
+			printf '\t: > /tmp/nu-rollback-in-progress\n'
+			printf '\techo ">> installing %s"; apk add --allow-untrusted /tmp/nu-rb.apk || rc=$?\n' "$_rbv"
+			printf '\trm -f /tmp/nu-rollback-in-progress\n'
+			printf '\tif [ "$rc" = 0 ]; then rm -f "$PS" "$PS.ver"; echo ">> done. This was a one-step undo, so that rollback point is now used up"; else echo "!! rollback incomplete — the rollback point is kept, try again"; fi\n'
+			printf 'else rc=1; echo "!! could not download %s — nothing was changed"; fi\n' "$_rbt"
+			printf 'rm -f /tmp/nu-rb.apk\n' ;;
 		esac
 		printf 'echo "__DONE__:$rc"\nrm -f "%s"\n' "$UPD_LOCK"
 	} > "$UPD_SCRIPT"
@@ -3427,6 +3545,30 @@ nodes_json() {
 [ "$1" = "_siterun" ] && { sitedeps_run "$2"; exit 0; }
 # same scan, synchronous, for a shell: nikki-unblock _sitedeps example.com
 [ "$1" = "_sitedeps" ] && { sitedeps_run "$2"; cat "$SITE_RESULT"; echo; exit 0; }
+# Nipret self-update rollback point. `_selfsnap [ver]` writes a .pending snapshot (the runner promotes it
+# once apk succeeds) and records which version it is of — the running one, or $2 when called from the
+# install hook, by which time apk already reports the NEW version. It also leaves a marker so that hook,
+# which runs right after, knows the panel already took the snapshot and doesn't take a second one.
+[ "$1" = "_selfsnap" ] && {
+	mkdir -p "$(dirname "$SELF_PRESNAP")"
+	_sv="${2:-$(self_cur_ver)}"
+	if snap_build "$SELF_PRESNAP.pending" "preupdate" >/dev/null 2>&1 && [ -s "$SELF_PRESNAP.pending" ]; then
+		printf '%s' "$_sv" > "$SELF_PRESNAP.ver.pending"
+		: > /tmp/nu-selfsnap-done
+		echo ">> saved the current state of $_sv (to undo this update later)"
+	else
+		rm -f "$SELF_PRESNAP.pending"
+		echo "!! could not save a rollback point — the update goes ahead without one"
+	fi
+	exit 0
+}
+[ "$1" = "_selfrestore" ] && {
+	[ -s "$SELF_PRESNAP" ] || { echo "!! no pre-update snapshot"; exit 1; }
+	snap_restore "$SELF_PRESNAP"; _rc=$?
+	[ "$_rc" = 0 ] && echo ">> settings restored" || echo "!! restore reported problems (rc=$_rc)"
+	exit "$_rc"
+}
+
 # nikki update rollback point: snapshot config before, restore it if mihomo dies after
 NIKKI_PRESNAP="/tmp/nu-preupd-nikki.tgz"
 [ "$1" = "_nikkisnap" ] && { build_backup "$NIKKI_PRESNAP" >/dev/null 2>&1 && echo ">> nikki config snapshot saved" || echo "!! snapshot failed"; exit 0; }
@@ -3773,12 +3915,14 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 
 		;;
 	update)
-		update_start "$(get_param op)"; rc=$?
+		update_start "$(get_param op)" "$(get_param tag | sed 's/[^A-Za-z0-9._-]//g')"; rc=$?
 		json_header
 		case "$rc" in
 			0) printf '{"ok":true,"started":true}' ;;
 			1) printf '{"ok":false,"error":"busy"}' ;;
 			3) printf '{"ok":false,"error":"not enough free space (check df -h / and /tmp)"}' ;;
+			4) printf '{"ok":false,"error":"only versions newer than the installed one can be installed"}' ;;
+			5) printf '{"ok":false,"error":"no rollback point for this version"}' ;;
 			*) printf '{"ok":false,"error":"bad op"}' ;;
 		esac
 		exit 0
@@ -4714,6 +4858,7 @@ devicesall_json() {
 [ "$API" = "versions" ] && { versions_json; exit 0; }
 [ "$API" = "diag" ] && { diag_json; exit 0; }
 [ "$API" = "updcheck" ] && { updcheck_json; exit 0; }
+[ "$API" = "releases" ] && { releases_json; exit 0; }
 [ "$API" = "subauto" ] && { subauto_json; exit 0; }
 [ "$API" = "backupauto" ] && { backupauto_json; exit 0; }
 [ "$API" = "z2backupauto" ] && { z2_backupauto_json; exit 0; }

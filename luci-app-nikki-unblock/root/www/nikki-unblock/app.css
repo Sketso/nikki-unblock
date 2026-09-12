@@ -164,6 +164,11 @@
   .modecard h3 { margin: 0 0 .5rem; font-size: .95rem; }
   .modecard select { width: 100%; padding: .55rem .6rem; font-size: .9rem; border-radius: 8px; border: 1px solid #8884; background: #8881; color: inherit; }
   .modecard .hint { margin: .5rem 0 0; }
+  .relpick { margin-top: .9rem; padding-top: .8rem; border-top: 1px solid #8883; }
+  .relhead { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .4rem .8rem; }
+  .relpre { display: inline-flex; align-items: center; gap: .35rem; font-size: .85rem; cursor: pointer; }
+  .relpick select { flex: 1 1 100%; min-width: 0; padding: .5rem .5rem; font-size: .9rem; border-radius: 8px; border: 1px solid #8884; background: #8881; color: inherit; }
+  .relpick .hint { margin: .4rem 0 0; }
   .applybar { display: flex; align-items: center; gap: .8rem; margin-top: 1rem; padding-top: .8rem; border-top: 1px solid #8882; }
   .applybar .msg { margin: 0; }
   .bkgroup { border: 1px solid #8884; border-radius: 12px; padding: .4rem 1rem 1rem; margin: .4rem 0; }
@@ -175,6 +180,7 @@
   .svc .dot { display: inline-block; width: .62rem; height: .62rem; border-radius: 50%; margin-right: .45rem; vertical-align: middle; background: #8886; }
   .svc .dot.up { background: #16a34a; } .svc .dot.down { background: #dc2626; } .svc .dot.warn { background: #f59e0b; }
   .svc .btns { display: flex; gap: .5rem; flex-wrap: wrap; }
+  .svc .btns[hidden] { display: none; }   /* must beat the flex above, else a hidden row (e.g. the undo button) still shows */
   /* iOS-style toggle switch */
   .sw { position: relative; display: inline-block; width: 40px; height: 24px; flex: 0 0 auto; }
   .sw input { position: absolute; opacity: 0; width: 0; height: 0; }
