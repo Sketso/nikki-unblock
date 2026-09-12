@@ -204,6 +204,36 @@ if [ -z "$(uci -q get nikki-unblock.config.mig_discord_updater 2>/dev/null)" ]; 
 	uci -q commit nikki-unblock
 fi
 
+# --- Discord voice on Google Cloud servers --------------------------------------------------------
+# Channels served from 35.217.x (UDP 50000-50100) never got an answer to the IP discovery, so they hung
+# on "RTC connecting"; a zero-filled fake in front of it opens them (why zeros: see z2_voice_fake in the
+# CGI). Strategy bodies are only written when someone picks a strategy, so an install that already runs
+# ytdiscord keeps the old voice line forever unless it is swapped here. Only the exact lines earlier
+# releases wrote are replaced — a hand-edited voice profile is the user's and stays as it is.
+if [ -z "$(uci -q get nikki-unblock.config.mig_z2_voicefake 2>/dev/null)" ] && [ -x /www/cgi-bin/nikki-unblock ]; then
+	_vn=$(/www/cgi-bin/nikki-unblock _z2voice 2>/dev/null)
+	_vc=0
+	if [ "$(printf '%s\n' "$_vn" | grep -c .)" = 2 ]; then
+		for _f in /opt/zapret2/config /etc/nikki-unblock/z2-custom.opt; do
+			[ -f "$_f" ] || continue
+			# two lines: through ENVIRON, since busybox awk rejects a newline inside -v
+			NU_VN="$_vn" awk '
+				$0 == "--filter-udp=3478,19294-19344,50000-50100 --filter-l7=discord,stun --new" ||
+				$0 == "--filter-udp=3478,19294-19344,50000-50100 --filter-l7=discord,stun --lua-desync=fake:blob=discord-ip-discovery-with-port:repeats=6 --new" { print ENVIRON["NU_VN"]; hit=1; next }
+				{ print }
+				END { exit hit ? 0 : 1 }
+			' "$_f" > "$_f.nu-voice" && { cat "$_f.nu-voice" > "$_f"; _vc=$((_vc + 1)); }
+			rm -f "$_f.nu-voice"
+		done
+		if [ "$_vc" -gt 0 ]; then
+			logger -t nikki-unblock "migration: Discord voice profile now fakes the IP discovery (Google Cloud voice servers)"
+			pidof nfqws2 >/dev/null 2>&1 && /etc/init.d/zapret2 restart >/dev/null 2>&1
+		fi
+		uci -q set nikki-unblock.config.mig_z2_voicefake='1'
+		uci -q commit nikki-unblock
+	fi
+fi
+
 # Apply the nikki-side migrations above, under the same memory rule as the DNS one below: the commits
 # are the fix, a restart only decides whether they take effect now or at the next start.
 if [ "${NIKKI_DIRTY:-0}" = 1 ]; then

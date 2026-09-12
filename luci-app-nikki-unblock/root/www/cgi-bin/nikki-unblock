@@ -2356,11 +2356,15 @@ z2_strat_body() {   # $1=id -> the NFQWS2_OPT body (profile lines); empty for un
 			# So Discord's domains get their own profile ahead of the general one (first match wins), and
 			# the rest keeps what already worked. Media rides non-standard TCP ports and voice is UDP
 			# 50000+, neither of which the standard profiles ever see — hence the extra ports above.
-			# The voice profile deliberately carries NO desync. It used to fake an IP-discovery packet,
-			# which never actually ran (the blob was referenced by name, so it was unavailable) — and the
-			# day it did run, voice broke with "no route": the server answers the decoy instead of the
-			# real discovery. It stays as a filter-only claim so the games profile below, which would
-			# otherwise swallow these ports, never sees Discord voice.
+			# Voice lives on two networks. Cloudflare servers (19294-19344) answer direct with no help. Google
+			# Cloud servers (35.217.x, 50000-50100) get the IP-discovery packet through and never answer —
+			# a channel pinned to one of them hangs on "RTC connecting" every time. A fake in front of the
+			# discovery opens them, but only a MEANINGLESS one: v2.42 sent a real discovery packet as the
+			# decoy and the server answered the decoy instead ("no route"). 74 zero bytes are the same size,
+			# the DPI takes them, the server ignores them — measured 2026-09-13, 0/N -> N/N on the pinned
+			# channel, answers seen from 35.217.1.66 and 35.217.9.94 with the tunnel rule switched off.
+			# The fake keys on the L7 match, which only the first datagrams carry; the filter-only claim
+			# after it holds the rest of the call so the games profile below never fakes into live RTP.
 			# The seqovl below carries the client's own 1785-byte TLS 1.3 ClientHello, but nothing here
 			# reaches the desktop updater: it sends 175 bytes of TLS 1.2 with no supported_versions and
 			# no ALPN, and that shape stays blocked. Thirteen variants were measured against it (seqovl
@@ -2368,7 +2372,7 @@ z2_strat_body() {   # $1=id -> the NFQWS2_OPT body (profile lines); empty for un
 			# and a control with no desync at all — every one of them hung, so the DPI is what blocks it,
 			# not this profile. That host belongs in the tunnel: applist preset `discord-updater`.
 			printf '%s
-' "${_gb}--filter-tcp=80 --filter-l7=http <HOSTLIST> --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5 --lua-desync=multisplit:pos=method+2 --new" '--filter-tcp=443 --filter-l7=tls --hostlist-domains=discord.com,discord.gg,discord.media,discordapp.com,discordapp.net,discordcdn.com,discord.app,discord.dev,discord.gift,discord.new,discord.store,discordstatus.com,dis.gd --payload=tls_client_hello --lua-desync=multisplit:pos=1:seqovl=568 --new' '--filter-tcp=2053,2083,2087,2096,8443 --filter-l7=tls --hostlist-domains=discord.media,discordapp.net --payload=tls_client_hello --lua-desync=multisplit:pos=1:seqovl=681 --new' '--filter-udp=3478,19294-19344,50000-50100 --filter-l7=discord,stun --new' "$_gm" '--filter-tcp=443 --filter-l7=tls <HOSTLIST> --payload=tls_client_hello --lua-desync=multidisorder:pos=1,midsld --new' "--filter-udp=443 --filter-l7=quic <HOSTLIST_NOAUTO> --payload=quic_initial --lua-desync=fake:blob=${_gv}:repeats=8${_gu:+ --new}"
+' "${_gb}--filter-tcp=80 --filter-l7=http <HOSTLIST> --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5 --lua-desync=multisplit:pos=method+2 --new" '--filter-tcp=443 --filter-l7=tls --hostlist-domains=discord.com,discord.gg,discord.media,discordapp.com,discordapp.net,discordcdn.com,discord.app,discord.dev,discord.gift,discord.new,discord.store,discordstatus.com,dis.gd --payload=tls_client_hello --lua-desync=multisplit:pos=1:seqovl=568 --new' '--filter-tcp=2053,2083,2087,2096,8443 --filter-l7=tls --hostlist-domains=discord.media,discordapp.net --payload=tls_client_hello --lua-desync=multisplit:pos=1:seqovl=681 --new' "$(z2_voice_fake)" "$Z2_VOICE_CLAIM" "$_gm" '--filter-tcp=443 --filter-l7=tls <HOSTLIST> --payload=tls_client_hello --lua-desync=multidisorder:pos=1,midsld --new' "--filter-udp=443 --filter-l7=quic <HOSTLIST_NOAUTO> --payload=quic_initial --lua-desync=fake:blob=${_gv}:repeats=8${_gu:+ --new}"
 			[ -n "$_gu" ] && printf '%s\n' "$_gu"
 			;;
 		default)
@@ -2396,6 +2400,10 @@ z2_strat_body() {   # $1=id -> the NFQWS2_OPT body (profile lines); empty for un
 '--filter-udp=443 --filter-l7=quic <HOSTLIST_NOAUTO> --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=2:cutoff=3' ;;
 	esac
 }
+# Discord voice profiles (see ytdiscord above). Shared with the install hook, which swaps them in for the
+# line earlier releases shipped.
+Z2_VOICE_CLAIM='--filter-udp=3478,19294-19344,50000-50100 --new'
+z2_voice_fake() { printf -- '--filter-udp=50000-50100 --filter-l7=discord,stun --payload=discord_ip_discovery,stun --lua-desync=fake:blob=0x%0148d:repeats=6 --new' 0; }
 # the live NFQWS2_OPT body — the multiline profile block between NFQWS2_OPT=" and its closing "
 z2_cur_opt_body() {
 	awk '/^NFQWS2_OPT="[[:space:]]*$/{s=1;next} s&&/^"[[:space:]]*$/{exit} s{print}' "$Z2_CONFIG" 2>/dev/null
@@ -3574,6 +3582,8 @@ nodes_json() {
 	fi
 	exit 0
 }
+# the current Discord voice profile lines, for the install hook's migration of older strategy bodies
+[ "$1" = "_z2voice" ] && { z2_voice_fake; printf '\n%s\n' "$Z2_VOICE_CLAIM"; exit 0; }
 [ "$1" = "_selfrestore" ] && {
 	[ -s "$SELF_PRESNAP" ] || { echo "!! no pre-update snapshot"; exit 1; }
 	snap_restore "$SELF_PRESNAP"; _rc=$?
