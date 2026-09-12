@@ -117,6 +117,85 @@ if [ -z "$(uci -q get nikki-unblock.config.mig_discord_web 2>/dev/null)" ]; then
 	[ "$_mg" -gt 0 ] && logger -t nikki-unblock "migration: released $_mg rule(s) of the retired discord-web preset"
 fi
 
+# --- DNS: replace nikki's upstream (Chinese) resolver defaults with the router's own -------------
+# nikki is a China-first package and ships DNS to match: AliDNS as default-nameserver, AliDNS DoH for
+# proxy/direct, and a `geosite:geolocation-!cn` policy pointing at DoH 1.1.1.1 / 8.8.8.8. On a Russian
+# line that is exactly backwards — those DoH endpoints are throttled, so the domains that would resolve
+# perfectly well LOCALLY (Kinopoisk, Yandex) time out, while proxied ones keep working because fake-ip
+# resolves them at the node. Reported from a fresh install; every stock install has it.
+#
+# The fix is the router's own resolver. That is safe precisely BECAUSE of fake-ip: a domain matched by
+# a rule never needs an honest local answer, so dnsmasq is enough and nothing depends on an upstream
+# we cannot reach. Runs once (flag) and only switches OFF entries that still hold the stock Chinese
+# values — someone who set their own resolver keeps it. IPv6 is deliberately left alone: both routers
+# this was verified on run dns_ipv6='1' and resolve fine, so it is not part of the problem.
+if [ -z "$(uci -q get nikki-unblock.config.mig_dns_local 2>/dev/null)" ] \
+	&& uci -q get nikki.mixin >/dev/null 2>&1; then
+	_ch=0
+	# 1. retire stock upstreams: any nameserver/policy section still pointing at AliDNS or the DoH pair
+	for _sec in nameserver nameserver_policy; do
+		_i=0
+		while uci -q get "nikki.@$_sec[$_i]" >/dev/null 2>&1; do
+			case " $(uci -q get "nikki.@$_sec[$_i].nameserver" 2>/dev/null) " in
+				*223.5.5.5*|*223.6.6.6*|*1.1.1.1*|*8.8.8.8*)
+					[ "$(uci -q get "nikki.@$_sec[$_i].enabled" 2>/dev/null)" = 0 ] || {
+						uci -q set "nikki.@$_sec[$_i].enabled=0"; _ch=1
+					} ;;
+			esac
+			_i=$((_i + 1))
+		done
+	done
+	# 2. make sure both kinds that mihomo actually consults point at the local resolver
+	for _t in default-nameserver nameserver; do
+		_found=""; _i=0
+		while uci -q get "nikki.@nameserver[$_i]" >/dev/null 2>&1; do
+			[ "$(uci -q get "nikki.@nameserver[$_i].type" 2>/dev/null)" = "$_t" ] && { _found="$_i"; break; }
+			_i=$((_i + 1))
+		done
+		if [ -z "$_found" ]; then
+			uci -q add nikki nameserver >/dev/null
+			uci -q set "nikki.@nameserver[-1].type=$_t"
+			uci -q set "nikki.@nameserver[-1].enabled=1"
+			uci -q add_list "nikki.@nameserver[-1].nameserver=127.0.0.1"
+			_ch=1
+		elif [ "$(uci -q get "nikki.@nameserver[$_found].nameserver" 2>/dev/null)" != "127.0.0.1" ]; then
+			uci -q delete "nikki.@nameserver[$_found].nameserver" 2>/dev/null
+			uci -q add_list "nikki.@nameserver[$_found].nameserver=127.0.0.1"
+			uci -q set "nikki.@nameserver[$_found].enabled=1"
+			_ch=1
+		else
+			[ "$(uci -q get "nikki.@nameserver[$_found].enabled" 2>/dev/null)" = 1 ] || {
+				uci -q set "nikki.@nameserver[$_found].enabled=1"; _ch=1
+			}
+		fi
+	done
+	# 3. the mixin switches that decide whether those sections are emitted at all
+	for _kv in dns_nameserver=1 dns_nameserver_policy=0 dns_proxy_server_nameserver_policy=0 \
+	           dns_direct_nameserver_follow_policy=0; do
+		_k=${_kv%%=*}; _v=${_kv##*=}
+		[ "$(uci -q get "nikki.mixin.$_k" 2>/dev/null)" = "$_v" ] || { uci -q set "nikki.mixin.$_k=$_v"; _ch=1; }
+	done
+	if [ "$_ch" = 1 ]; then
+		uci -q commit nikki
+		# The commit IS the fix — it takes effect the next time nikki starts. Applying it right now is
+		# optional, and on a tight router it is a bad trade: reload_service is `cleanup; start`, the two
+		# mihomo instances overlap, and the box this was written on (233 MB RAM, mihomo ~57 MB RSS) had
+		# the kernel OOM-kill mihomo doing exactly this mid-upgrade. So touch a running proxy only with
+		# real headroom; otherwise leave it for the next start and say so in the log.
+		_av=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null)
+		if ! pgrep -f /usr/bin/mihomo >/dev/null 2>&1; then
+			logger -t nikki-unblock "migration: DNS switched to the local resolver (nikki shipped Chinese upstreams)"
+		elif [ -n "$_av" ] && [ "$_av" -ge 262144 ]; then
+			[ -x /etc/init.d/nikki ] && /etc/init.d/nikki restart >/dev/null 2>&1
+			logger -t nikki-unblock "migration: DNS switched to the local resolver and applied (nikki shipped Chinese upstreams)"
+		else
+			logger -t nikki-unblock "migration: DNS switched to the local resolver; restart deferred, MemAvailable ${_av:-?} kB — applies on next nikki start"
+		fi
+	fi
+	uci -q set nikki-unblock.config.mig_dns_local='1'
+	uci -q commit nikki-unblock
+fi
+
 # Refresh the LuCI menu/index cache so the new entry shows up.
 rm -f /tmp/luci-indexcache* 2>/dev/null
 rm -rf /tmp/luci-modulecache 2>/dev/null
