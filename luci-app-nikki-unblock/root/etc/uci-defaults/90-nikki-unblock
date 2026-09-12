@@ -205,21 +205,26 @@ if [ -z "$(uci -q get nikki-unblock.config.mig_discord_updater 2>/dev/null)" ]; 
 fi
 
 # --- Discord voice on Google Cloud servers --------------------------------------------------------
-# Channels served from 35.217.x (UDP 50000-50100) never got an answer to the IP discovery, so they hung
-# on "RTC connecting"; a zero-filled fake in front of it opens them (why zeros: see z2_voice_fake in the
+# Channels served from 35.217.x (UDP 50000+) never got an answer to the IP discovery, so they hung on
+# "RTC connecting"; a zero-filled fake in front of it opens them (why zeros: see z2_voice_fake in the
 # CGI). Strategy bodies are only written when someone picks a strategy, so an install that already runs
-# ytdiscord keeps the old voice line forever unless it is swapped here. Only the exact lines earlier
-# releases wrote are replaced — a hand-edited voice profile is the user's and stays as it is.
+# ytdiscord keeps the old voice line forever unless it is swapped here. Only exact known lines are
+# replaced — the ones releases shipped, plus the two 50000-65535 variants applied by hand while this was
+# being debugged on 2026-09-12 — a voice profile edited any other way is the user's and stays as it is.
+# A body that already carries the discovery fake is left alone, so the claim line is never doubled.
 if [ -z "$(uci -q get nikki-unblock.config.mig_z2_voicefake 2>/dev/null)" ] && [ -x /www/cgi-bin/nikki-unblock ]; then
 	_vn=$(/www/cgi-bin/nikki-unblock _z2voice 2>/dev/null)
 	_vc=0
 	if [ "$(printf '%s\n' "$_vn" | grep -c .)" = 2 ]; then
 		for _f in /opt/zapret2/config /etc/nikki-unblock/z2-custom.opt; do
 			[ -f "$_f" ] || continue
+			grep -q 'payload=discord_ip_discovery' "$_f" && continue
 			# two lines: through ENVIRON, since busybox awk rejects a newline inside -v
 			NU_VN="$_vn" awk '
 				$0 == "--filter-udp=3478,19294-19344,50000-50100 --filter-l7=discord,stun --new" ||
-				$0 == "--filter-udp=3478,19294-19344,50000-50100 --filter-l7=discord,stun --lua-desync=fake:blob=discord-ip-discovery-with-port:repeats=6 --new" { print ENVIRON["NU_VN"]; hit=1; next }
+				$0 == "--filter-udp=3478,19294-19344,50000-50100 --filter-l7=discord,stun --lua-desync=fake:blob=discord-ip-discovery-with-port:repeats=6 --new" ||
+				$0 == "--filter-udp=3478,19294-19344,50000-65535 --filter-l7=discord,stun --new" ||
+				$0 == "--filter-udp=3478,19294-19344,50000-65535 --new" { print ENVIRON["NU_VN"]; hit=1; next }
 				{ print }
 				END { exit hit ? 0 : 1 }
 			' "$_f" > "$_f.nu-voice" && { cat "$_f.nu-voice" > "$_f"; _vc=$((_vc + 1)); }
