@@ -2,3 +2,6 @@
 # which chokes on CRLF ("syntax error: expecting do"). Blobs were always LF;
 # this kills the need to remember `tr -d '\r'` when deploying a working-copy file.
 * text=auto eol=lf
+
+# The games decoy blob is a captured packet — never let eol normalisation near it.
+*.bin binary

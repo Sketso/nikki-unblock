@@ -147,5 +147,15 @@
   {
     "id": "vendors",
     "name": "ИТ-вендоры: драйверы и ПО"
+  },
+  {
+    "id": "wardogs",
+    "z2_exclude": true,
+    "name": "Wardogs: вход в игру",
+    "list": true,
+    "note": {
+      "ru": "Включите, если клиент висит на «Вход в систему». Серверы логина уходят в туннель — обход DPI их не открывает, проверено на живой линии. Сам матч в туннель НЕ идёт: игровой трафик остаётся напрямую и его берёт на себя стратегия «YouTube + Discord + игры».",
+      "en": "Enable if the client hangs on sign-in. The login backend goes through the tunnel — the DPI bypass does not open it, measured on a live line. Gameplay does NOT go through the tunnel: it stays direct and is handled by the \"YouTube + Discord + games\" strategy."
+    }
   }
 ]

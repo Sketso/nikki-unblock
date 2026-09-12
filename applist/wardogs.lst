@@ -1,0 +1,7 @@
+# Wardogs / Pragma game backend — login and matchmaking, through the tunnel.
+# Measured 2026-09-12: the game client's own TLS ClientHello to these hosts gets no ServerHello at
+# all, and no desync opens it — the strategy's games profile (multisplit pos=1,midsld) carries curl
+# to a 404 but not the client itself. The tunnel is the only thing that logs you in.
+# Gameplay is NOT here: that is UDP to bare IPs, it has no hostname to match, and zapret2's games
+# profile handles it directly — routing it through a node would only add latency.
+pragmaengine.com

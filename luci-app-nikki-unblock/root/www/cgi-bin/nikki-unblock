@@ -2181,12 +2181,25 @@ z2_gv_blob() {
 	[ -n "$_b" ] && echo "${_b%.bin}" || echo "fake_default_quic"
 }
 z2_strat_ids() { echo "ytdiscord default youtube aggressive light"; }
+# Decoy payload for the games profile. The CONTENT matters, not just the size: measured against a
+# live line, zapret2's own quic_initial_* blobs leave the server silent, so does a synthetic
+# QUIC-shaped random datagram of identical length, and udplen does not open it either. Only a real
+# captured game handshake draws a reply — so the package ships one (MIT, from
+# Flowseal/zapret-discord-youtube, see NOTICE). Echoes a PATH, not a name: a blob referenced by name
+# alone is silently unavailable unless --blob loads it. Missing file means the games profile is
+# dropped entirely rather than emitted with a decoy that is known not to work.
+Z2_GAME_BLOB="/usr/share/nikki-unblock/game_udp.bin"
+z2_game_blob() { [ -s "$Z2_GAME_BLOB" ] && echo "$Z2_GAME_BLOB"; }
 # Extra interception ports a strategy needs, "TCP|UDP". Profiles are only ever offered packets the
 # firewall actually queues, so a Discord profile bound to 2053/50000-50100 is dead weight unless these
 # are widened — that was the quiet reason Discord stayed blocked with its preset switched on.
+# ytdiscord also carries the games profile, whose traffic lands on arbitrary high UDP ports (measured:
+# 4192, but it is a pool, not a constant) — hence the whole 1024-65535 range, which also subsumes the
+# Discord voice ranges. The cost is real: first packets of every high-port UDP flow now visit
+# userspace. The fake itself stays cheap, because the profile only fires on unknown payloads.
 z2_strat_ports() {
 	case "$1" in
-		ytdiscord) echo "80,443,2053,2083,2087,2096,8443|443,3478,19294-19344,50000-50100" ;;
+		ytdiscord) echo "80,443,2053,2083,2087,2096,8443|443,3478,1024-65535" ;;
 		*)         echo "80,443|443" ;;
 	esac
 }
@@ -2199,6 +2212,21 @@ z2_strat_body() {   # $1=id -> the NFQWS2_OPT body (profile lines); empty for un
 	# these domains take their own profile ahead of the general one (first match wins). `light`
 	# needs no copy: its general TLS profile already IS this desync.
 	_gm='--filter-tcp=443 --filter-l7=tls --hostlist-domains=pragmaengine.com,firstlook.gg,epicgames.dev --payload=tls_client_hello --lua-desync=multisplit:pos=1,midsld --new'
+	# Gameplay itself: a proprietary UDP protocol with no hostname and no L7 signature, so nothing can
+	# be matched or split — the only lever is a burst of fake datagrams on the first packets, which is
+	# what the desktop "Game Filter" does. Two things make or break it, both silent when wrong:
+	#   * the blob must be loaded by --blob=<name>:@<path>; a bare blob=<name> is simply unavailable,
+	#   * `payload=` belongs on the FUNCTION, not just the profile. `fake` defaults to `known`, and
+	#     game traffic is `unknown`, so without it the fake is skipped and nothing reaches the wire.
+	# Verified on a live line: 10 fakes then the real packet, and the server answers. `unknown` (not
+	# `all`) keeps the burst away from torrents, WireGuard and QUIC, which zapret2 recognises.
+	# --blob must sit on the FIRST profile line: nfqws2 refuses to start when it follows a --new.
+	_gb=""; _gu=""
+	_gf=$(z2_game_blob)
+	[ -n "$_gf" ] && {
+		_gb="--blob=game_udp:@$_gf "
+		_gu='--filter-udp=1024-65535 --payload=all --lua-desync=fake:blob=game_udp:repeats=10:payload=unknown'
+	}
 	case "$1" in
 		ytdiscord)
 			# One desync does not fit both services: measured on a live router, multidisorder carries
@@ -2207,7 +2235,9 @@ z2_strat_body() {   # $1=id -> the NFQWS2_OPT body (profile lines); empty for un
 			# the rest keeps what already worked. Media rides non-standard TCP ports and voice is UDP
 			# 50000+, neither of which the standard profiles ever see — hence the extra ports above.
 			printf '%s
-' '--filter-tcp=80 --filter-l7=http <HOSTLIST> --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5 --lua-desync=multisplit:pos=method+2 --new' '--filter-tcp=443 --filter-l7=tls --hostlist-domains=discord.com,discord.gg,discord.media,discordapp.com,discordapp.net,discordcdn.com,discord.app,discord.dev,discord.gift,discord.new,discord.store,discordstatus.com,dis.gd --payload=tls_client_hello --lua-desync=multisplit:pos=1:seqovl=568 --new' '--filter-tcp=2053,2083,2087,2096,8443 --filter-l7=tls --hostlist-domains=discord.media,discordapp.net --payload=tls_client_hello --lua-desync=multisplit:pos=1:seqovl=681 --new' '--filter-udp=3478,19294-19344,50000-50100 --filter-l7=discord,stun --lua-desync=fake:blob=discord-ip-discovery-with-port:repeats=6 --new' "$_gm" '--filter-tcp=443 --filter-l7=tls <HOSTLIST> --payload=tls_client_hello --lua-desync=multidisorder:pos=1,midsld --new' "--filter-udp=443 --filter-l7=quic <HOSTLIST_NOAUTO> --payload=quic_initial --lua-desync=fake:blob=${_gv}:repeats=8" ;;
+' "${_gb}--filter-tcp=80 --filter-l7=http <HOSTLIST> --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5 --lua-desync=multisplit:pos=method+2 --new" '--filter-tcp=443 --filter-l7=tls --hostlist-domains=discord.com,discord.gg,discord.media,discordapp.com,discordapp.net,discordcdn.com,discord.app,discord.dev,discord.gift,discord.new,discord.store,discordstatus.com,dis.gd --payload=tls_client_hello --lua-desync=multisplit:pos=1:seqovl=568 --new' '--filter-tcp=2053,2083,2087,2096,8443 --filter-l7=tls --hostlist-domains=discord.media,discordapp.net --payload=tls_client_hello --lua-desync=multisplit:pos=1:seqovl=681 --new' '--filter-udp=3478,19294-19344,50000-50100 --filter-l7=discord,stun --lua-desync=fake:blob=discord-ip-discovery-with-port:repeats=6 --new' "$_gm" '--filter-tcp=443 --filter-l7=tls <HOSTLIST> --payload=tls_client_hello --lua-desync=multidisorder:pos=1,midsld --new' "--filter-udp=443 --filter-l7=quic <HOSTLIST_NOAUTO> --payload=quic_initial --lua-desync=fake:blob=${_gv}:repeats=8${_gu:+ --new}"
+			[ -n "$_gu" ] && printf '%s\n' "$_gu"
+			;;
 		default)
 			printf '%s\n' \
 '--filter-tcp=80 --filter-l7=http <HOSTLIST> --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5 --lua-desync=multisplit:pos=method+2 --new' \
