@@ -2234,6 +2234,12 @@ z2_strat_body() {   # $1=id -> the NFQWS2_OPT body (profile lines); empty for un
 			# So Discord's domains get their own profile ahead of the general one (first match wins), and
 			# the rest keeps what already worked. Media rides non-standard TCP ports and voice is UDP
 			# 50000+, neither of which the standard profiles ever see — hence the extra ports above.
+			# The seqovl below carries the client's own 1785-byte TLS 1.3 ClientHello, but nothing here
+			# reaches the desktop updater: it sends 175 bytes of TLS 1.2 with no supported_versions and
+			# no ALPN, and that shape stays blocked. Thirteen variants were measured against it (seqovl
+			# 100-681, zero and TLS-pattern fills, fake+fooling=ts, nodrop, hostfakesplit, multidisorder)
+			# and a control with no desync at all — every one of them hung, so the DPI is what blocks it,
+			# not this profile. That host belongs in the tunnel: applist preset `discord-updater`.
 			printf '%s
 ' "${_gb}--filter-tcp=80 --filter-l7=http <HOSTLIST> --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5 --lua-desync=multisplit:pos=method+2 --new" '--filter-tcp=443 --filter-l7=tls --hostlist-domains=discord.com,discord.gg,discord.media,discordapp.com,discordapp.net,discordcdn.com,discord.app,discord.dev,discord.gift,discord.new,discord.store,discordstatus.com,dis.gd --payload=tls_client_hello --lua-desync=multisplit:pos=1:seqovl=568 --new' '--filter-tcp=2053,2083,2087,2096,8443 --filter-l7=tls --hostlist-domains=discord.media,discordapp.net --payload=tls_client_hello --lua-desync=multisplit:pos=1:seqovl=681 --new' '--filter-udp=3478,19294-19344,50000-50100 --filter-l7=discord,stun --lua-desync=fake:blob=discord-ip-discovery-with-port:repeats=6 --new' "$_gm" '--filter-tcp=443 --filter-l7=tls <HOSTLIST> --payload=tls_client_hello --lua-desync=multidisorder:pos=1,midsld --new' "--filter-udp=443 --filter-l7=quic <HOSTLIST_NOAUTO> --payload=quic_initial --lua-desync=fake:blob=${_gv}:repeats=8${_gu:+ --new}"
 			[ -n "$_gu" ] && printf '%s\n' "$_gu"

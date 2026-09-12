@@ -149,6 +149,16 @@
     "name": "ИТ-вендоры: драйверы и ПО"
   },
   {
+    "id": "discord-updater",
+    "z2_exclude": true,
+    "name": "Discord: запуск и обновление",
+    "list": true,
+    "note": {
+      "ru": "Включите, если Discord висит на «Checking updates...» и дальше не идёт. В туннель уходит ОДИН хост обновлений — обход DPI его не открывает: апдейтер шлёт короткое рукопожатие TLS 1.2, которое не пробил ни один вариант десинка. Сам Discord, включая голос, остаётся напрямую.",
+      "en": "Enable if Discord hangs on \"Checking updates...\" and never gets past it. Exactly ONE host goes through the tunnel — the DPI bypass cannot open it, because the updater sends a short TLS 1.2 handshake that no desync variant defeats. Discord itself, voice included, stays direct."
+    }
+  },
+  {
     "id": "wardogs",
     "z2_exclude": true,
     "name": "Wardogs: вход в игру",
