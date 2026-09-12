@@ -1,0 +1,7 @@
+# Wardogs and other Epic Online Services / Pragma titles — the login and matchmaking backends.
+# These are the endpoints the client stalls on: the TLS ClientHello leaves and nothing comes back.
+# The strategy carries a dedicated profile for them (multisplit pos=1,midsld) — the general TLS
+# profiles do not open them. Gameplay itself is UDP to bare IPs and needs no hostlist.
+pragmaengine.com
+firstlook.gg
+epicgames.dev

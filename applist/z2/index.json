@@ -2,5 +2,6 @@
   { "id": "youtube", "name": "YouTube" },
   { "id": "discord", "name": "Discord" },
   { "id": "twitch",  "name": "Twitch" },
-  { "id": "twitter", "name": "Twitter / X" }
+  { "id": "twitter", "name": "Twitter / X" },
+  { "id": "wardogs", "name": "Wardogs / Epic Online Services" }
 ]
