@@ -1322,11 +1322,15 @@ update_start() {   # $1=op(self|nikki|geo|z2|all|selfrollback) $2=tag(self only)
 			# format, and "pre-update state under newer code" is just the ordinary moment before any upgrade.
 			# The package goes second. Its flags come back with the state, so the next forward update re-runs
 			# the migrations cleanly instead of skipping them as already done.
-			printf '\techo ">> restoring settings saved before the update"; "%s" _selfrestore || rc=1\n' "$SELF"
+			# A failed restore has already put the current settings back, so stop there: installing the old
+			# package over the NEW settings is the one combination the rollback exists to avoid.
+			printf '\techo ">> restoring settings saved before the update"\n'
+			printf '\tif "%s" _selfrestore; then\n' "$SELF"
 			# the older package's own install hook takes rollback points too — it must not overwrite this one
-			printf '\t: > /tmp/nu-rollback-in-progress\n'
-			printf '\techo ">> installing %s"; apk add --allow-untrusted /tmp/nu-rb.apk || rc=$?\n' "$_rbv"
-			printf '\trm -f /tmp/nu-rollback-in-progress\n'
+			printf '\t\t: > /tmp/nu-rollback-in-progress\n'
+			printf '\t\techo ">> installing %s"; apk add --allow-untrusted /tmp/nu-rb.apk || rc=$?\n' "$_rbv"
+			printf '\t\trm -f /tmp/nu-rollback-in-progress\n'
+			printf '\telse rc=1; echo "!! settings could not be restored — the current version and settings were left as they were"; fi\n'
 			printf '\tif [ "$rc" = 0 ]; then rm -f "$PS" "$PS.ver"; echo ">> done. This was a one-step undo, so that rollback point is now used up"; else echo "!! rollback incomplete — the rollback point is kept, try again"; fi\n'
 			printf 'else rc=1; echo "!! could not download %s — nothing was changed"; fi\n' "$_rbt"
 			printf 'rm -f /tmp/nu-rb.apk\n' ;;
@@ -2613,8 +2617,16 @@ restore_backup() {
 		[ -f "$1/mixin.yaml" ] && cp "$1/mixin.yaml" "$MIXIN_FILE"
 	}
 	_apply_store "$_rd"
-	apply_nikki; sleep 6
-	if ! pgrep -f /usr/bin/mihomo >/dev/null; then
+	apply_nikki
+	# Wait for mihomo to STAY up, not for one lucky look. nikki's reload overlaps the old and new mihomo, and
+	# on a ~256 MB router the kernel OOM-kills one of them; procd respawns it a few seconds later. A single
+	# check at 6 s caught exactly that gap and threw away a good restore (the first real "undo update" did).
+	_up=0; _w=0
+	while [ "$_w" -lt 30 ]; do
+		sleep 3; _w=$((_w + 3))
+		if pgrep -f /usr/bin/mihomo >/dev/null; then _up=$((_up + 1)); [ "$_up" -ge 3 ] && break; else _up=0; fi
+	done
+	if [ "$_up" -lt 3 ]; then
 		_pr="/tmp/nu-pr.$$"; rm -rf "$_pr"; mkdir -p "$_pr"; tar -xzf /tmp/nu-prerestore.tar.gz -C "$_pr" 2>/dev/null
 		_apply_store "$_pr"; apply_nikki; rm -rf "$_pr"
 		return 2

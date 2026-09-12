@@ -60,6 +60,8 @@ jobs:
             ver=$(printf '%s' "$ver" | sed -E "s/-(beta|rc)\.([0-9]+)\$/${sep}\1\2/") ;;
           esac
           sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=$ver/" luci-app-nikki-unblock/Makefile
+          # the post-install script reads this: apk's database still shows the OLD package while it runs
+          printf '%s\n' "$ver" > luci-app-nikki-unblock/root/usr/share/nikki-unblock/version
           grep '^PKG_VERSION' luci-app-nikki-unblock/Makefile
 
       - name: Build package (OpenWrt SDK)

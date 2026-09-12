@@ -13,7 +13,10 @@ chmod 700 /etc/nikki-unblock /etc/nikki-unblock/nodes /etc/nikki-unblock/provide
 # or LuCI Software goes around the panel, so the snapshot is taken here instead — and it has to happen
 # BEFORE any migration further down: apk has already swapped the files, but nothing has touched the
 # config yet, so this is still exactly the state of the version being replaced.
-_nu_now=$(apk list -I 2>/dev/null | sed -n 's/^luci-app-nikki-unblock-\([^ ]*\)-r[0-9]* .*/\1/p' | head -1)
+# The version comes from a file the package ships: while this script runs, apk's database still lists
+# the package being REPLACED (2.43.0_beta1 logged itself as "installed 2.42.0").
+_nu_now=$(head -1 /usr/share/nikki-unblock/version 2>/dev/null)
+[ -n "$_nu_now" ] || _nu_now=$(apk list -I 2>/dev/null | sed -n 's/^luci-app-nikki-unblock-\([^ ]*\)-r[0-9]* .*/\1/p' | head -1)
 _nu_prev=$(uci -q get nikki-unblock.config.last_ver 2>/dev/null)
 if [ -f /tmp/nu-selfsnap-done ]; then
 	rm -f /tmp/nu-selfsnap-done                 # the panel already took it

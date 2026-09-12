@@ -70,7 +70,16 @@ for j in applist/index.json applist/z2/index.json applist/z2/version.json; do
 	fi
 done
 
-# --- 5. committed blobs must be LF (ash chokes on CRLF) --------------------
+# --- 5. the shipped version file must match the Makefile (CI re-stamps both from the tag) ---
+mk_ver=$(sed -n 's/^PKG_VERSION:=//p' luci-app-nikki-unblock/Makefile)
+file_ver=$(head -1 luci-app-nikki-unblock/root/usr/share/nikki-unblock/version 2>/dev/null)
+if [ -n "$mk_ver" ] && [ "$mk_ver" = "$file_ver" ]; then
+	ok "version file matches Makefile ($mk_ver)"
+else
+	err "usr/share/nikki-unblock/version ('$file_ver') != Makefile PKG_VERSION ('$mk_ver')"
+fi
+
+# --- 6. committed blobs must be LF (ash chokes on CRLF) --------------------
 if git ls-files --eol | grep -E 'i/(crlf|mixed)'; then
 	err "CRLF line endings in the index (see list above)"
 else
