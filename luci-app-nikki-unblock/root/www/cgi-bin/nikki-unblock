@@ -592,6 +592,123 @@ config_json() {
 
 apply_nikki() { /etc/init.d/nikki reload >/dev/null 2>&1; }
 
+# Apply a change that touched ONLY nikki's @rule sections — without restarting nikki.
+#
+# A nikki reload is `cleanup; start`: the firewall rules are torn down and rebuilt and a second mihomo starts
+# before the first one exits. Every device on the network loses every connection (calls, games, VPN sessions,
+# downloads) for ~10 s, and on a ~256 MB router the overlap has OOM-killed mihomo. For a rule change none of
+# that is needed: mihomo reloads its config over its API in the same process, open connections survive and
+# fake-ip mappings are kept (measured on the dev router: same pid, a 4.7 MB/s download carried on through it).
+#
+# The rule list is rebuilt exactly the way nikki's start_service builds it — `.rules = .nikki-rules + .rules`,
+# nikki-rules from its own mixin.uc over UCI, the rest from the profile — and dropped into the running
+# config; nothing else in the config is touched. Anything outside that known shape falls back to the full
+# reload, and so does any failure: mihomo rejects an invalid config with 400 and keeps running the old one,
+# so the fallback lands in exactly the old behaviour, including the callers' own revert-on-failure checks.
+# nikki-unblock.config.hot_rules=0 turns the fast path off.
+apply_nikki_rules() {
+	_hot_rules && return 0
+	apply_nikki
+}
+_hot_rules() {
+	[ "$(uci -q get nikki-unblock.config.hot_rules 2>/dev/null)" = 0 ] && return 1
+	[ -f /etc/nikki/scripts/include.sh ] && command -v yq >/dev/null 2>&1 && command -v ucode >/dev/null 2>&1 || return 1
+	pgrep -f /usr/bin/mihomo >/dev/null 2>&1 || return 1
+	[ "$(uci -q get nikki.config.core_only 2>/dev/null)" = 1 ] && return 1
+	_hr="/tmp/nu-hot.$$"; rm -rf "$_hr"; mkdir -p "$_hr"
+	# a subshell: include.sh defines generic names (HOME_DIR, RUN_DIR, …) that must not leak into the CGI
+	( . /etc/nikki/scripts/include.sh || exit 1
+	  _p=$(uci -q get nikki.config.profile 2>/dev/null)
+	  case "$_p" in
+		file:*)         _pf="$PROFILES_DIR/${_p#file:}" ;;
+		subscription:*) _pf="$SUBSCRIPTIONS_DIR/${_p#subscription:}.yaml" ;;
+		*) exit 1 ;;
+	  esac
+	  [ -f "$_pf" ] && [ -f "$RUN_PROFILE_PATH" ] && [ -f "$MIXIN_UC" ] || exit 1
+	  # a mixin file carrying rules of its own would take part in the merge: not the shape handled here
+	  if [ "$(uci -q get nikki.mixin.mixin_file_content 2>/dev/null)" = 1 ] && [ -f "$MIXIN_FILE_PATH" ]; then
+		yq -M -e 'has("rules") or has("nikki-rules")' "$MIXIN_FILE_PATH" >/dev/null 2>&1 && exit 1
+	  fi
+	  ucode -S "$MIXIN_UC" 2>/dev/null | yq -M -p json -o json '.nikki-rules // []' > "$_hr/nikki.json" || exit 1
+	  yq -M -o json '(.rules // []) | explode(.)' "$_pf" > "$_hr/profile.json" || exit 1
+	  yq -M -o json '.rules // []' "$RUN_PROFILE_PATH" > "$_hr/old.json" || exit 1
+	  # the running list must still END with the profile's own rules, or it was not built the way we assume
+	  _pn=$(yq -M '. | length' "$_hr/profile.json")
+	  if [ "${_pn:-0}" -gt 0 ]; then
+		yq -M -o json ".[-$_pn:]" "$_hr/old.json" > "$_hr/tail.json" && cmp -s "$_hr/tail.json" "$_hr/profile.json" || exit 1
+	  fi
+	  A="$_hr/nikki.json" B="$_hr/profile.json" yq -M -o json -n 'load(env(A)) + load(env(B))' > "$_hr/new.json" || exit 1
+	  printf '%s\n' "$RUN_PROFILE_PATH" > "$_hr/run"
+	) || { rm -rf "$_hr"; return 1; }
+	_run=$(cat "$_hr/run")
+	cmp -s "$_hr/old.json" "$_hr/new.json" && { rm -rf "$_hr"; return 0; }   # nothing changed for mihomo
+	NEWR="$_hr/new.json" yq -M '.rules = load(env(NEWR))' "$_run" > "$_hr/config.yaml" || { rm -rf "$_hr"; return 1; }
+	# the whole config as a payload: mihomo only accepts a PATH under its own home directory
+	CFGF="$_hr/config.yaml" yq -M -o json -n '{"payload": load_str(env(CFGF))}' > "$_hr/body.json" || { rm -rf "$_hr"; return 1; }
+	_code=$(curl -s -m 20 -o "$_hr/resp" -w '%{http_code}' -X PUT -H "Authorization: Bearer $(mihomo_secret)" \
+		-H 'Content-Type: application/json' --data-binary @"$_hr/body.json" "$MIHOMO_API/configs?force=true" 2>/dev/null)
+	if [ "$_code" != 204 ]; then
+		logger -t nikki-unblock "rules: mihomo refused the hot reload ($_code: $(head -c 160 "$_hr/resp" 2>/dev/null)) -> full nikki reload"
+		rm -rf "$_hr"; return 1
+	fi
+	cp -f "$_hr/config.yaml" "$_run"   # keep the file mihomo was started from in step with what it runs
+	_want=$(yq -M '. | length' "$_hr/new.json")
+	_have=$(curl -s -m 6 -H "Authorization: Bearer $(mihomo_secret)" "$MIHOMO_API/rules" 2>/dev/null | jsonfilter -e '@.rules[*].type' 2>/dev/null | grep -c .)
+	if [ "$_have" != "$_want" ]; then
+		logger -t nikki-unblock "rules: hot reload left $_have of $_want rules -> full nikki reload"
+		rm -rf "$_hr"; return 1
+	fi
+	_hot_recheck_groups
+	_hot_close_changed "$_hr/old.json" "$_hr/new.json"
+	logger -t nikki-unblock "rules applied without restarting nikki ($_want rules)"
+	rm -rf "$_hr"; return 0
+}
+# A config reload rebuilds every proxy group, and a fallback/url-test group forgets which of its exits are dead:
+# it hands new connections to the first one in its list until its next health check, minutes away. On the
+# dev router that first exit is unreachable, so every NEW tunnel connection failed for ~6 s after each apply
+# (a full nikki reload has the same gap — it just hides inside its own 20 s). Checking the groups right away
+# closes it: all exits of all such groups are probed in parallel, so the wait is one short timeout.
+_hot_recheck_groups() {
+	_sec=$(mihomo_secret)
+	curl -s -m 6 -H "Authorization: Bearer $_sec" "$MIHOMO_API/proxies" 2>/dev/null \
+		| jsonfilter -e '@.proxies[@.type="Fallback"].name' -e '@.proxies[@.type="URLTest"].name' 2>/dev/null \
+		| { while IFS= read -r _g; do
+			[ -n "$_g" ] || continue
+			curl -s -m 5 -o /dev/null -H "Authorization: Bearer $_sec" \
+				"$MIHOMO_API/group/$(urlenc_all "$_g")/delay?url=http%3A%2F%2Fcp.cloudflare.com%2Fgenerate_204&timeout=2500" 2>/dev/null &
+		  done
+		  wait; }   # inside the braces: the checks are children of the pipeline's subshell, not of this function
+}
+# A rule only decides NEW connections. One already open to a domain that just changed route — typically the
+# stalled one that made the user add the domain — would stay on the old path, so close those and let the app
+# reconnect by the new rule. Only rules that name a host or a single IP can be matched to a connection.
+_hot_close_changed() {   # $1 = old rules json, $2 = new rules json
+	yq -M -r -o yaml '.[]' "$1" > "$1.l" 2>/dev/null
+	yq -M -r -o yaml '.[]' "$2" > "$2.l" 2>/dev/null
+	# rules present on one side only, in either direction (added AND removed both change a route)
+	awk 'NR==FNR { o[$0] = 1; next } { if ($0 in o) delete o[$0]; else print } END { for (k in o) print k }' "$1.l" "$2.l" \
+		| awk -F, '
+			$1=="DOMAIN" || $1=="DOMAIN-SUFFIX" || $1=="DOMAIN-KEYWORD" { print $1 " " tolower($2) }
+			$1=="IP-CIDR" && $2 ~ /\/32$/ { sub(/\/32$/, "", $2); print "IP " $2 }' | sort -u > "$2.m"
+	[ -s "$2.m" ] || return 0
+	_sec=$(mihomo_secret)
+	curl -s -m 6 -H "Authorization: Bearer $_sec" "$MIHOMO_API/connections" 2>/dev/null \
+		| jsonfilter -e '@.connections[*]' 2>/dev/null | sed 's/": /":/g' \
+		| awk -v mf="$2.m" '
+			BEGIN { while ((getline l < mf) > 0) { split(l, p, " "); t[++n] = p[1]; v[n] = p[2] } }
+			function g(k) { if (match($0, "\"" k "\":\"[^\"]*\"")) return substr($0, RSTART+length(k)+4, RLENGTH-length(k)-5); return "" }
+			{ id = g("id"); h = tolower(g("host")); if (h == "") h = tolower(g("sniffHost")); ip = g("destinationIP")
+			  for (i = 1; i <= n; i++) {
+				if ((t[i] == "DOMAIN" && h == v[i]) ||
+				    (t[i] == "DOMAIN-SUFFIX" && (h == v[i] || (length(h) > length(v[i]) && substr(h, length(h)-length(v[i])) == "." v[i]))) ||
+				    (t[i] == "DOMAIN-KEYWORD" && index(h, v[i]) > 0) ||
+				    (t[i] == "IP" && ip == v[i])) { print id; break }
+			  } }' \
+		| while IFS= read -r _id; do
+			[ -n "$_id" ] && curl -s -m 4 -o /dev/null -X DELETE -H "Authorization: Bearer $_sec" "$MIHOMO_API/connections/$_id" 2>/dev/null
+		done
+}
+
 # ---- preset sync (source-tagged rules) -------------------------------------
 # Rules added by a domain-list preset carry `option src '<id> ...'`. nikki's mixin.uc reads only
 # type/matcher/node/enabled, so the extra option is ignored — safe. Lets sync remove domains that
@@ -838,7 +955,7 @@ sync_all() {
 		fi
 		_si=$((_si + 1))
 	done
-	[ $((SYNC_ADDED + SYNC_REMOVED + SYNC_FACETS + SYNC_FACETS_DEL)) -gt 0 ] && { uci commit nikki; apply_nikki; }
+	[ $((SYNC_ADDED + SYNC_REMOVED + SYNC_FACETS + SYNC_FACETS_DEL)) -gt 0 ] && { uci commit nikki; apply_nikki_rules; }
 	snap_done
 	rm -f "$PRESET_CACHE"   # applist lists were just re-fetched — drop the display cache so the UI shows fresh
 	logger -t nikki-unblock "autosync: домены +$SYNC_ADDED -$SYNC_REMOVED, категории/IP +$SYNC_FACETS -$SYNC_FACETS_DEL"
@@ -949,7 +1066,7 @@ preset_apply_run() {   # $1=id $2=on $3=cat $4=geoip $5=ips $6=node $7=lists $8=
 			done
 			_ch=1
 		fi
-		[ "$_ch" = 1 ] && { uci commit nikki; apply_nikki; }
+		[ "$_ch" = 1 ] && { uci commit nikki; apply_nikki_rules; }
 	fi
 	if [ -n "$_lists" ]; then
 		_pop_write list 0 0
@@ -958,11 +1075,11 @@ preset_apply_run() {   # $1=id $2=on $3=cat $4=geoip $5=ips $6=node $7=lists $8=
 		if [ "$PA_ON" = 1 ]; then
 			SYNC_ADDED=0; SYNC_REMOVED=0
 			for _lid in $_lists; do do_preset_sync "$_lid"; done
-			[ $((SYNC_ADDED + SYNC_REMOVED)) -gt 0 ] && { uci commit nikki; apply_nikki; }
+			[ $((SYNC_ADDED + SYNC_REMOVED)) -gt 0 ] && { uci commit nikki; apply_nikki_rules; }
 		else
 			OFF_REMOVED=0
 			for _lid in $_lists; do do_preset_off "$_lid"; done
-			[ "$OFF_REMOVED" -gt 0 ] && { uci commit nikki; apply_nikki; }
+			[ "$OFF_REMOVED" -gt 0 ] && { uci commit nikki; apply_nikki_rules; }
 		fi
 	fi
 	_ok=1; pgrep -f /usr/bin/mihomo >/dev/null 2>&1 || _ok=0
@@ -3825,7 +3942,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		if [ "$(rule_exists "$rtype" "$val")" = 1 ]; then
 			json_header; printf '{"ok":true,"dup":true}'; exit 0
 		fi
-		add_rule "$rtype" "$val" "$rnode"; uci commit nikki; apply_nikki
+		add_rule "$rtype" "$val" "$rnode"; uci commit nikki; apply_nikki_rules
 		# a bad geoip code can break the config — revert if mihomo went down
 		if [ "$rtype" = GEOIP ] && ! pgrep -f /usr/bin/mihomo >/dev/null; then
 			delete_rule GEOIP "$val"; uci commit nikki; apply_nikki
@@ -3844,7 +3961,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			add_domain "$d"; added=$((added + 1))
 		done < "$tmp"
 		rm -f "$tmp"
-		[ "$added" -gt 0 ] && { uci commit nikki; apply_nikki; }
+		[ "$added" -gt 0 ] && { uci commit nikki; apply_nikki_rules; }
 		json_header; printf '{"ok":true,"added":%d,"dup":%d}' "$added" "$dup"; exit 0
 
 		;;
@@ -3857,7 +3974,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			if [ "$(domain_exists "$d")" = 1 ]; then delete_domain "$d"; removed=$((removed + 1)); fi
 		done < "$tmp"
 		rm -f "$tmp"
-		[ "$removed" -gt 0 ] && { uci commit nikki; apply_nikki; }
+		[ "$removed" -gt 0 ] && { uci commit nikki; apply_nikki_rules; }
 		json_header; printf '{"ok":true,"removed":%d}' "$removed"; exit 0
 
 		;;
@@ -3881,7 +3998,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			[ "$(domain_exists "$d")" = 1 ] || { add_domain "$d"; added=$((added + 1)); }
 		done < "$want"
 		rm -f "$want" "$cur"
-		[ $((removed + added)) -gt 0 ] && { uci commit nikki; apply_nikki; }
+		[ $((removed + added)) -gt 0 ] && { uci commit nikki; apply_nikki_rules; }
 		json_header; printf '{"ok":true,"added":%d,"removed":%d}' "$added" "$removed"; exit 0
 
 		;;
@@ -3889,7 +4006,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		idx=$(get_param idx | sed 's/[^0-9]//g')
 		[ -z "$idx" ] && { json_header; printf '{"ok":false,"error":"bad idx"}'; exit 0; }
 		uci delete "nikki.@rule[$idx]" 2>/dev/null
-		uci commit nikki; apply_nikki
+		uci commit nikki; apply_nikki_rules
 		json_header; printf '{"ok":true}'; exit 0
 
 		;;
@@ -3900,7 +4017,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		[ -z "$idxs" ] && { json_header; printf '{"ok":false,"error":"empty"}'; exit 0; }
 		n=0
 		for i in $idxs; do uci delete "nikki.@rule[$i]" 2>/dev/null && n=$((n + 1)); done
-		uci commit nikki; apply_nikki
+		uci commit nikki; apply_nikki_rules
 		json_header; printf '{"ok":true,"removed":%d}' "$n"; exit 0
 
 		;;
@@ -3909,7 +4026,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		cur=$(uci -q get "nikki.@rule[$idx].enabled"); [ -z "$cur" ] && cur=1
 		[ "$cur" = 1 ] && new=0 || new=1
 		uci set "nikki.@rule[$idx].enabled=$new"
-		uci commit nikki; apply_nikki
+		uci commit nikki; apply_nikki_rules
 		json_header; printf '{"ok":true}'; exit 0
 
 		;;
@@ -3920,7 +4037,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		oldt=$(uci -q get "nikki.@rule[$idx].type"); oldn=$(uci -q get "nikki.@rule[$idx].node")
 		ntype=$(get_param type); case "$ntype" in DOMAIN-SUFFIX|DOMAIN|DOMAIN-KEYWORD|GEOSITE|IP-CIDR|GEOIP) uci set "nikki.@rule[$idx].type=$ntype" ;; esac
 		nnode=$(get_param node); case "$nnode" in PROXY|DIRECT|REJECT|"$EXIT_GROUP") uci set "nikki.@rule[$idx].node=$nnode" ;; esac
-		uci commit nikki; apply_nikki; sleep 3
+		uci commit nikki; apply_nikki_rules; sleep 3
 		if ! pgrep -f /usr/bin/mihomo >/dev/null; then
 			# a bad combo (e.g. IP-CIDR with a domain value) can break the config — revert
 			uci set "nikki.@rule[$idx].type=$oldt"; uci set "nikki.@rule[$idx].node=$oldn"; uci commit nikki; apply_nikki
@@ -4784,7 +4901,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			add_rule DOMAIN-SUFFIX "$_dm" "$(default_rule_node)" "" check
 			added=$((added + 1))
 		done
-		[ "$added" -gt 0 ] && { uci commit nikki; apply_nikki; }
+		[ "$added" -gt 0 ] && { uci commit nikki; apply_nikki_rules; }
 		json_header; printf '{"ok":true,"added":%d,"skipped":%d}' "$added" "$skipped"; exit 0
 		;;
 	tracestart)
