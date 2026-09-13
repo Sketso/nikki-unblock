@@ -38,3 +38,14 @@ if [ "$q" = 0 ] || [ "$r" = 0 ]; then
 	logger -t nikki-unblock-z2wd "zapret2 desync missing (queue=$q running=$r) -> restart"
 	/etc/init.d/zapret2 restart
 fi
+
+# The queue rules pick connections by `ct original packets 1-20`, and conntrack only counts packets while
+# nf_conntrack_acct=1 (zapret2 turns it on at start). Anything that turns it off afterwards — a sysctl.conf
+# line, another package, a capture script — leaves every check above green while not one packet reaches
+# nfqws2: YouTube dies on every device. It happened on a live router. Re-enabling needs no restart.
+_acct=/proc/sys/net/netfilter/nf_conntrack_acct
+if [ -f "$_acct" ] && [ "$(cat "$_acct")" = 0 ] && z2_up \
+	&& nft list chain inet zapret2 postnat 2>/dev/null | grep -q 'ct original packets'; then
+	echo 1 > "$_acct"
+	logger -t nikki-unblock-z2wd "nf_conntrack_acct was 0, so zapret2 queued nothing -> set back to 1"
+fi

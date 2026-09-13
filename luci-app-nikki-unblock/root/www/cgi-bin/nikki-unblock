@@ -2286,7 +2286,8 @@ z2_list_json() {
 # bypassing") — same check as the watchdog: the zapret2 postnat chain must queue to nfqws2
 z2_desync_ok() {
 	[ "$(nft list chain inet zapret2 postnat 2>/dev/null | grep -c queue)" -gt 0 ] \
-		&& z2_running
+		&& z2_running \
+		&& [ "$(cat /proc/sys/net/netfilter/nf_conntrack_acct 2>/dev/null)" != 0 ]   # rules key on ct packet counters: see the watchdog
 }
 # installed zapret2 version, e.g. "v1.0.2" (from the nfqws2 binary itself)
 z2_cur_ver() {
