@@ -239,6 +239,51 @@ if [ -z "$(uci -q get nikki-unblock.config.mig_z2_voicefake 2>/dev/null)" ] && [
 	fi
 fi
 
+# --- Discord voice websocket on Cloudflare's alternative HTTPS ports -------------------------------
+# Discord moved the voice websocket to 162.159.x:2087 (2083 seen) and dials it by bare IP, so no domain
+# rule ever matches it: MATCH,DIRECT, the DPI drops the discord.media SNI, and voice hangs on
+# "Connecting" without sending one UDP packet. The manifest's new "tcpports" covers it, but presets only
+# re-read the manifest on autosync (off by default) or a manual toggle — so a router with Discord
+# switched on would keep the broken voice after the upgrade. Give the rule to every preset that is on.
+if [ -z "$(uci -q get nikki-unblock.config.mig_discord_altports 2>/dev/null)" ]; then
+	_am='((NETWORK,tcp),(DST-PORT,2053/2083/2087/2096))'
+	_ac=0
+	for _ap in discord discord-client; do
+		_own=""; _node=""; _have=""; _i=0
+		while uci -q get "nikki.@rule[$_i]" >/dev/null 2>&1; do
+			[ "$(uci -q get "nikki.@rule[$_i].type")" = AND ] && [ "$(uci -q get "nikki.@rule[$_i].matcher")" = "$_am" ] && _have="$_i"
+			case " $(uci -q get "nikki.@rule[$_i].src" 2>/dev/null) " in
+				*" $_ap "*) [ -z "$_own" ] && { _own=1; _node=$(uci -q get "nikki.@rule[$_i].node"); } ;;
+			esac
+			_i=$((_i + 1))
+		done
+		[ -n "$_own" ] || continue
+		if [ -z "$_have" ]; then
+			uci -q add nikki rule >/dev/null
+			uci -q set "nikki.@rule[-1].enabled=1"
+			uci -q set "nikki.@rule[-1].type=AND"
+			uci -q set "nikki.@rule[-1].matcher=$_am"
+			uci -q set "nikki.@rule[-1].node=${_node:-UNBLOCK}"
+			uci -q set "nikki.@rule[-1].src=$_ap"
+			_ac=$((_ac + 1))
+		else
+			_src=$(uci -q get "nikki.@rule[$_have].src" 2>/dev/null)
+			case " $_src " in
+				*" $_ap "*) ;;
+				*) uci -q set "nikki.@rule[$_have].src=$(echo "$_src $_ap" | sed 's/^ *//')"; _ac=$((_ac + 1)) ;;
+			esac
+		fi
+	done
+	if [ "$_ac" -gt 0 ]; then
+		uci -q commit nikki
+		# into the running mihomo without a restart; only if that is impossible, the guarded restart below
+		[ -x /www/cgi-bin/nikki-unblock ] && /www/cgi-bin/nikki-unblock _hotrules >/dev/null 2>&1 || NIKKI_DIRTY=1
+		logger -t nikki-unblock "migration: Discord voice websocket (TCP 2053/2083/2087/2096) now goes through the tunnel"
+	fi
+	uci -q set nikki-unblock.config.mig_discord_altports='1'
+	uci -q commit nikki-unblock
+fi
+
 # Apply the nikki-side migrations above, under the same memory rule as the DNS one below: the commits
 # are the fix, a restart only decides whether they take effect now or at the next start.
 if [ "${NIKKI_DIRTY:-0}" = 1 ]; then

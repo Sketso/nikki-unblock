@@ -3718,6 +3718,9 @@ nodes_json() {
 }
 # the current Discord voice profile lines, for the install hook's migration of older strategy bodies
 [ "$1" = "_z2voice" ] && { z2_voice_fake; printf '\n%s\n' "$Z2_VOICE_CLAIM"; exit 0; }
+# install-time migrations: push committed rule changes into the running mihomo; no full-reload fallback
+# here (non-zero instead), so the caller can apply its own MemAvailable rule before restarting nikki
+[ "$1" = "_hotrules" ] && { _hot_rules; exit $?; }
 [ "$1" = "_selfrestore" ] && {
 	[ -s "$SELF_PRESNAP" ] || { echo "!! no pre-update snapshot"; exit 1; }
 	snap_restore "$SELF_PRESNAP"; _rc=$?
