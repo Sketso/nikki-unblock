@@ -284,6 +284,33 @@ if [ -z "$(uci -q get nikki-unblock.config.mig_discord_altports 2>/dev/null)" ];
 	uci -q commit nikki-unblock
 fi
 
+# --- Vivox voice chat: keep mihomo's sniffer off its connections ---------------------------------
+# Vivox (voice in Wardogs, Valorant, League and many others) dials its SIP server by bare IP and puts its
+# SIP realm in the TLS SNI — wardxp.vivox.com for Wardogs, a name with no DNS record anywhere. mihomo's
+# sniffer reads that SNI and, with override-destination on, swaps the server IP for the name; resolving
+# it fails and the connection dies after the ClientHello: "voice services unavailable", every launch,
+# whatever the route. Measured 2026-10-23: same IP + SNI, TLS up in 0.4 s from an unproxied socket, EOF
+# through mihomo; with the skip in place voice connected at once. Applies to every Vivox title, so it is
+# not tied to a preset. A skip-list the user keeps switched OFF with entries of their own is left alone
+# — turning it on would silently activate those too.
+if [ -z "$(uci -q get nikki-unblock.config.mig_sniff_vivox 2>/dev/null)" ] && uci -q get nikki.mixin >/dev/null 2>&1; then
+	_sl=$(uci -q get nikki.mixin.sniffer_ignore_domain_names 2>/dev/null)
+	if [ "$(uci -q get nikki.mixin.sniffer_ignore_domain_name 2>/dev/null)" = 1 ] || [ -z "$_sl" ]; then
+		_sv=0
+		printf '%s\n' $_sl | grep -qxF '+.vivox.com' || { uci -q add_list nikki.mixin.sniffer_ignore_domain_names='+.vivox.com'; _sv=1; }
+		[ "$(uci -q get nikki.mixin.sniffer_ignore_domain_name 2>/dev/null)" = 1 ] || { uci -q set nikki.mixin.sniffer_ignore_domain_name=1; _sv=1; }
+		if [ "$_sv" = 1 ]; then
+			uci -q commit nikki
+			[ -x /www/cgi-bin/nikki-unblock ] && /www/cgi-bin/nikki-unblock _hotsniff >/dev/null 2>&1 || NIKKI_DIRTY=1
+			logger -t nikki-unblock "migration: mihomo's sniffer now skips Vivox (game voice chat)"
+		fi
+	else
+		logger -t nikki-unblock "migration: sniffer skip-list is switched off with entries of its own — add +.vivox.com by hand for game voice chat"
+	fi
+	uci -q set nikki-unblock.config.mig_sniff_vivox='1'
+	uci -q commit nikki-unblock
+fi
+
 # Apply the nikki-side migrations above, under the same memory rule as the DNS one below: the commits
 # are the fix, a restart only decides whether they take effect now or at the next start.
 if [ "${NIKKI_DIRTY:-0}" = 1 ]; then

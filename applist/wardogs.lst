@@ -5,3 +5,6 @@
 # Gameplay is NOT here: that is UDP to bare IPs, it has no hostname to match, and zapret2's games
 # profile handles it directly — routing it through a node would only add latency.
 pragmaengine.com
+# Epic Online Services: the client calls api.epicgames.dev at every launch, and since 2026-10 the
+# direct path is dropped (no byte back, measured 2026-10-23); through the tunnel it answers in ~130 ms.
+epicgames.dev

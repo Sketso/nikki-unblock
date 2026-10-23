@@ -656,15 +656,7 @@ _hot_rules() {
 	_run=$(cat "$_hr/run")
 	cmp -s "$_hr/old.json" "$_hr/new.json" && { rm -rf "$_hr"; return 0; }   # nothing changed for mihomo
 	NEWR="$_hr/new.json" yq -M '.rules = load(env(NEWR))' "$_run" > "$_hr/config.yaml" || { rm -rf "$_hr"; return 1; }
-	# the whole config as a payload: mihomo only accepts a PATH under its own home directory
-	CFGF="$_hr/config.yaml" yq -M -o json -n '{"payload": load_str(env(CFGF))}' > "$_hr/body.json" || { rm -rf "$_hr"; return 1; }
-	_code=$(curl -s -m 20 -o "$_hr/resp" -w '%{http_code}' -X PUT -H "Authorization: Bearer $(mihomo_secret)" \
-		-H 'Content-Type: application/json' --data-binary @"$_hr/body.json" "$MIHOMO_API/configs?force=true" 2>/dev/null)
-	if [ "$_code" != 204 ]; then
-		logger -t nikki-unblock "rules: mihomo refused the hot reload ($_code: $(head -c 160 "$_hr/resp" 2>/dev/null)) -> full nikki reload"
-		rm -rf "$_hr"; return 1
-	fi
-	cp -f "$_hr/config.yaml" "$_run"   # keep the file mihomo was started from in step with what it runs
+	_hot_put "$_hr" "$_run" rules || { rm -rf "$_hr"; return 1; }
 	_want=$(yq -M '. | length' "$_hr/new.json")
 	_have=$(curl -s -m 6 -H "Authorization: Bearer $(mihomo_secret)" "$MIHOMO_API/rules" 2>/dev/null | jsonfilter -e '@.rules[*].type' 2>/dev/null | grep -c .)
 	if [ "$_have" != "$_want" ]; then
@@ -674,6 +666,40 @@ _hot_rules() {
 	_hot_recheck_groups
 	_hot_close_changed "$_hr/old.json" "$_hr/new.json"
 	logger -t nikki-unblock "rules applied without restarting nikki ($_want rules)"
+	rm -rf "$_hr"; return 0
+}
+# Hand $1/config.yaml to the running mihomo and, once it took it, make it the file mihomo starts from ($2).
+# The whole config as a payload: mihomo only accepts a PATH under its own home directory.
+_hot_put() {   # $1=work dir holding config.yaml  $2=running config path  $3=what (for the log)
+	CFGF="$1/config.yaml" yq -M -o json -n '{"payload": load_str(env(CFGF))}' > "$1/body.json" || return 1
+	_code=$(curl -s -m 20 -o "$1/resp" -w '%{http_code}' -X PUT -H "Authorization: Bearer $(mihomo_secret)" \
+		-H 'Content-Type: application/json' --data-binary @"$1/body.json" "$MIHOMO_API/configs?force=true" 2>/dev/null)
+	if [ "$_code" != 204 ]; then
+		logger -t nikki-unblock "$3: mihomo refused the hot reload ($_code: $(head -c 160 "$1/resp" 2>/dev/null)) -> full nikki reload"
+		return 1
+	fi
+	cp -f "$1/config.yaml" "$2"   # keep the file mihomo was started from in step with what it runs
+}
+# The sniffer's skip-list, pushed the same way. nikki's mixin.uc renders it from UCI; only that one key of
+# the running config is replaced. Exists for Vivox (see mig_sniff_vivox): it names a SIP realm in the SNI
+# that has no DNS record, and the sniffer's override-destination swapped the server IP for that name.
+_hot_sniffer() {
+	[ -f /etc/nikki/scripts/include.sh ] && command -v yq >/dev/null 2>&1 && command -v ucode >/dev/null 2>&1 || return 1
+	pgrep -f /usr/bin/mihomo >/dev/null 2>&1 || return 1
+	[ "$(uci -q get nikki.config.core_only 2>/dev/null)" = 1 ] && return 1
+	_hr="/tmp/nu-hots.$$"; rm -rf "$_hr"; mkdir -p "$_hr"
+	( . /etc/nikki/scripts/include.sh || exit 1
+	  [ -f "$RUN_PROFILE_PATH" ] && [ -f "$MIXIN_UC" ] || exit 1
+	  ucode -S "$MIXIN_UC" 2>/dev/null | yq -M -p json -o json '.sniffer.skip-domain // []' > "$_hr/new.json" || exit 1
+	  printf '%s\n' "$RUN_PROFILE_PATH" > "$_hr/run"
+	) || { rm -rf "$_hr"; return 1; }
+	_run=$(cat "$_hr/run")
+	yq -M -o json '.sniffer.skip-domain // []' "$_run" > "$_hr/old.json" 2>/dev/null
+	cmp -s "$_hr/old.json" "$_hr/new.json" && { rm -rf "$_hr"; return 0; }
+	NEWS="$_hr/new.json" yq -M '.sniffer.skip-domain = load(env(NEWS))' "$_run" > "$_hr/config.yaml" || { rm -rf "$_hr"; return 1; }
+	_hot_put "$_hr" "$_run" sniffer || { rm -rf "$_hr"; return 1; }
+	_hot_recheck_groups
+	logger -t nikki-unblock "sniffer skip-list applied without restarting nikki"
 	rm -rf "$_hr"; return 0
 }
 # A config reload rebuilds every proxy group, and a fallback/url-test group forgets which of its exits are dead:
@@ -3721,6 +3747,7 @@ nodes_json() {
 # install-time migrations: push committed rule changes into the running mihomo; no full-reload fallback
 # here (non-zero instead), so the caller can apply its own MemAvailable rule before restarting nikki
 [ "$1" = "_hotrules" ] && { _hot_rules; exit $?; }
+[ "$1" = "_hotsniff" ] && { _hot_sniffer; exit $?; }
 [ "$1" = "_selfrestore" ] && {
 	[ -s "$SELF_PRESNAP" ] || { echo "!! no pre-update snapshot"; exit 1; }
 	snap_restore "$SELF_PRESNAP"; _rc=$?
