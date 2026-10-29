@@ -204,6 +204,22 @@ if [ -z "$(uci -q get nikki-unblock.config.mig_discord_updater 2>/dev/null)" ]; 
 	uci -q commit nikki-unblock
 fi
 
+# --- Block QUIC: reject instead of a silent drop ---------------------------------------------------
+# The «Block QUIC» switch used to drop UDP/443, so a client trying HTTP/3 heard nothing and sat out its
+# QUIC handshake timeout before falling back to TCP. The CGI now writes a reject rule; an install that
+# already has the switch on keeps the old file until it is toggled, so rewrite that one line here. A file
+# without the exact old rule (switch off, already migrated, edited by hand) is left as it is.
+if [ -z "$(uci -q get nikki-unblock.config.mig_quic_reject 2>/dev/null)" ]; then
+	_qf=/etc/nftables.d/20-nipret-block-quic.nft
+	if [ -f "$_qf" ] && grep -q 'udp dport 443 drop' "$_qf" 2>/dev/null; then
+		sed -i 's/udp dport 443 drop/udp dport 443 reject/' "$_qf"
+		fw4 reload >/dev/null 2>&1 || /etc/init.d/firewall reload >/dev/null 2>&1
+		logger -t nikki-unblock "migration: «Block QUIC» now refuses UDP/443 instead of dropping it — clients fall back to TCP without waiting"
+	fi
+	uci -q set nikki-unblock.config.mig_quic_reject='1'
+	uci -q commit nikki-unblock
+fi
+
 # --- Discord voice on Google Cloud servers --------------------------------------------------------
 # Channels served from 35.217.x (UDP 50000+) never got an answer to the IP discovery, so they hung on
 # "RTC connecting"; a zero-filled fake in front of it opens them (why zeros: see z2_voice_fake in the
